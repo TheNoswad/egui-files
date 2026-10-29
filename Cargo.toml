@@ -12,6 +12,10 @@ egui = "0.36"
 egui-phosphor = "0.14"
 egui_dock = { version = "0.21", features = ["serde"] }
 egui_extras = { version = "0.36", default-features = false }
+libloading = "0.8"
+md-5 = "0.10"
+percent-encoding = "2"
+png = "0.18"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico", "tiff"] }
 notify = "8"
 open = "5.4.5"
@@ -32,3 +36,5 @@ wayland-client = "0.31"
 wayland-backend = { version = "0.3", features = ["client_system"] }
 raw-window-handle = "0.6"
 libc = "0.2"
+# Headless OpenGL context for libmpv's renderer.
+glow = "0.17"

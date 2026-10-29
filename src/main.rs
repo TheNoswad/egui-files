@@ -11,8 +11,10 @@ mod preview;
 mod tab;
 mod terminal;
 mod terminal_panel;
+mod thumbnails;
 mod trash;
 mod tree;
+mod video;
 mod views;
 mod watcher;
 #[cfg(target_os = "linux")]

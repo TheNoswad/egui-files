@@ -1,10 +1,11 @@
-//! Large-icon grid view with optional image thumbnails.
+//! Large-icon grid view with optional image thumbnails; hovered videos play inline.
 
-use egui::{Align, Color32, FontId, Rect, ScrollArea, Sense, Ui, pos2, text::LayoutJob, vec2};
+use egui::{Align, Color32, FontId, Id, Rect, ScrollArea, Sense, Ui, pos2, text::LayoutJob, vec2};
 
 use crate::{
-    images,
+    images, preview,
     tab::{Action, BrowserTab, Shared},
+    video,
 };
 
 pub fn show(
@@ -62,13 +63,35 @@ pub fn show(
                                 )
                             })
                             .flatten();
-                        if let Some(thumbnail) = thumbnail {
-                            let size = thumbnail.texture.size_vec2();
-                            let scale =
-                                (icon_rect.width() / size.x).min(icon_rect.height() / size.y);
+                        let thumbnail = thumbnail.map(|thumbnail| {
+                            (thumbnail.texture.id(), thumbnail.texture.size_vec2())
+                        });
+                        let playing = (shared.show_thumbnails
+                            && response.hovered()
+                            && video::is_video(&entry.path))
+                        .then(|| {
+                            // One player for the whole app; hovering another video switches it.
+                            let player = shared
+                                .videos
+                                .player(Id::new("hover-video"), &entry.path, video::Mode::Hover)
+                                .ok()?;
+                            let size = player
+                                .status()
+                                .video_size
+                                .map(|[w, h]| vec2(w as f32, h as f32))
+                                .or(thumbnail.map(|(_, size)| size))?;
+                            let rect = preview::fit(size, icon_rect);
+                            let pixels = rect.size() * ui.pixels_per_point();
+                            player.set_size([pixels.x.round() as u32, pixels.y.round() as u32]);
+                            Some((player.frame()?.id(), rect))
+                        })
+                        .flatten()
+                        .or(thumbnail
+                            .map(|(texture, size)| (texture, preview::fit(size, icon_rect))));
+                        if let Some((texture, rect)) = playing {
                             ui.painter().image(
-                                thumbnail.texture.id(),
-                                Rect::from_center_size(icon_rect.center(), size * scale),
+                                texture,
+                                rect,
                                 Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
                                 Color32::WHITE,
                             );

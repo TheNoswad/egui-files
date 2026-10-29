@@ -18,6 +18,7 @@ use crate::{
     terminal_panel::TerminalPanel,
     trash::{self, TrashCount, TrashTab},
     tree::{FolderTree, TreeAction},
+    video::Videos,
     watcher::DirWatcher,
 };
 
@@ -48,6 +49,8 @@ struct Persisted {
     show_terminal: bool,
     #[serde(default)]
     terminal: TerminalPanel,
+    #[serde(default = "default_volume")]
+    video_volume: f64,
 }
 
 fn default_true() -> bool {
@@ -56,6 +59,10 @@ fn default_true() -> bool {
 
 fn default_icon_size() -> f32 {
     64.0
+}
+
+fn default_volume() -> f64 {
+    crate::video::DEFAULT_VOLUME
 }
 
 #[derive(Serialize)]
@@ -69,6 +76,7 @@ struct PersistedRef<'a> {
     icon_size: f32,
     show_terminal: bool,
     terminal: &'a TerminalPanel,
+    video_volume: f64,
 }
 
 pub struct FilesApp {
@@ -121,6 +129,7 @@ impl FilesApp {
                 icon_size: default_icon_size(),
                 show_terminal: false,
                 terminal: TerminalPanel::default(),
+                video_volume: default_volume(),
             });
         let Persisted {
             dock,
@@ -132,6 +141,7 @@ impl FilesApp {
             icon_size,
             show_terminal,
             mut terminal,
+            video_volume,
         } = persisted;
         if terminal.is_empty() {
             terminal = TerminalPanel::default();
@@ -145,6 +155,11 @@ impl FilesApp {
                 show_thumbnails,
                 icon_size,
                 images: ImageCache::new(&cc.egui_ctx),
+                videos: {
+                    let mut videos = Videos::new(&cc.egui_ctx);
+                    videos.set_volume(video_volume);
+                    videos
+                },
                 texts: TextCache::default(),
                 jobs: Jobs::new(&cc.egui_ctx),
                 clipboard: None,
@@ -619,6 +634,7 @@ impl eframe::App for FilesApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.shared.images.begin_frame();
+        self.shared.videos.begin_frame();
         self.sync_with_disk();
         self.quit_guard(&ctx);
         self.shared.focused_tab = self.dock.find_active_focused().map(|(_, tab)| tab.id());
@@ -750,6 +766,7 @@ impl eframe::App for FilesApp {
             icon_size: self.shared.icon_size,
             show_terminal: self.show_terminal,
             terminal: &self.terminal,
+            video_volume: self.shared.videos.volume(),
         };
         eframe::set_value(storage, eframe::APP_KEY, &state);
     }

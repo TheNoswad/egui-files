@@ -1,4 +1,6 @@
-//! Background image decoding with an LRU cache of GPU textures.
+//! Background image decoding with an LRU cache of GPU textures. Thumbnails
+//! come from the shared system cache when possible, which is also how videos
+//! get theirs (see [`crate::thumbnails`]).
 //!
 //! Views call [`ImageCache::get`] every frame for the images they want to
 //! draw. Missing images are queued for a pool of worker threads, newest
@@ -18,6 +20,8 @@ use std::{
 use egui::{ColorImage, Context, TextureHandle, TextureOptions};
 use image::ImageDecoder;
 
+use crate::thumbnails;
+
 /// Longest side of thumbnails used by the grid and columns views.
 pub const THUMBNAIL_SIZE: u32 = 256;
 /// Longest side of images shown in the preview pane.
@@ -33,7 +37,16 @@ const EXTENSIONS: &[&str] = &[
     "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "tif", "tiff",
 ];
 
+/// Largest size looked up in the system thumbnail cache; bigger requests
+/// (previews) decode the original.
+const MAX_CACHED_SIDE: u32 = 1024;
+
+/// Whether a picture can be made of the file: an image, or a video's thumbnail.
 pub fn is_supported(path: &Path) -> bool {
+    is_image(path) || crate::video::is_video(path)
+}
+
+pub fn is_image(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
@@ -258,7 +271,7 @@ fn worker(queue: &Queue, sender: &Sender<Done>, ctx: &Context) {
                 jobs = queue.ready.wait(jobs).expect("image queue poisoned");
             }
         };
-        let result = decode(&key.path, key.max_side);
+        let result = decode(&key.path, key.modified, key.max_side);
         if sender.send(Done { key, result }).is_err() {
             return;
         }
@@ -266,7 +279,33 @@ fn worker(queue: &Queue, sender: &Sender<Done>, ctx: &Context) {
     }
 }
 
-fn decode(path: &Path, max_side: u32) -> Result<(ColorImage, [u32; 2]), String> {
+fn decode(
+    path: &Path,
+    modified: Option<SystemTime>,
+    max_side: u32,
+) -> Result<(ColorImage, [u32; 2]), String> {
+    let cached = (max_side <= MAX_CACHED_SIDE)
+        .then(|| thumbnails::from_cache(path, modified, max_side))
+        .flatten();
+    let thumbnail = match cached {
+        Some(thumbnail) => Some(thumbnail),
+        None if crate::video::is_video(path) => {
+            Some(thumbnails::generate_video(path, modified, max_side)?)
+        }
+        None => None,
+    };
+    if let Some(thumbnail) = thumbnail {
+        let image = thumbnail.image;
+        let size = [image.width() as usize, image.height() as usize];
+        let original_size = thumbnail
+            .original_size
+            .unwrap_or([image.width(), image.height()]);
+        return Ok((
+            ColorImage::from_rgba_unmultiplied(size, &image),
+            original_size,
+        ));
+    }
+
     let mut decoder = image::ImageReader::open(path)
         .map_err(|e| e.to_string())?
         .with_guessed_format()

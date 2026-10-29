@@ -242,6 +242,7 @@ fn preview_file(
                 ui,
                 entry,
                 &mut shared.images,
+                &mut shared.videos,
                 &mut shared.texts,
                 images::THUMBNAIL_SIZE,
                 actions,

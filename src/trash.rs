@@ -736,6 +736,7 @@ mod tests {
             focused_tab: Some(1),
             app_actions: Vec::new(),
             images: ImageCache::new(&ctx),
+            videos: crate::video::Videos::new(&ctx),
             texts: TextCache::default(),
             jobs: Jobs::new(&ctx),
         };

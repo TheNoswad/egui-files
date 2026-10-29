@@ -19,6 +19,7 @@ use crate::{
     jobs::{JobKind, Jobs},
     places,
     preview::{self, TextCache},
+    video::Videos,
     views::{self, ViewMode},
 };
 
@@ -32,6 +33,7 @@ pub struct Shared {
     pub focused_tab: Option<u64>,
     pub app_actions: Vec<AppAction>,
     pub images: ImageCache,
+    pub videos: Videos,
     pub texts: TextCache,
     pub jobs: Jobs,
 }
@@ -375,6 +377,7 @@ impl BrowserTab {
                                 ui,
                                 entry,
                                 &mut shared.images,
+                                &mut shared.videos,
                                 &mut shared.texts,
                                 images::PREVIEW_SIZE,
                                 &mut actions,
@@ -1123,6 +1126,7 @@ mod tests {
             focused_tab: Some(tab.id),
             app_actions: Vec::new(),
             images: ImageCache::new(ctx),
+            videos: Videos::new(ctx),
             texts: TextCache::default(),
             jobs: Jobs::new(ctx),
         }
@@ -1598,6 +1602,92 @@ mod tests {
                 .is_ready(&pic, modified, images::THUMBNAIL_SIZE)
         );
         assert!(shared.images.is_ready(&pic, modified, images::PREVIEW_SIZE));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Needs libmpv, ffmpeg and a GPU.
+    #[test]
+    #[ignore]
+    fn videos_play_in_preview_pane_and_on_hover() {
+        let root = fixture("video-preview");
+        let b = root.join("a/b");
+        let clip = b.join("clip.mp4");
+        let status = std::process::Command::new("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=s=320x180:d=2",
+            ])
+            .args(["-pix_fmt", "yuv420p"])
+            .arg(&clip)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let ctx = Context::default();
+        let mut tab = BrowserTab::new(1, b.clone());
+        tab.view = ViewMode::Grid;
+        tab.show_preview = true;
+        let mut shared = shared(&ctx, &tab);
+        run_frame(&ctx, &mut tab, &mut shared, &[]);
+        tab.selection = HashSet::from([clip.clone()]);
+
+        let preview_ready = |shared: &Shared| {
+            shared.videos.players().any(|(id, player)| {
+                let status = player.status();
+                id != Id::new("hover-video")
+                    && player.frame().is_some()
+                    && status.paused
+                    && status.video_size == Some([320, 180])
+                    && (status.duration - 2.0).abs() < 0.1
+                    // Rendered at the preview pane's width, in 16:9.
+                    && player.size()[0] > 200
+                    && player.size()[0].abs_diff(player.size()[1] * 16 / 9) <= 2
+            })
+        };
+        let hover_ready = |shared: &Shared| {
+            shared.videos.players().any(|(id, player)| {
+                id == Id::new("hover-video") && player.frame().is_some() && !player.status().paused
+            })
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        // The first grid cell is at the top left, below the toolbar.
+        let cell = egui::pos2(50.0, 90.0);
+        while !(preview_ready(&shared) && hover_ready(&shared)) {
+            assert!(std::time::Instant::now() < deadline, "videos did not play");
+            shared.images.begin_frame();
+            shared.videos.begin_frame();
+            run_events(
+                &ctx,
+                &mut tab,
+                &mut shared,
+                vec![egui::Event::PointerMoved(cell)],
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        // The grid also got a regular thumbnail for the video.
+        let modified = tab.entries()[0].modified;
+        assert!(
+            shared
+                .images
+                .is_ready(&clip, modified, images::THUMBNAIL_SIZE)
+        );
+
+        // Moving away stops the hover player.
+        for _ in 0..3 {
+            shared.videos.begin_frame();
+            run_events(&ctx, &mut tab, &mut shared, vec![egui::Event::PointerGone]);
+        }
+        assert!(
+            !shared
+                .videos
+                .players()
+                .any(|(id, _)| id == Id::new("hover-video"))
+        );
 
         std::fs::remove_dir_all(root).unwrap();
     }
