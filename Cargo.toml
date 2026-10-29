@@ -1,0 +1,16 @@
+[package]
+name = "egui-files"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+directories = "6.0.0"
+eframe = { version = "0.36", default-features = false, features = ["wgpu", "default_fonts", "persistence", "wayland", "x11"] }
+egui = "0.36"
+egui-phosphor = "0.14"
+egui_dock = { version = "0.21", features = ["serde"] }
+egui_extras = { version = "0.36", default-features = false }
+open = "5.4.5"
+serde = { version = "1.0.229", features = ["derive"] }
+trash = "5.2.9"
