@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     fs::Entry,
-    tab::{Action, BrowserTab},
+    tab::{Action, BrowserTab, Shared},
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,13 +34,13 @@ pub fn show(
     ui: &mut Ui,
     tab: &BrowserTab,
     visible: &[usize],
-    show_hidden: bool,
+    shared: &mut Shared,
     actions: &mut Vec<Action>,
 ) {
     match tab.view {
         ViewMode::Details => details::show(ui, tab, visible, actions),
-        ViewMode::Grid => grid::show(ui, tab, visible, actions),
-        ViewMode::Columns => columns::show(ui, tab, visible, show_hidden, actions),
+        ViewMode::Grid => grid::show(ui, tab, visible, shared, actions),
+        ViewMode::Columns => columns::show(ui, tab, visible, shared, actions),
     }
 }
 

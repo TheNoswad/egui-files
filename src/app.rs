@@ -8,7 +8,9 @@ use egui_phosphor::regular as icon;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    images::ImageCache,
     places::{self, Place},
+    preview::TextCache,
     tab::{AppAction, BrowserTab, Shared},
     tree::{FolderTree, TreeAction},
 };
@@ -32,6 +34,18 @@ struct Persisted {
     sidebar_mode: SidebarMode,
     #[serde(default)]
     tree: FolderTree,
+    #[serde(default = "default_true")]
+    show_thumbnails: bool,
+    #[serde(default = "default_icon_size")]
+    icon_size: f32,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_icon_size() -> f32 {
+    64.0
 }
 
 #[derive(Serialize)]
@@ -41,6 +55,8 @@ struct PersistedRef<'a> {
     bookmarks: &'a [PathBuf],
     sidebar_mode: SidebarMode,
     tree: &'a FolderTree,
+    show_thumbnails: bool,
+    icon_size: f32,
 }
 
 pub struct FilesApp {
@@ -71,6 +87,8 @@ impl FilesApp {
                 bookmarks: Vec::new(),
                 sidebar_mode: SidebarMode::default(),
                 tree: FolderTree::default(),
+                show_thumbnails: default_true(),
+                icon_size: default_icon_size(),
             });
         let Persisted {
             dock,
@@ -78,6 +96,8 @@ impl FilesApp {
             bookmarks,
             sidebar_mode,
             tree,
+            show_thumbnails,
+            icon_size,
         } = persisted;
         let next_tab_id = dock.iter_all_tabs().map(|(_, t)| t.id).max().unwrap_or(0) + 1;
 
@@ -85,6 +105,10 @@ impl FilesApp {
             dock,
             shared: Shared {
                 show_hidden,
+                show_thumbnails,
+                icon_size,
+                images: ImageCache::new(&cc.egui_ctx),
+                texts: TextCache::default(),
                 clipboard: None,
                 focused_tab: None,
                 app_actions: Vec::new(),
@@ -173,6 +197,10 @@ impl FilesApp {
             });
             ui.menu_button("View", |ui| {
                 ui.checkbox(&mut self.shared.show_hidden, "Show hidden files (Ctrl+H)");
+                ui.checkbox(&mut self.shared.show_thumbnails, "Show thumbnails");
+                ui.add(
+                    egui::Slider::new(&mut self.shared.icon_size, 32.0..=192.0).text("Icon size"),
+                );
                 ui.separator();
                 ui.label("Theme");
                 egui::widgets::global_theme_preference_buttons(ui);
@@ -336,6 +364,7 @@ impl TabViewer for Viewer<'_> {
 impl eframe::App for FilesApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.shared.images.begin_frame();
         self.shared.focused_tab = self.dock.find_active_focused().map(|(_, tab)| tab.id);
         self.global_shortcuts(&ctx);
 
@@ -395,6 +424,8 @@ impl eframe::App for FilesApp {
             bookmarks: &self.bookmarks,
             sidebar_mode: self.sidebar_mode,
             tree: &self.tree,
+            show_thumbnails: self.shared.show_thumbnails,
+            icon_size: self.shared.icon_size,
         };
         eframe::set_value(storage, eframe::APP_KEY, &state);
     }

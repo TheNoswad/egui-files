@@ -2,7 +2,9 @@
 
 mod app;
 mod fs;
+mod images;
 mod places;
+mod preview;
 mod tab;
 mod tree;
 mod views;

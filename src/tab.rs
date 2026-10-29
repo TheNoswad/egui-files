@@ -14,15 +14,22 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     fs::{self, Entry, Sort, SortKey},
+    images::{self, ImageCache},
+    preview::{self, TextCache},
     views::{self, ViewMode},
 };
 
 /// State shared by every tab, owned by the app.
 pub struct Shared {
     pub show_hidden: bool,
+    pub show_thumbnails: bool,
+    /// Icon/thumbnail size in the grid view, in points.
+    pub icon_size: f32,
     pub clipboard: Option<FileClipboard>,
     pub focused_tab: Option<u64>,
     pub app_actions: Vec<AppAction>,
+    pub images: ImageCache,
+    pub texts: TextCache,
 }
 
 pub struct FileClipboard {
@@ -76,6 +83,7 @@ pub enum Action {
     Paste,
     CopyPath,
     ToggleHidden,
+    TogglePreview,
 }
 
 struct Rename {
@@ -90,6 +98,8 @@ pub struct BrowserTab {
     pub path: PathBuf,
     #[serde(default)]
     pub view: ViewMode,
+    #[serde(default)]
+    pub show_preview: bool,
     #[serde(default)]
     pub sort: Sort,
     #[serde(default)]
@@ -129,6 +139,7 @@ impl BrowserTab {
             id,
             path,
             view: ViewMode::default(),
+            show_preview: false,
             sort: Sort::default(),
             back: Vec::new(),
             forward: Vec::new(),
@@ -285,6 +296,29 @@ impl BrowserTab {
         }
         let visible = self.visible(shared.show_hidden);
         Panel::bottom(Id::new(("status", self.id))).show(ui, |ui| self.status_bar(ui, &visible));
+        if self.show_preview {
+            Panel::right(Id::new(("preview", self.id)))
+                .resizable(true)
+                .default_size(280.0)
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt(("preview", self.id))
+                        .show(ui, |ui| match self.preview_entry() {
+                            Some(entry) => preview::show(
+                                ui,
+                                entry,
+                                &mut shared.images,
+                                &mut shared.texts,
+                                images::PREVIEW_SIZE,
+                                &mut actions,
+                            ),
+                            None => {
+                                ui.add_space(16.0);
+                                ui.vertical_centered(|ui| ui.weak("Select one item to preview"));
+                            }
+                        });
+                });
+        }
         CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
@@ -297,7 +331,7 @@ impl BrowserTab {
                         });
                     });
                 } else {
-                    views::show(ui, self, &visible, shared.show_hidden, &mut actions);
+                    views::show(ui, self, &visible, shared, &mut actions);
                 }
             });
         self.rename_modal(ui.ctx(), &mut actions);
@@ -378,6 +412,9 @@ impl BrowserTab {
             if key(Modifiers::NONE, Key::F2) {
                 actions.push(Action::StartRename);
             }
+            if key(Modifiers::NONE, Key::F3) {
+                actions.push(Action::TogglePreview);
+            }
             if key(Modifiers::NONE, Key::F5) {
                 actions.push(Action::Refresh);
             }
@@ -448,6 +485,12 @@ impl BrowserTab {
             ui.separator();
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let preview =
+                    Button::selectable(self.show_preview, RichText::new(icon::EYE).size(16.0));
+                if ui.add(preview).on_hover_text("Preview pane (F3)").clicked() {
+                    actions.push(Action::TogglePreview);
+                }
+                ui.separator();
                 for (mode, glyph, tip) in ViewMode::ALL.iter().rev() {
                     let button =
                         Button::selectable(self.view == *mode, RichText::new(*glyph).size(16.0));
@@ -775,6 +818,7 @@ impl BrowserTab {
                 });
             }
             Action::ToggleHidden => shared.show_hidden = !shared.show_hidden,
+            Action::TogglePreview => self.show_preview = !self.show_preview,
         }
     }
 
@@ -840,12 +884,16 @@ mod tests {
         root
     }
 
-    fn shared(tab: &BrowserTab) -> Shared {
+    fn shared(ctx: &Context, tab: &BrowserTab) -> Shared {
         Shared {
             show_hidden: false,
+            show_thumbnails: true,
+            icon_size: 64.0,
             clipboard: None,
             focused_tab: Some(tab.id),
             app_actions: Vec::new(),
+            images: ImageCache::new(ctx),
+            texts: TextCache::default(),
         }
     }
 
@@ -880,7 +928,7 @@ mod tests {
         let ctx = Context::default();
         let mut tab = BrowserTab::new(1, b.clone());
         tab.view = ViewMode::Columns;
-        let mut shared = shared(&tab);
+        let mut shared = shared(&ctx, &tab);
 
         for _ in 0..3 {
             run_frame(&ctx, &mut tab, &mut shared, &[]);
@@ -905,6 +953,46 @@ mod tests {
             Some("file.txt")
         );
         run_frame(&ctx, &mut tab, &mut shared, &[]);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn preview_pane_and_grid_render_images_and_text() {
+        let root = fixture("preview");
+        let b = root.join("a/b");
+        image::RgbaImage::from_pixel(40, 20, image::Rgba([0, 0, 255, 255]))
+            .save(b.join("pic.png"))
+            .unwrap();
+        let ctx = Context::default();
+        let mut tab = BrowserTab::new(1, b.clone());
+        tab.view = ViewMode::Grid;
+        tab.show_preview = true;
+        let mut shared = shared(&ctx, &tab);
+
+        for name in ["pic.png", "file.txt"] {
+            run_frame(&ctx, &mut tab, &mut shared, &[]);
+            tab.selection = HashSet::from([b.join(name)]);
+            for _ in 0..50 {
+                shared.images.begin_frame();
+                run_frame(&ctx, &mut tab, &mut shared, &[]);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+        // Both the grid thumbnail and the larger preview were decoded.
+        let pic = b.join("pic.png");
+        let modified = tab
+            .entries()
+            .iter()
+            .find(|e| e.path == pic)
+            .unwrap()
+            .modified;
+        assert!(
+            shared
+                .images
+                .is_ready(&pic, modified, images::THUMBNAIL_SIZE)
+        );
+        assert!(shared.images.is_ready(&pic, modified, images::PREVIEW_SIZE));
 
         std::fs::remove_dir_all(root).unwrap();
     }

@@ -3,12 +3,13 @@
 
 use std::{hash::Hash, path::Path};
 
-use egui::{Align, Layout, RichText, ScrollArea, Ui, vec2};
+use egui::{Align, Layout, ScrollArea, Ui, vec2};
 use egui_phosphor::regular as icon;
 
 use crate::{
-    fs::{self, Entry},
-    tab::{Action, BrowserTab},
+    fs::Entry,
+    images, preview,
+    tab::{Action, BrowserTab, Shared},
     widgets::{self, ListRow},
 };
 
@@ -26,9 +27,10 @@ pub fn show(
     ui: &mut Ui,
     tab: &BrowserTab,
     visible: &[usize],
-    show_hidden: bool,
+    shared: &mut Shared,
     actions: &mut Vec<Action>,
 ) {
+    let show_hidden = shared.show_hidden;
     let height = ui.available_height();
     ScrollArea::horizontal()
         .id_salt(("columns", tab.id))
@@ -49,7 +51,7 @@ pub fn show(
                         if entry.is_dir {
                             preview_folder(ui, tab, entry, show_hidden, actions);
                         } else {
-                            preview_file(ui, entry, actions);
+                            preview_file(ui, tab, entry, shared, actions);
                         }
                     });
                 }
@@ -209,22 +211,24 @@ fn preview_folder(
     );
 }
 
-fn preview_file(ui: &mut Ui, entry: &Entry, actions: &mut Vec<Action>) {
-    ui.add_space(16.0);
-    ui.vertical_centered(|ui| {
-        ui.label(RichText::new(entry.icon()).size(64.0));
-        ui.add_space(8.0);
-        ui.add(egui::Label::new(RichText::new(&entry.name).strong()).wrap());
-        ui.add_space(8.0);
-        ui.weak(entry.kind());
-        ui.weak(fs::human_size(entry.size));
-        ui.weak(fs::format_time(entry.modified));
-        ui.add_space(8.0);
-        if ui
-            .button(format!("{} Open", icon::ARROW_SQUARE_OUT))
-            .clicked()
-        {
-            actions.push(Action::Activate(entry.path.clone()));
-        }
-    });
+fn preview_file(
+    ui: &mut Ui,
+    tab: &BrowserTab,
+    entry: &Entry,
+    shared: &mut Shared,
+    actions: &mut Vec<Action>,
+) {
+    ScrollArea::vertical()
+        .id_salt(("column-preview", tab.id))
+        .auto_shrink(false)
+        .show(ui, |ui| {
+            preview::show(
+                ui,
+                entry,
+                &mut shared.images,
+                &mut shared.texts,
+                images::THUMBNAIL_SIZE,
+                actions,
+            );
+        });
 }
