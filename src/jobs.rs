@@ -564,4 +564,91 @@ mod tests {
 
         fs::remove_dir_all(root).unwrap();
     }
+
+    /// Moves between two filesystems. Opt-in, since it needs two writable folders
+    /// on different devices:
+    ///
+    /// `EGUI_FILES_DIR_A=/mnt/x EGUI_FILES_DIR_B=/mnt/y cargo test cross_device -- --ignored`
+    #[test]
+    #[ignore]
+    #[cfg(unix)]
+    fn cross_device_move() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let dir = |var| PathBuf::from(std::env::var(var).unwrap_or_else(|_| panic!("set {var}")));
+        let name = format!("egui-files-xdev-{}", std::process::id());
+        let (src, dest) = (
+            dir("EGUI_FILES_DIR_A").join(&name),
+            dir("EGUI_FILES_DIR_B").join(&name),
+        );
+        let _ = (fs::remove_dir_all(&src), fs::remove_dir_all(&dest));
+        fs::create_dir_all(src.join("tree/sub")).unwrap();
+        fs::create_dir_all(&dest).unwrap();
+        assert_ne!(
+            fs::metadata(&src).unwrap().dev(),
+            fs::metadata(&dest).unwrap().dev(),
+            "folders must be on different filesystems"
+        );
+
+        let small = src.join("tree/a.txt");
+        fs::write(&small, "hello").unwrap();
+        fs::set_permissions(&small, fs::Permissions::from_mode(0o640)).unwrap();
+        let mtime = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_600_000_000);
+        fs::File::options()
+            .write(true)
+            .open(&small)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+        let big: Vec<u8> = (0..5 * BUFFER_SIZE + 123)
+            .map(|i| (i % 251) as u8)
+            .collect();
+        fs::write(src.join("tree/sub/big.bin"), &big).unwrap();
+        std::os::unix::fs::symlink("a.txt", src.join("tree/link")).unwrap();
+
+        let mut jobs = Jobs::new(&egui::Context::default());
+        jobs.start(JobKind::Move {
+            sources: vec![src.join("tree")],
+            dest: dest.clone(),
+        });
+        wait(&mut jobs);
+        assert_eq!(errors(&jobs), Vec::<String>::new());
+        assert!(!src.join("tree").exists(), "source removed after move");
+        let moved = dest.join("tree");
+        assert_eq!(fs::read(moved.join("sub/big.bin")).unwrap(), big);
+        let meta = fs::metadata(moved.join("a.txt")).unwrap();
+        assert_eq!(meta.permissions().mode() & 0o777, 0o640);
+        assert_eq!(meta.modified().unwrap(), mtime);
+        assert_eq!(
+            fs::read_link(moved.join("link")).unwrap(),
+            Path::new("a.txt")
+        );
+        let p = &jobs.jobs[0].progress;
+        assert_eq!(p.done_bytes.load(Relaxed), p.total_bytes.load(Relaxed));
+        assert_eq!(p.done_items.load(Relaxed), p.total_items.load(Relaxed));
+
+        // Cancelling right away must never lose data: exactly one complete copy remains.
+        let huge = src.join("huge.bin");
+        let size = 64 * BUFFER_SIZE as u64;
+        fs::File::create(&huge).unwrap().set_len(size).unwrap();
+        jobs.start(JobKind::Move {
+            sources: vec![huge.clone()],
+            dest: dest.clone(),
+        });
+        jobs.jobs
+            .last()
+            .unwrap()
+            .progress
+            .cancel
+            .store(true, Relaxed);
+        wait(&mut jobs);
+        let len = |path: &Path| fs::metadata(path).map(|m| m.len()).ok();
+        match (len(&huge), len(&dest.join("huge.bin"))) {
+            (Some(n), None) | (None, Some(n)) => assert_eq!(n, size),
+            other => panic!("expected exactly one complete copy, got {other:?}"),
+        }
+
+        fs::remove_dir_all(src).unwrap();
+        fs::remove_dir_all(dest).unwrap();
+    }
 }
