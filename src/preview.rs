@@ -260,14 +260,20 @@ fn video_player(
 
     ui.add_space(4.0);
     let mut position = status.position;
-    ui.scope(|ui| {
-        ui.spacing_mut().slider_width = size.x;
-        let slider =
-            egui::Slider::new(&mut position, 0.0..=status.duration.max(0.001)).show_value(false);
-        if ui.add_enabled(status.duration > 0.0, slider).changed() {
-            player.seek(position);
-        }
-    });
+    // Sliders lay themselves out left-aligned in the full width; a row of the
+    // video's width keeps the scrubber centered under it.
+    ui.allocate_ui_with_layout(
+        vec2(size.x, ui.spacing().interact_size.y),
+        Layout::left_to_right(Align::Center),
+        |ui| {
+            ui.spacing_mut().slider_width = size.x;
+            let slider = egui::Slider::new(&mut position, 0.0..=status.duration.max(0.001))
+                .show_value(false);
+            if ui.add_enabled(status.duration > 0.0, slider).changed() {
+                player.seek(position);
+            }
+        },
+    );
     ui.allocate_ui_with_layout(
         vec2(size.x, ui.spacing().interact_size.y),
         Layout::left_to_right(Align::Center),
@@ -328,4 +334,88 @@ fn video_player(
 pub fn fit(size: Vec2, bounds: Rect) -> Rect {
     let scale = (bounds.width() / size.x).min(bounds.height() / size.y);
     Rect::from_center_size(bounds.center(), size * scale)
+}
+
+#[cfg(test)]
+mod tests {
+    use egui::Context;
+
+    use super::*;
+
+    /// In a pane wider than the video (its height is the limit), the scrubber
+    /// used to stay left-aligned. Needs libmpv, ffmpeg and a GPU.
+    #[test]
+    #[ignore]
+    fn video_controls_stay_centered_under_the_video() {
+        let dir = std::env::temp_dir().join(format!("egui-files-scrubber-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let status = std::process::Command::new("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=s=320x180:d=1",
+            ])
+            .args(["-pix_fmt", "yuv420p"])
+            .arg(dir.join("clip.mp4"))
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let entry = fs::read_dir(&dir).unwrap().remove(0);
+
+        let ctx = Context::default();
+        let mut images = ImageCache::new(&ctx);
+        let mut videos = Videos::new(&ctx);
+        let mut texts = TextCache::default();
+        let input = || egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(900.0, 300.0))),
+            ..Default::default()
+        };
+        for _ in 0..3 {
+            videos.begin_frame();
+            let mut output = ctx.run_ui(input(), |ui| {
+                show(
+                    ui,
+                    &entry,
+                    &mut images,
+                    &mut videos,
+                    &mut texts,
+                    256,
+                    &mut Vec::new(),
+                );
+            });
+            output.textures_delta.clear();
+        }
+
+        let widgets: Vec<_> = ctx.viewport(|viewport| {
+            let widgets = &viewport.prev_pass.widgets;
+            widgets
+                .layer_ids()
+                .flat_map(|layer| widgets.get_layer(layer))
+                .map(|widget| (widget.rect, widget.sense))
+                .collect()
+        });
+        let video = widgets
+            .iter()
+            .find(|(rect, sense)| *sense == Sense::click() && rect.height() > 100.0)
+            .expect("video rect")
+            .0;
+        assert!(
+            video.width() < 600.0,
+            "the test needs a height-limited video"
+        );
+        let scrubber = widgets
+            .iter()
+            .find(|(rect, sense)| sense.senses_drag() && (rect.width() - video.width()).abs() < 2.0)
+            .expect("scrubber")
+            .0;
+        assert!(
+            (scrubber.center().x - video.center().x).abs() < 1.0,
+            "scrubber {scrubber:?} not under video {video:?}"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
