@@ -13,6 +13,7 @@ use egui_phosphor::regular as icon;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    dnd::{self, DropTarget},
     fs::{self, Entry, Sort, SortKey},
     images::{self, ImageCache},
     jobs::{JobKind, Jobs},
@@ -91,6 +92,8 @@ pub enum Action {
     /// Copies the path of the folder itself, ignoring the selection.
     CopyFolderPath,
     ClearSelection,
+    /// Start a file operation, e.g. from a drag-and-drop.
+    StartJob(JobKind),
     ToggleHidden,
     TogglePreview,
 }
@@ -283,7 +286,7 @@ impl BrowserTab {
         self.path_edit = None;
     }
 
-    fn selected_paths(&self) -> Vec<PathBuf> {
+    pub fn selected_paths(&self) -> Vec<PathBuf> {
         self.entries()
             .iter()
             .filter(|e| self.selection.contains(&e.path))
@@ -404,6 +407,10 @@ impl BrowserTab {
                 }
                 if background.clicked() && !ui.input(|i| i.modifiers.command || i.modifiers.shift) {
                     actions.push(Action::ClearSelection);
+                }
+                // After the view, so folders under the pointer take the drop first.
+                if let Some(job) = dnd::target(&background, DropTarget::Folder(self.path.clone())) {
+                    actions.push(Action::StartJob(job));
                 }
                 background.context_menu(|ui| self.background_menu(ui, shared, &mut actions));
             });
@@ -998,6 +1005,7 @@ impl BrowserTab {
             Action::Paste => paste(shared, self.path.clone()),
             Action::PasteInto(dest) => paste(shared, dest),
             Action::CopyFolderPath => ctx.copy_text(self.path.display().to_string()),
+            Action::StartJob(job) => shared.jobs.start(job),
             Action::ClearSelection => {
                 self.selection.clear();
                 self.anchor = None;
@@ -1340,6 +1348,119 @@ mod tests {
         }
         assert!(a.join("c/New File").is_file());
         assert!(created.is_file(), "copy keeps the original");
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Drags with the primary button from `from` to `to`, holding `modifiers` on release.
+    fn drag(
+        ctx: &Context,
+        tab: &mut BrowserTab,
+        shared: &mut Shared,
+        from: egui::Pos2,
+        to: egui::Pos2,
+        modifiers: Modifiers,
+    ) {
+        let frame =
+            |tab: &mut BrowserTab, shared: &mut Shared, mut events: Vec<egui::Event>, modifiers| {
+                events.insert(0, egui::Event::ModifiersChanged(modifiers));
+                let input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1000.0, 600.0),
+                    )),
+                    events,
+                    ..Default::default()
+                };
+                let mut output = ctx.run_ui(input, |ui| tab.ui(ui, shared));
+                output.textures_delta.clear();
+            };
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers,
+        };
+        frame(
+            tab,
+            shared,
+            vec![egui::Event::PointerMoved(from)],
+            Modifiers::NONE,
+        );
+        frame(tab, shared, vec![button(from, true)], Modifiers::NONE);
+        for step in 1..=10 {
+            let pos = from + (to - from) * (step as f32 / 10.0);
+            frame(tab, shared, vec![egui::Event::PointerMoved(pos)], modifiers);
+        }
+        frame(tab, shared, vec![button(to, false)], modifiers);
+        frame(tab, shared, vec![], Modifiers::NONE);
+    }
+
+    fn wait_for_jobs(shared: &mut Shared) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while shared.jobs.running() > 0 {
+            assert!(std::time::Instant::now() < deadline, "job timed out");
+            shared.jobs.poll();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn drag_and_drop_moves_or_copies_into_folders() {
+        let root = fixture("dnd");
+        let a = root.join("a");
+        std::fs::write(a.join("x.txt"), "x").unwrap();
+        let ctx = Context::default();
+        let mut tab = BrowserTab::new(1, a.clone());
+        tab.view = ViewMode::Grid;
+        let mut shared = shared(&ctx, &tab);
+        run_frame(&ctx, &mut tab, &mut shared, &[]);
+
+        // Grid cells, left to right: b/, c/, x.txt (folders first).
+        let cell = |i: f32| egui::pos2(48.0 + i * 102.0, 90.0);
+
+        // Plain drop on a folder on the same drive moves.
+        drag(
+            &ctx,
+            &mut tab,
+            &mut shared,
+            cell(2.0),
+            cell(0.0),
+            Modifiers::NONE,
+        );
+        wait_for_jobs(&mut shared);
+        assert!(a.join("b/x.txt").is_file(), "moved into b");
+        assert!(!a.join("x.txt").exists());
+
+        // Ctrl+drop copies: drag the folder b (now holding x.txt) onto c.
+        tab.mark_stale();
+        run_frame(&ctx, &mut tab, &mut shared, &[]);
+        drag(
+            &ctx,
+            &mut tab,
+            &mut shared,
+            cell(0.0),
+            cell(1.0),
+            Modifiers::COMMAND,
+        );
+        wait_for_jobs(&mut shared);
+        assert!(a.join("c/b/x.txt").is_file(), "copied into c");
+        assert!(a.join("b/x.txt").is_file(), "original kept");
+
+        // Dropping onto empty space in its own folder is a no-op.
+        drag(
+            &ctx,
+            &mut tab,
+            &mut shared,
+            cell(0.0),
+            egui::pos2(900.0, 450.0),
+            Modifiers::NONE,
+        );
+        assert_eq!(shared.jobs.running(), 0);
+        assert!(
+            egui::DragAndDrop::payload::<crate::dnd::FileDrag>(&ctx).is_none(),
+            "drag ended"
+        );
 
         std::fs::remove_dir_all(root).unwrap();
     }

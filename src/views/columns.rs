@@ -7,6 +7,7 @@ use egui::{Align, Layout, ScrollArea, Ui, vec2};
 use egui_phosphor::regular as icon;
 
 use crate::{
+    dnd::{self, DropTarget},
     fs::Entry,
     images, preview,
     tab::{Action, BrowserTab, Shared},
@@ -137,6 +138,12 @@ fn other_folder_interaction(
     entry: &Entry,
     actions: &mut Vec<Action>,
 ) {
+    dnd::source(response, || vec![entry.path.clone()]);
+    if entry.is_dir
+        && let Some(job) = dnd::target(response, DropTarget::Folder(entry.path.clone()))
+    {
+        actions.push(Action::StartJob(job));
+    }
     if response.double_clicked() {
         actions.push(Action::Activate(entry.path.clone()));
     } else if response.clicked() {
@@ -194,7 +201,7 @@ fn current_column(
             let entry = &tab.entries()[visible[i]];
             let selected = tab.selection.contains(&entry.path);
             let response = entry_row(ui, entry, selected);
-            super::item_interaction(&response, i, entry, selected, can_paste, actions);
+            super::item_interaction(&response, i, entry, tab, can_paste, actions);
         },
     );
 }

@@ -8,13 +8,14 @@ use egui_phosphor::regular as icon;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    dnd::{self, DropTarget},
     dock_tab::DockTab,
     images::ImageCache,
     jobs::Jobs,
     places::{self, Place},
     preview::TextCache,
     tab::{AppAction, BrowserTab, Shared},
-    trash::TrashTab,
+    trash::{self, TrashCount, TrashTab},
     tree::{FolderTree, TreeAction},
     watcher::DirWatcher,
 };
@@ -73,6 +74,7 @@ pub struct FilesApp {
     places: Vec<Place>,
     drives: Vec<Place>,
     watcher: DirWatcher,
+    trash_count: TrashCount,
     /// Showing the "operations still running" dialog.
     confirm_quit: bool,
     /// The user confirmed quitting with operations running.
@@ -133,6 +135,7 @@ impl FilesApp {
             places: places::standard_places(),
             drives: places::drives(),
             watcher: DirWatcher::new(&cc.egui_ctx),
+            trash_count: TrashCount::new(&cc.egui_ctx),
             confirm_quit: false,
             allow_close: false,
         }
@@ -290,6 +293,7 @@ impl FilesApp {
         match self.tree.ui(ui, &roots, current, self.shared.show_hidden) {
             Some(TreeAction::Navigate(path)) => *target = Some((path, false)),
             Some(TreeAction::OpenInNewTab(path)) => *target = Some((path, true)),
+            Some(TreeAction::Drop(job)) => self.shared.jobs.start(job),
             None => {}
         }
     }
@@ -302,6 +306,8 @@ impl FilesApp {
     ) {
         let mut remove_bookmark = None;
         let mut trash_clicked = false;
+        let mut dropped = None;
+        let mut trash_dropped = None;
         let trash_focused = matches!(
             self.dock.find_active_focused(),
             Some((_, DockTab::Trash(_)))
@@ -317,6 +323,9 @@ impl FilesApp {
             } else if response.middle_clicked() {
                 *target = Some((path.clone(), true));
             }
+            if let Some(job) = dnd::target(&response, DropTarget::Folder(path.clone())) {
+                dropped = Some(job);
+            }
             response
         };
 
@@ -326,12 +335,18 @@ impl FilesApp {
                 for place in &self.places {
                     place_button(ui, place.icon, &place.label, &place.path);
                 }
-                trash_clicked = ui
-                    .add(Button::selectable(
-                        trash_focused,
-                        format!("{}  Trash", icon::TRASH),
-                    ))
-                    .clicked();
+                let count = self
+                    .trash_count
+                    .get()
+                    .filter(|&n| n > 0)
+                    .map(|n| n.to_string())
+                    .unwrap_or_default();
+                let trash = ui.add(
+                    Button::selectable(trash_focused, format!("{}  Trash", icon::TRASH))
+                        .right_text(RichText::new(count).weak()),
+                );
+                trash_clicked = trash.clicked();
+                trash_dropped = dnd::target(&trash, DropTarget::Trash);
 
                 ui.add_space(8.0);
                 ui.label(RichText::new("Bookmarks").small().weak());
@@ -367,6 +382,9 @@ impl FilesApp {
         if trash_clicked {
             self.open_trash();
         }
+        if let Some(job) = dropped.or(trash_dropped) {
+            self.shared.jobs.start(job);
+        }
     }
 }
 
@@ -401,6 +419,17 @@ impl TabViewer for Viewer<'_> {
         }
     }
 
+    /// Tab titles are drop targets for their folder (or the trash).
+    fn on_tab_button(&mut self, tab: &mut DockTab, response: &egui::Response) {
+        let target = match tab {
+            DockTab::Browser(browser) => DropTarget::Folder(browser.path.clone()),
+            DockTab::Trash(_) => DropTarget::Trash,
+        };
+        if let Some(job) = dnd::target(response, target) {
+            self.shared.jobs.start(job);
+        }
+    }
+
     fn on_add(&mut self, path: NodePath) {
         self.add_requests.push(path);
     }
@@ -416,6 +445,9 @@ impl FilesApp {
     /// (it may have touched folders that aren't watched).
     fn sync_with_disk(&mut self) {
         let changed = self.watcher.poll();
+        if trash::watched_dir().is_some_and(|dir| changed.contains(&dir)) {
+            self.trash_count.request();
+        }
         if !changed.is_empty() {
             self.tree.dirs_changed(&changed);
             for (_, tab) in self.dock.iter_all_tabs_mut() {
@@ -423,6 +455,7 @@ impl FilesApp {
             }
         }
         if self.shared.jobs.poll() {
+            self.trash_count.request();
             self.tree.invalidate();
             for (_, tab) in self.dock.iter_all_tabs_mut() {
                 tab.mark_stale();
@@ -520,12 +553,15 @@ impl eframe::App for FilesApp {
             .dock
             .iter_all_tabs()
             .flat_map(|(_, tab)| tab.shown_dirs())
+            // Always watched, to keep the sidebar's trash count current.
+            .chain(trash::watched_dir())
             .collect();
         self.watcher.set_watched(shown);
         if self.dock.iter_all_tabs().next().is_none() {
             let tab = self.make_tab(places::home_dir());
             self.dock.push_to_first_leaf(tab);
         }
+        dnd::paint_preview(&ctx);
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {

@@ -10,6 +10,7 @@ use egui_phosphor::regular as icon;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    dnd::{self, DropTarget},
     fs::Entry,
     tab::{Action, BrowserTab, Shared},
 };
@@ -49,10 +50,25 @@ pub(crate) fn item_interaction(
     response: &Response,
     index: usize,
     entry: &Entry,
-    selected: bool,
+    tab: &BrowserTab,
     can_paste: bool,
     actions: &mut Vec<Action>,
 ) {
+    let selected = tab.selection.contains(&entry.path);
+    // Dragging a selected item drags the whole selection.
+    dnd::source(response, || {
+        if selected {
+            tab.selected_paths()
+        } else {
+            vec![entry.path.clone()]
+        }
+    });
+    if entry.is_dir
+        && let Some(job) = dnd::target(response, DropTarget::Folder(entry.path.clone()))
+    {
+        actions.push(Action::StartJob(job));
+    }
+
     if response.double_clicked() {
         actions.push(Action::Activate(entry.path.clone()));
     } else if response.clicked() {

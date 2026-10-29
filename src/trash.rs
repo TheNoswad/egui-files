@@ -5,6 +5,10 @@ use std::{
     collections::HashSet,
     ffi::OsString,
     path::{Path, PathBuf},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, SystemTime},
 };
 
@@ -17,7 +21,12 @@ use egui_phosphor::regular as icon;
 use serde::{Deserialize, Serialize};
 use trash::{TrashItem, TrashItemSize, os_limited};
 
-use crate::{fs, jobs::JobKind, tab::Shared};
+use crate::{
+    dnd::{self, DropTarget},
+    fs,
+    jobs::JobKind,
+    tab::Shared,
+};
 
 struct Item {
     item: TrashItem,
@@ -63,6 +72,9 @@ enum Action {
     Refresh,
     SortBy(SortKey),
     CopyOriginalPath,
+    /// Moves whatever was copied or cut to the trash.
+    TrashClipboard,
+    StartJob(JobKind),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -92,6 +104,58 @@ pub struct TrashTab {
 
 fn default_sort() -> (SortKey, bool) {
     (SortKey::Deleted, false)
+}
+
+/// Counts trashed items on a background thread, since listing can be slow.
+pub struct TrashCount {
+    ctx: Context,
+    count: Arc<Mutex<Option<usize>>>,
+    running: Arc<AtomicBool>,
+    /// Another count was requested while one was running.
+    again: Arc<AtomicBool>,
+}
+
+impl TrashCount {
+    pub fn new(ctx: &Context) -> Self {
+        let counter = Self {
+            ctx: ctx.clone(),
+            count: Arc::default(),
+            running: Arc::default(),
+            again: Arc::default(),
+        };
+        counter.request();
+        counter
+    }
+
+    pub fn get(&self) -> Option<usize> {
+        *self.count.lock().expect("trash count poisoned")
+    }
+
+    /// Recounts in the background.
+    pub fn request(&self) {
+        if self.running.swap(true, Ordering::AcqRel) {
+            self.again.store(true, Ordering::Release);
+            return;
+        }
+        let (ctx, count, running, again) = (
+            self.ctx.clone(),
+            self.count.clone(),
+            self.running.clone(),
+            self.again.clone(),
+        );
+        std::thread::spawn(move || {
+            loop {
+                again.store(false, Ordering::Release);
+                let n = os_limited::list().map(|items| items.len()).ok();
+                *count.lock().expect("trash count poisoned") = n;
+                ctx.request_repaint();
+                if !again.load(Ordering::Acquire) {
+                    break;
+                }
+            }
+            running.store(false, Ordering::Release);
+        });
+    }
 }
 
 /// The folder whose changes mean the trash changed, for the file watcher.
@@ -230,6 +294,11 @@ impl TrashTab {
                 if background.clicked() {
                     actions.push(Action::ClearSelection);
                 }
+                // The whole tab is a drop zone for moving files to the trash.
+                if let Some(job) = dnd::target(&background, DropTarget::Trash) {
+                    actions.push(Action::StartJob(job));
+                }
+                let clipboard_len = shared.clipboard.as_ref().map(|c| c.paths.len());
                 background.context_menu(|ui| {
                     let has_items = !self.items().is_empty();
                     let mut item =
@@ -242,6 +311,18 @@ impl TrashTab {
                                 ui.close();
                             }
                         };
+                    item(
+                        ui,
+                        clipboard_len.is_some(),
+                        format!(
+                            "{} Move clipboard items to trash{}",
+                            icon::CLIPBOARD,
+                            clipboard_len.map(|n| format!(" ({n})")).unwrap_or_default()
+                        ),
+                        "Ctrl+V",
+                        Action::TrashClipboard,
+                    );
+                    ui.separator();
                     item(
                         ui,
                         has_items,
@@ -289,6 +370,9 @@ impl TrashTab {
             }
             if i.consume_key(Modifiers::NONE, Key::F5) {
                 actions.push(Action::Refresh);
+            }
+            if i.events.iter().any(|e| matches!(e, egui::Event::Paste(_))) {
+                actions.push(Action::TrashClipboard);
             }
         });
     }
@@ -515,6 +599,14 @@ impl TrashTab {
                 }
                 self.anchor = None;
             }
+            Action::TrashClipboard => {
+                if let Some(clipboard) = shared.clipboard.take() {
+                    shared.jobs.start(JobKind::Trash {
+                        paths: clipboard.paths,
+                    });
+                }
+            }
+            Action::StartJob(job) => shared.jobs.start(job),
             Action::CopyOriginalPath => {
                 let paths: Vec<String> = self
                     .items()
@@ -671,8 +763,35 @@ mod tests {
         wait(&mut shared);
         assert!(paths.iter().all(|p| p.exists()), "restored");
 
+        // Ctrl+V in the trash tab trashes what was copied, and the count follows.
+        let count = TrashCount::new(&ctx);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let wait_count = |count: &TrashCount, until: &dyn Fn(usize) -> bool| {
+            while !count.get().is_some_and(until) {
+                assert!(Instant::now() < deadline, "trash count timed out");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            count.get().unwrap()
+        };
+        let before = wait_count(&count, &|_| true);
+        shared.clipboard = Some(crate::tab::FileClipboard {
+            paths: paths.clone(),
+            cut: false,
+        });
+        let paste = egui::Event::Paste(String::new());
+        let input = egui::RawInput {
+            events: vec![paste],
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| tab.ui(ui, &mut shared));
+        output.textures_delta.clear();
+        wait(&mut shared);
+        assert!(paths.iter().all(|p| !p.exists()), "pasted into trash");
+        assert!(shared.clipboard.is_none(), "clipboard consumed");
+        count.request();
+        assert_eq!(wait_count(&count, &|n| n != before), before + 2);
+
         // Delete asks first; confirming purges them for good.
-        trash_both(&mut shared);
         tab.mark_stale();
         frame(&ctx, &mut tab, &mut shared, &[(Modifiers::COMMAND, Key::A)]);
         frame(

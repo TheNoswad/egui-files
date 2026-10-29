@@ -21,7 +21,7 @@ pub fn show(
         .id_salt(("details", tab.id))
         .striped(true)
         .resizable(true)
-        .sense(Sense::click())
+        .sense(Sense::click_and_drag())
         .cell_layout(Layout::left_to_right(Align::Center))
         .column(Column::remainder().at_least(160.0).clip(true))
         .column(Column::initial(90.0).at_least(60.0))
@@ -73,14 +73,7 @@ pub fn show(
                 row.col(|ui| {
                     ui.label(entry.kind());
                 });
-                super::item_interaction(
-                    &row.response(),
-                    index,
-                    entry,
-                    selected,
-                    can_paste,
-                    actions,
-                );
+                super::item_interaction(&row.response(), index, entry, tab, can_paste, actions);
             });
         });
 }

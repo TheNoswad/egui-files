@@ -25,7 +25,7 @@ pub fn show(
                 for (index, &entry_index) in visible.iter().enumerate() {
                     let entry = &tab.entries()[entry_index];
                     let selected = tab.selection.contains(&entry.path);
-                    let (rect, response) = ui.allocate_exact_size(cell, Sense::click());
+                    let (rect, response) = ui.allocate_exact_size(cell, Sense::click_and_drag());
                     if tab.scroll_to == Some(index) {
                         response.scroll_to_me(None);
                     }
@@ -104,7 +104,7 @@ pub fn show(
                         &response,
                         index,
                         entry,
-                        selected,
+                        tab,
                         shared.clipboard.is_some(),
                         actions,
                     );

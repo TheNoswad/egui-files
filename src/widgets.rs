@@ -28,7 +28,7 @@ impl ListRow<'_> {
     /// Allocates a full-width clickable row. Expects `item_spacing.y == 0`.
     pub fn show(self, ui: &mut Ui) -> Response {
         let size = vec2(ui.available_width(), row_height(ui));
-        let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+        let (rect, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
         if !ui.is_rect_visible(rect) {
             return response;
         }

@@ -12,7 +12,9 @@ use egui_phosphor::regular as icon;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    dnd::{self, DropTarget},
     fs,
+    jobs::JobKind,
     places::Place,
     widgets::{self, LEADING_WIDTH, ListRow},
 };
@@ -40,6 +42,8 @@ struct Row<'a> {
 pub enum TreeAction {
     Navigate(PathBuf),
     OpenInNewTab(PathBuf),
+    /// Files were dropped onto a folder.
+    Drop(JobKind),
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -220,6 +224,11 @@ impl FolderTree {
                     }
                     .show(ui)
                     .on_hover_text(row.path.display().to_string());
+                    dnd::source(&response, || vec![row.path.clone()]);
+                    if let Some(job) = dnd::target(&response, DropTarget::Folder(row.path.clone()))
+                    {
+                        action = Some(TreeAction::Drop(job));
+                    }
 
                     let on_caret = response.interact_pointer_pos().is_some_and(|pos| {
                         let caret_left = response.rect.left() + 4.0 + indent;
