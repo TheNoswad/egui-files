@@ -46,6 +46,8 @@ struct Persisted {
     icon_size: f32,
     #[serde(default)]
     show_terminal: bool,
+    #[serde(default)]
+    terminal: TerminalPanel,
 }
 
 fn default_true() -> bool {
@@ -66,6 +68,7 @@ struct PersistedRef<'a> {
     show_thumbnails: bool,
     icon_size: f32,
     show_terminal: bool,
+    terminal: &'a TerminalPanel,
 }
 
 pub struct FilesApp {
@@ -117,6 +120,7 @@ impl FilesApp {
                 show_thumbnails: default_true(),
                 icon_size: default_icon_size(),
                 show_terminal: false,
+                terminal: TerminalPanel::default(),
             });
         let Persisted {
             dock,
@@ -127,7 +131,11 @@ impl FilesApp {
             show_thumbnails,
             icon_size,
             show_terminal,
+            mut terminal,
         } = persisted;
+        if terminal.is_empty() {
+            terminal = TerminalPanel::default();
+        }
         let next_tab_id = dock.iter_all_tabs().map(|(_, t)| t.id()).max().unwrap_or(0) + 1;
 
         Self {
@@ -158,7 +166,7 @@ impl FilesApp {
             drag_out_active: false,
             os_dropped: Vec::new(),
             show_terminal,
-            terminal: TerminalPanel::default(),
+            terminal,
         }
     }
 
@@ -731,6 +739,7 @@ impl eframe::App for FilesApp {
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        self.terminal.remember_dirs();
         let state = PersistedRef {
             dock: &self.dock,
             show_hidden: self.shared.show_hidden,
@@ -740,6 +749,7 @@ impl eframe::App for FilesApp {
             show_thumbnails: self.shared.show_thumbnails,
             icon_size: self.shared.icon_size,
             show_terminal: self.show_terminal,
+            terminal: &self.terminal,
         };
         eframe::set_value(storage, eframe::APP_KEY, &state);
     }

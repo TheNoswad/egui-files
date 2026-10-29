@@ -6,6 +6,8 @@ use egui::{Context, Id, Key, Modifiers, Ui, WidgetText};
 use egui_dock::{DockArea, DockState, Node, NodePath, Split, Style, TabViewer};
 use egui_phosphor::regular as icon;
 
+use serde::{Deserialize, Serialize};
+
 use crate::terminal::{self, Terminal, TerminalResponse};
 
 /// What the app should do after the panel was drawn.
@@ -17,6 +19,8 @@ pub struct PanelResponse {
     pub close: bool,
 }
 
+/// The layout is saved; the shells start afresh after a restart.
+#[derive(Serialize, Deserialize)]
 pub struct TerminalPanel {
     dock: DockState<Terminal>,
     next_id: u64,
@@ -66,6 +70,17 @@ impl TerminalPanel {
                 }
             });
         }
+    }
+
+    /// Records where each shell is, ahead of saving the layout.
+    pub fn remember_dirs(&mut self) {
+        for (_, terminal) in self.dock.iter_all_tabs_mut() {
+            terminal.remember_dir();
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.dock.iter_all_tabs().next().is_none()
     }
 
     /// Ends every shell; the next `ui` call starts a single new one.
@@ -317,5 +332,75 @@ mod tests {
         }
         let response = frame(&ctx, &mut panel, vec![key(Key::W)]);
         assert!(response.close);
+    }
+
+    #[test]
+    fn layout_survives_restart() {
+        let ctx = Context::default();
+        let mut panel = TerminalPanel::default();
+        frame(&ctx, &mut panel, Vec::new());
+        frame(&ctx, &mut panel, vec![key(Key::E)]);
+        frame(&ctx, &mut panel, Vec::new());
+        assert_eq!(panel.focused_terminal(&ctx), Some(2));
+
+        // cd in the new, non-following terminal.
+        let enter = Event::Key {
+            key: Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        };
+        frame(&ctx, &mut panel, vec![Event::Text("cd /".into()), enter]);
+        let dir = |panel: &TerminalPanel, id| {
+            let (_, t) = panel
+                .dock
+                .iter_all_tabs()
+                .find(|(_, t)| t.id == id)
+                .unwrap();
+            t.dir.clone()
+        };
+        let start = std::time::Instant::now();
+        while dir(&panel, 2) != Some("/".into()) {
+            assert!(start.elapsed().as_secs() < 10, "shell didn't cd");
+            frame(&ctx, &mut panel, Vec::new());
+            panel.remember_dirs();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        let saved = ron::ser::to_string(&panel).unwrap();
+        drop(panel);
+        let mut restored: TerminalPanel = ron::from_str(&saved).unwrap();
+        let tabs: Vec<_> = restored
+            .dock
+            .iter_all_tabs()
+            .map(|(_, t)| (t.id, t.follow))
+            .collect();
+        assert_eq!(tabs, [(1, true), (2, false)]);
+        let leaves = restored
+            .dock
+            .main_surface()
+            .iter()
+            .filter(|n| n.is_leaf())
+            .count();
+        assert_eq!(leaves, 2);
+        assert_eq!(restored.next_id, 3);
+
+        // The restored shell starts back in /, not in the tab's folder.
+        let tmp = std::env::temp_dir();
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800.0, 400.0))),
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| {
+            restored.ui(ui, Some(&tmp));
+        });
+        output.textures_delta.clear();
+        restored.remember_dirs();
+        assert_eq!(dir(&restored, 2), Some("/".into()));
+        assert_eq!(
+            dir(&restored, 1),
+            Some(std::fs::canonicalize(&tmp).unwrap())
+        );
     }
 }

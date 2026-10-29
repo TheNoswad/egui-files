@@ -32,6 +32,7 @@ use egui::{
     Rect, Sense, Stroke, TextStyle, Ui, Vec2, pos2, vec2,
 };
 use egui_dock::Split;
+use serde::{Deserialize, Serialize};
 
 /// Seconds to wait for the shell to report the folder it was sent to.
 #[cfg(target_os = "linux")]
@@ -48,25 +49,38 @@ pub struct TerminalResponse {
     pub open: Option<Option<Split>>,
 }
 
-#[derive(Default)]
+/// Saved with the panel's layout: which terminals there are, and where their
+/// shells were, so they start there again.
+#[derive(Default, Serialize, Deserialize)]
 pub struct Terminal {
     pub id: u64,
     /// Keep the shell in the focused tab's folder, and the tab in the shell's.
     pub follow: bool,
+    /// The folder to start the shell in, overriding the focused tab's.
+    #[serde(default)]
+    pub dir: Option<PathBuf>,
     /// Give this terminal keyboard focus the next time it's drawn.
+    #[serde(skip)]
     focus_requested: bool,
+    #[serde(skip)]
     session: Option<Session>,
     /// Why the shell couldn't be started.
+    #[serde(skip)]
     error: Option<String>,
     /// The folder the shell was last seen in, or last sent to.
+    #[serde(skip)]
     synced: Option<PathBuf>,
     /// A `cd` sent to the shell that it hasn't carried out yet, and when.
+    #[serde(skip)]
     pending_cd: Option<(PathBuf, f64)>,
     /// A key already sent with Alt; drop the text event that follows it.
+    #[serde(skip)]
     skip_text: bool,
     /// Scroll-wheel movement not yet turned into whole lines.
+    #[serde(skip)]
     scroll_acc: f32,
     /// The last cell reported to a mouse-aware program while dragging.
+    #[serde(skip)]
     last_mouse_cell: Option<(usize, usize)>,
 }
 
@@ -77,6 +91,17 @@ impl Terminal {
             follow,
             focus_requested: true,
             ..Default::default()
+        }
+    }
+
+    /// Remembers the shell's folder, so a restart opens the shell there.
+    pub fn remember_dir(&mut self) {
+        #[cfg(target_os = "linux")]
+        let current = self.session.as_ref().and_then(Session::shell_cwd);
+        #[cfg(not(target_os = "linux"))]
+        let current = None;
+        if let Some(dir) = current.or_else(|| self.synced.clone()) {
+            self.dir = Some(dir);
         }
     }
 
@@ -115,10 +140,14 @@ impl Terminal {
             return response;
         }
         if self.session.is_none() {
-            match Session::spawn(ui.ctx(), folder, user_shell(), size, cell) {
+            // A following shell starts with the tab; others where they were
+            // left, if that folder still exists.
+            let saved = self.dir.take().filter(|d| !self.follow && d.is_dir());
+            let start = saved.as_deref().or(folder);
+            match Session::spawn(ui.ctx(), start, user_shell(), size, cell) {
                 Ok(session) => {
                     self.session = Some(session);
-                    self.synced = folder.map(Path::to_path_buf);
+                    self.synced = start.map(Path::to_path_buf);
                 }
                 Err(err) => {
                     self.error = Some(err.to_string());
