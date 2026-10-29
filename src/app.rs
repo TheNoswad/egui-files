@@ -18,7 +18,7 @@ use crate::{
     terminal_panel::TerminalPanel,
     trash::{self, TrashCount, TrashTab},
     tree::{FolderTree, TreeAction},
-    video::Videos,
+    video::{Quality, Videos},
     watcher::DirWatcher,
 };
 
@@ -51,6 +51,8 @@ struct Persisted {
     terminal: TerminalPanel,
     #[serde(default = "default_volume")]
     video_volume: f64,
+    #[serde(default)]
+    video_quality: Quality,
 }
 
 fn default_true() -> bool {
@@ -77,6 +79,7 @@ struct PersistedRef<'a> {
     show_terminal: bool,
     terminal: &'a TerminalPanel,
     video_volume: f64,
+    video_quality: Quality,
 }
 
 pub struct FilesApp {
@@ -130,6 +133,7 @@ impl FilesApp {
                 show_terminal: false,
                 terminal: TerminalPanel::default(),
                 video_volume: default_volume(),
+                video_quality: Quality::default(),
             });
         let Persisted {
             dock,
@@ -142,6 +146,7 @@ impl FilesApp {
             show_terminal,
             mut terminal,
             video_volume,
+            video_quality,
         } = persisted;
         if terminal.is_empty() {
             terminal = TerminalPanel::default();
@@ -158,6 +163,7 @@ impl FilesApp {
                 videos: {
                     let mut videos = Videos::new(&cc.egui_ctx);
                     videos.set_volume(video_volume);
+                    videos.set_quality(video_quality);
                     videos
                 },
                 texts: TextCache::default(),
@@ -316,6 +322,14 @@ impl FilesApp {
                 ui.add(
                     egui::Slider::new(&mut self.shared.icon_size, 32.0..=192.0).text("Icon size"),
                 );
+                ui.menu_button("Video quality", |ui| {
+                    for quality in Quality::ALL {
+                        let selected = self.shared.videos.quality() == quality;
+                        if ui.radio(selected, quality.label()).clicked() {
+                            self.shared.videos.set_quality(quality);
+                        }
+                    }
+                });
                 ui.separator();
                 ui.label("Theme");
                 egui::widgets::global_theme_preference_buttons(ui);
@@ -767,6 +781,7 @@ impl eframe::App for FilesApp {
             show_terminal: self.show_terminal,
             terminal: &self.terminal,
             video_volume: self.shared.videos.volume(),
+            video_quality: self.shared.videos.quality(),
         };
         eframe::set_value(storage, eframe::APP_KEY, &state);
     }

@@ -14,7 +14,7 @@ use egui::{ColorImage, Context, TextureHandle, TextureOptions};
 use glow::HasContext;
 
 use super::{
-    Command, Message, Mode, Status,
+    Command, Message, Mode, Open, Status,
     egl::GlContext,
     mpv::{self, Event, Mpv, PropertyValue, RenderContext, RenderParam},
 };
@@ -54,29 +54,18 @@ fn run(
     let mut players: HashMap<u64, VideoPlayer> = HashMap::new();
     while let Ok(message) = receiver.recv() {
         match message {
-            Message::Open {
-                id,
-                mode,
-                texture,
-                status,
-                volume,
-            } => match VideoPlayer::open(
-                &gl,
-                id,
-                mode,
-                volume,
-                texture,
-                status.clone(),
-                sender.clone(),
-            ) {
-                Ok(player) => {
-                    players.insert(id, player);
+            Message::Open(open) => {
+                let (id, status) = (open.id, open.status.clone());
+                match VideoPlayer::open(&gl, open, sender.clone()) {
+                    Ok(player) => {
+                        players.insert(id, player);
+                    }
+                    Err(err) => {
+                        status.lock().expect("video status poisoned").error = Some(err);
+                        ctx.request_repaint();
+                    }
                 }
-                Err(err) => {
-                    status.lock().expect("video status poisoned").error = Some(err);
-                    ctx.request_repaint();
-                }
-            },
+            }
             Message::Close(id) => {
                 if let Some(player) = players.remove(&id) {
                     player.destroy(&gl);
@@ -148,15 +137,15 @@ struct VideoPlayer {
 }
 
 impl VideoPlayer {
-    fn open(
-        gl: &GlContext,
-        id: u64,
-        mode: Mode,
-        volume: f64,
-        texture: TextureHandle,
-        status: Arc<Mutex<Status>>,
-        sender: Sender<Message>,
-    ) -> Result<Self, String> {
+    fn open(gl: &GlContext, open: Open, sender: Sender<Message>) -> Result<Self, String> {
+        let Open {
+            id,
+            mode,
+            texture,
+            status,
+            volume,
+            quality,
+        } = open;
         let mpv = Mpv::new()?;
         for (name, value) in [
             ("config", "no"),
@@ -171,6 +160,9 @@ impl VideoPlayer {
             ("load-scripts", "no"),
             ("audio-display", "no"),
         ] {
+            mpv.set_option(name, value)?;
+        }
+        for (name, value) in quality.options() {
             mpv.set_option(name, value)?;
         }
         // mpv loads every interop by default; CUDA's prints "Cannot load

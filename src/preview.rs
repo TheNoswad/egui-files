@@ -225,15 +225,13 @@ fn video_player(
         .or(thumbnail.map(|(_, size)| size))
         .unwrap_or(vec2(16.0, 9.0));
     let size = source_size * (max_size.x / source_size.x).min(max_size.y / source_size.y);
-    let pixels = size * ui.pixels_per_point();
-    player.set_size([pixels.x.round() as u32, pixels.y.round() as u32]);
-
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
-    let painter = ui.painter_at(rect);
+    let video_rect = player.render_for(rect, ui.pixels_per_point());
+    let painter = ui.painter_at(rect.union(video_rect));
     let full_uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
     painter.rect_filled(rect, 0.0, Color32::BLACK);
     if let Some(frame) = player.frame() {
-        painter.image(frame.id(), rect, full_uv, Color32::WHITE);
+        painter.image(frame.id(), video_rect, full_uv, Color32::WHITE);
     } else if let Some((texture, texture_size)) = thumbnail {
         painter.image(texture, fit(texture_size, rect), full_uv, Color32::WHITE);
     }

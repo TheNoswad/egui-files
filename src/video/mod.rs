@@ -24,7 +24,8 @@ use std::{
     },
 };
 
-use egui::{ColorImage, Context, Id, TextureHandle, TextureOptions};
+use egui::{ColorImage, Context, Id, Rect, TextureHandle, TextureOptions, emath::GuiRounding};
+use serde::{Deserialize, Serialize};
 
 const EXTENSIONS: &[&str] = &[
     "mp4", "m4v", "mkv", "webm", "mov", "avi", "wmv", "flv", "mpg", "mpeg", "ts", "m2ts", "mts",
@@ -43,6 +44,39 @@ pub enum Mode {
     Preview,
     /// Plays immediately, silent and looping.
     Hover,
+}
+
+/// How mpv scales video to the size it's shown at.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Quality {
+    Fast,
+    Default,
+    /// Sharper scaling; cheap at preview sizes on any discrete GPU.
+    #[default]
+    High,
+}
+
+impl Quality {
+    pub const ALL: [Self; 3] = [Self::Fast, Self::Default, Self::High];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Fast => "Fast",
+            Self::Default => "Default",
+            Self::High => "High",
+        }
+    }
+
+    /// mpv options for this level.
+    fn options(self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            Self::Fast => &[("profile", "fast")],
+            Self::Default => &[],
+            // mpv's high-quality profile only sharpens upscaling, but
+            // previews are mostly downscaled, where the default (hermite) is soft.
+            Self::High => &[("profile", "high-quality"), ("dscale", "lanczos")],
+        }
+    }
 }
 
 /// Volume of new players until the user changes it, in percent.
@@ -83,14 +117,17 @@ enum Command {
     Volume(f64),
 }
 
+struct Open {
+    id: u64,
+    mode: Mode,
+    texture: TextureHandle,
+    status: Arc<Mutex<Status>>,
+    volume: f64,
+    quality: Quality,
+}
+
 enum Message {
-    Open {
-        id: u64,
-        mode: Mode,
-        texture: TextureHandle,
-        status: Arc<Mutex<Status>>,
-        volume: f64,
-    },
+    Open(Open),
     Command(u64, Command),
     Close(u64),
     /// mpv has events or a new frame for this player.
@@ -142,8 +179,18 @@ impl Player {
         (status.has_frame && status.generation == self.generation).then_some(&self.texture)
     }
 
+    /// Renders frames for `rect`, snapped to whole pixels so they are drawn
+    /// 1:1 rather than resampled (which blurs them); returns the snapped rect
+    /// to paint the frame into.
+    pub fn render_for(&mut self, rect: Rect, pixels_per_point: f32) -> Rect {
+        let snapped = rect.round_to_pixels(pixels_per_point);
+        let pixels = (snapped.size() * pixels_per_point).round();
+        self.set_size([pixels.x as u32, pixels.y as u32]);
+        snapped
+    }
+
     /// Sets the render size in pixels; frames are rendered at exactly this size.
-    pub fn set_size(&mut self, size: [u32; 2]) {
+    fn set_size(&mut self, size: [u32; 2]) {
         let size = size.map(|side| side.clamp(1, 4096));
         if size != self.size {
             self.size = size;
@@ -231,6 +278,7 @@ pub struct Videos {
     frame: u64,
     /// Volume in percent, as `f64` bits.
     volume: Arc<AtomicU64>,
+    quality: Quality,
 }
 
 impl Videos {
@@ -242,6 +290,19 @@ impl Videos {
             next_id: 0,
             frame: 0,
             volume: Arc::new(AtomicU64::new(DEFAULT_VOLUME.to_bits())),
+            quality: Quality::default(),
+        }
+    }
+
+    pub fn quality(&self) -> Quality {
+        self.quality
+    }
+
+    /// Restarts open players, since mpv's scalers are set when it starts.
+    pub fn set_quality(&mut self, quality: Quality) {
+        if quality != self.quality {
+            self.quality = quality;
+            self.players.clear();
         }
     }
 
@@ -291,13 +352,14 @@ impl Videos {
                     volume,
                     ..Status::default()
                 }));
-                let _ = backend.sender.send(Message::Open {
+                let _ = backend.sender.send(Message::Open(Open {
                     id,
                     mode,
                     texture: texture.clone(),
                     status: status.clone(),
                     volume,
-                });
+                    quality: self.quality,
+                }));
                 let mut player = Player {
                     id,
                     mode,
@@ -487,6 +549,94 @@ mod tests {
             }
         }
 
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn frames_are_rendered_for_whole_pixel_rects() {
+        let ctx = Context::default();
+        let (sender, _receiver) = mpsc::channel();
+        let mut player = Player {
+            id: 1,
+            mode: Mode::Preview,
+            sender,
+            path: PathBuf::new(),
+            generation: 0,
+            texture: ctx.load_texture(
+                "t",
+                ColorImage::filled([1, 1], egui::Color32::BLACK),
+                TextureOptions::LINEAR,
+            ),
+            status: Arc::default(),
+            size: [0, 0],
+            volume: Arc::default(),
+        };
+        let ppp = 1.25;
+        let rect = Rect::from_min_size(egui::pos2(10.3, 20.7), egui::vec2(200.45, 112.6));
+        let snapped = player.render_for(rect, ppp);
+        for value in [snapped.min.x, snapped.min.y, snapped.max.x, snapped.max.y] {
+            let pixels = value * ppp;
+            assert!(
+                (pixels - pixels.round()).abs() < 1e-3,
+                "{value} is not on a pixel"
+            );
+        }
+        let size = snapped.size() * ppp;
+        assert_eq!(
+            player.size(),
+            [size.x.round() as u32, size.y.round() as u32]
+        );
+        assert!((snapped.center() - rect.center()).length() < 1.0);
+    }
+
+    /// Needs libmpv, ffmpeg and a GPU.
+    #[test]
+    #[ignore]
+    fn every_quality_level_plays() {
+        let dir = std::env::temp_dir().join(format!("egui-files-quality-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("clip.mp4");
+        let status = std::process::Command::new("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=s=320x180:d=1",
+            ])
+            .args(["-pix_fmt", "yuv420p"])
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let ctx = Context::default();
+        let mut videos = Videos::new(&ctx);
+        for quality in Quality::ALL {
+            videos.set_quality(quality);
+            assert_eq!(videos.players().count(), 0, "players restart");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "{quality:?} rendered nothing"
+                );
+                videos.begin_frame();
+                let player = videos.player(Id::new("q"), &path, Mode::Preview).unwrap();
+                assert_eq!(player.status().error, None, "{quality:?}");
+                player.render_for(
+                    Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(100.0, 56.0)),
+                    1.0,
+                );
+                let has_frame = player.frame().is_some();
+                ctx.tex_manager().write().take_delta().clear();
+                if has_frame {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

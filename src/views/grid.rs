@@ -80,9 +80,8 @@ pub fn show(
                                 .video_size
                                 .map(|[w, h]| vec2(w as f32, h as f32))
                                 .or(thumbnail.map(|(_, size)| size))?;
-                            let rect = preview::fit(size, icon_rect);
-                            let pixels = rect.size() * ui.pixels_per_point();
-                            player.set_size([pixels.x.round() as u32, pixels.y.round() as u32]);
+                            let rect = player
+                                .render_for(preview::fit(size, icon_rect), ui.pixels_per_point());
                             Some((player.frame()?.id(), rect))
                         })
                         .flatten()
