@@ -1,6 +1,9 @@
 //! A single browser tab: location, history, listing, selection and actions.
 
-use std::{collections::HashSet, path::PathBuf};
+use std::{
+    collections::{HashMap, HashSet},
+    path::{Path, PathBuf},
+};
 
 use egui::{
     Align, Button, CentralPanel, Context, Id, Key, Layout, Modal, Modifiers, Panel, RichText,
@@ -49,6 +52,13 @@ pub enum Action {
     ActivateCursor,
     OpenInNewTab(PathBuf),
     Navigate(PathBuf),
+    /// Navigate to `dir` and select `select` inside it (Miller-column clicks).
+    NavigateSelect {
+        dir: PathBuf,
+        select: PathBuf,
+    },
+    /// Navigate into the selected folder and select its first item.
+    EnterSelected,
     Back,
     Forward,
     Up,
@@ -108,6 +118,9 @@ pub struct BrowserTab {
     focus_path_edit: bool,
     #[serde(skip)]
     rename: Option<Rename>,
+    /// Listings of the extra folders shown by the columns view.
+    #[serde(skip)]
+    column_cache: HashMap<PathBuf, Vec<Entry>>,
 }
 
 impl BrowserTab {
@@ -129,6 +142,7 @@ impl BrowserTab {
             path_edit: None,
             focus_path_edit: false,
             rename: None,
+            column_cache: HashMap::new(),
         }
     }
 
@@ -157,6 +171,7 @@ impl BrowserTab {
     }
 
     fn reload(&mut self) {
+        self.column_cache.clear();
         match fs::read_dir(&self.path) {
             Ok(mut entries) => {
                 fs::sort_entries(&mut entries, self.sort);
@@ -188,6 +203,7 @@ impl BrowserTab {
 
     fn reset_location_state(&mut self) {
         self.entries = None;
+        self.column_cache.clear();
         self.error = None;
         self.selection.clear();
         self.anchor = None;
@@ -204,8 +220,39 @@ impl BrowserTab {
             .collect()
     }
 
+    /// The single selected entry, which the columns view previews.
+    pub fn preview_entry(&self) -> Option<&Entry> {
+        if self.selection.len() != 1 {
+            return None;
+        }
+        self.entries()
+            .iter()
+            .find(|e| self.selection.contains(&e.path))
+    }
+
+    /// Cached listing of a folder shown as an extra column (see [`Self::prepare_columns`]).
+    pub fn column_listing(&self, dir: &Path) -> &[Entry] {
+        self.column_cache.get(dir).map_or(&[], Vec::as_slice)
+    }
+
+    /// Loads the ancestor and preview listings the columns view needs and drops the rest.
+    fn prepare_columns(&mut self) {
+        let mut needed: Vec<PathBuf> = self.path.ancestors().skip(1).map(PathBuf::from).collect();
+        if let Some(entry) = self.preview_entry().filter(|e| e.is_dir) {
+            needed.push(entry.path.clone());
+        }
+        self.column_cache.retain(|dir, _| needed.contains(dir));
+        for dir in needed {
+            self.column_cache.entry(dir).or_insert_with_key(|dir| {
+                let mut entries = fs::read_dir(dir).unwrap_or_default();
+                fs::sort_entries(&mut entries, self.sort);
+                entries
+            });
+        }
+    }
+
     /// Selects `path` after a reload, e.g. the folder we just came up from.
-    fn select_path(&mut self, path: &std::path::Path, show_hidden: bool) {
+    fn select_path(&mut self, path: &Path, show_hidden: bool) {
         if self.entries.is_none() {
             self.reload();
         }
@@ -233,12 +280,15 @@ impl BrowserTab {
         }
 
         Panel::top(Id::new(("toolbar", self.id))).show(ui, |ui| self.toolbar(ui, &mut actions));
+        if self.view == ViewMode::Columns {
+            self.prepare_columns();
+        }
         let visible = self.visible(shared.show_hidden);
         Panel::bottom(Id::new(("status", self.id))).show(ui, |ui| self.status_bar(ui, &visible));
         CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
-                if visible.is_empty() {
+                if visible.is_empty() && self.view != ViewMode::Columns {
                     ui.centered_and_justified(|ui| {
                         ui.weak(if self.filter.is_empty() {
                             "Empty folder"
@@ -247,12 +297,15 @@ impl BrowserTab {
                         });
                     });
                 } else {
-                    views::show(ui, self, &visible, &mut actions);
+                    views::show(ui, self, &visible, shared.show_hidden, &mut actions);
                 }
             });
         self.rename_modal(ui.ctx(), &mut actions);
         self.scroll_to = None;
 
+        if !actions.is_empty() {
+            ui.ctx().request_repaint();
+        }
         for action in actions {
             self.apply(action, ui.ctx(), shared);
         }
@@ -274,6 +327,14 @@ impl BrowserTab {
             }
             if key(Modifiers::ALT, Key::ArrowUp) || key(Modifiers::NONE, Key::Backspace) {
                 actions.push(Action::Up);
+            }
+            if self.view == ViewMode::Columns {
+                if key(Modifiers::NONE, Key::ArrowLeft) {
+                    actions.push(Action::Up);
+                }
+                if key(Modifiers::NONE, Key::ArrowRight) {
+                    actions.push(Action::EnterSelected);
+                }
             }
             if key(Modifiers::SHIFT, Key::ArrowDown) {
                 actions.push(Action::MoveCursor {
@@ -565,6 +626,28 @@ impl BrowserTab {
             }
             Action::OpenInNewTab(path) => shared.app_actions.push(AppAction::NewTab(path)),
             Action::Navigate(path) => self.navigate(path),
+            Action::NavigateSelect { dir, select } => {
+                self.navigate(dir);
+                self.select_path(&select, shared.show_hidden);
+            }
+            Action::EnterSelected => {
+                let Some(dir) = self
+                    .preview_entry()
+                    .filter(|e| e.is_dir)
+                    .map(|e| e.path.clone())
+                else {
+                    return;
+                };
+                self.navigate(dir);
+                self.reload();
+                let first = self
+                    .visible(shared.show_hidden)
+                    .first()
+                    .map(|&i| self.entries()[i].path.clone());
+                if let Some(first) = first {
+                    self.select_path(&first, shared.show_hidden);
+                }
+            }
             Action::Back => {
                 if let Some(path) = self.back.pop() {
                     let previous = std::mem::replace(&mut self.path, path);
@@ -740,4 +823,89 @@ fn join_paths(paths: &[PathBuf]) -> String {
         .map(|p| p.display().to_string())
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `root/a/b/file.txt`, `root/a/c/`, `root/a/.hidden/`
+    fn fixture(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("egui-files-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("a/b")).unwrap();
+        std::fs::create_dir_all(root.join("a/c")).unwrap();
+        std::fs::create_dir_all(root.join("a/.hidden")).unwrap();
+        std::fs::write(root.join("a/b/file.txt"), "hi").unwrap();
+        root
+    }
+
+    fn shared(tab: &BrowserTab) -> Shared {
+        Shared {
+            show_hidden: false,
+            clipboard: None,
+            focused_tab: Some(tab.id),
+            app_actions: Vec::new(),
+        }
+    }
+
+    fn run_frame(ctx: &Context, tab: &mut BrowserTab, shared: &mut Shared, keys: &[Key]) {
+        let events = keys
+            .iter()
+            .map(|&key| egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: Modifiers::NONE,
+            })
+            .collect();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1000.0, 600.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| tab.ui(ui, shared));
+        output.textures_delta.clear();
+    }
+
+    #[test]
+    fn columns_view_navigates_with_arrow_keys() {
+        let root = fixture("columns");
+        let a = root.join("a");
+        let b = a.join("b");
+        let ctx = Context::default();
+        let mut tab = BrowserTab::new(1, b.clone());
+        tab.view = ViewMode::Columns;
+        let mut shared = shared(&tab);
+
+        for _ in 0..3 {
+            run_frame(&ctx, &mut tab, &mut shared, &[]);
+        }
+        assert!(!tab.column_listing(&a).is_empty(), "ancestor column loaded");
+
+        // Left goes up and selects the folder we came from; the preview column then lists it.
+        run_frame(&ctx, &mut tab, &mut shared, &[Key::ArrowLeft]);
+        assert_eq!(tab.path, a);
+        assert_eq!(tab.preview_entry().map(|e| e.path.clone()), Some(b.clone()));
+        run_frame(&ctx, &mut tab, &mut shared, &[]);
+        assert_eq!(tab.column_listing(&b).len(), 1, "preview column loaded");
+
+        // Hidden folders are filtered from the current column.
+        assert_eq!(tab.visible(false).len(), 2);
+
+        // Right enters the selected folder and selects its first item.
+        run_frame(&ctx, &mut tab, &mut shared, &[Key::ArrowRight]);
+        assert_eq!(tab.path, b);
+        assert_eq!(
+            tab.preview_entry().map(|e| e.name.as_str()),
+            Some("file.txt")
+        );
+        run_frame(&ctx, &mut tab, &mut shared, &[]);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

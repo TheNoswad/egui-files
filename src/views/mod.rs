@@ -30,16 +30,22 @@ impl ViewMode {
     ];
 }
 
-pub fn show(ui: &mut Ui, tab: &BrowserTab, visible: &[usize], actions: &mut Vec<Action>) {
+pub fn show(
+    ui: &mut Ui,
+    tab: &BrowserTab,
+    visible: &[usize],
+    show_hidden: bool,
+    actions: &mut Vec<Action>,
+) {
     match tab.view {
         ViewMode::Details => details::show(ui, tab, visible, actions),
         ViewMode::Grid => grid::show(ui, tab, visible, actions),
-        ViewMode::Columns => columns::show(ui),
+        ViewMode::Columns => columns::show(ui, tab, visible, show_hidden, actions),
     }
 }
 
 /// Click, double-click, middle-click and context-menu handling shared by all views.
-fn item_interaction(
+pub(crate) fn item_interaction(
     response: &Response,
     index: usize,
     entry: &Entry,

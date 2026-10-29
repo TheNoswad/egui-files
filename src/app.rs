@@ -1,6 +1,6 @@
 //! Top-level application: menu bar, places sidebar, and the tab dock.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use egui::{Button, CentralPanel, Id, Key, Modifiers, Panel, RichText, ScrollArea, Ui, WidgetText};
 use egui_dock::{DockArea, DockState, NodePath, Style, TabViewer};
@@ -10,7 +10,17 @@ use serde::{Deserialize, Serialize};
 use crate::{
     places::{self, Place},
     tab::{AppAction, BrowserTab, Shared},
+    tree::{FolderTree, TreeAction},
 };
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+enum SidebarMode {
+    Places,
+    Tree,
+    #[default]
+    Both,
+    Hidden,
+}
 
 /// What survives a restart.
 #[derive(Deserialize)]
@@ -18,6 +28,10 @@ struct Persisted {
     dock: DockState<BrowserTab>,
     show_hidden: bool,
     bookmarks: Vec<PathBuf>,
+    #[serde(default)]
+    sidebar_mode: SidebarMode,
+    #[serde(default)]
+    tree: FolderTree,
 }
 
 #[derive(Serialize)]
@@ -25,12 +39,16 @@ struct PersistedRef<'a> {
     dock: &'a DockState<BrowserTab>,
     show_hidden: bool,
     bookmarks: &'a [PathBuf],
+    sidebar_mode: SidebarMode,
+    tree: &'a FolderTree,
 }
 
 pub struct FilesApp {
     dock: DockState<BrowserTab>,
     shared: Shared,
     bookmarks: Vec<PathBuf>,
+    sidebar_mode: SidebarMode,
+    tree: FolderTree,
     next_tab_id: u64,
     places: Vec<Place>,
     drives: Vec<Place>,
@@ -45,16 +63,22 @@ impl FilesApp {
         let persisted: Option<Persisted> = cc
             .storage
             .and_then(|s| eframe::get_value(s, eframe::APP_KEY));
-        let (dock, show_hidden, bookmarks) = match persisted {
-            Some(p) if p.dock.iter_all_tabs().next().is_some() => {
-                (p.dock, p.show_hidden, p.bookmarks)
-            }
-            _ => (
-                DockState::new(vec![BrowserTab::new(1, places::home_dir())]),
-                false,
-                Vec::new(),
-            ),
-        };
+        let persisted = persisted
+            .filter(|p| p.dock.iter_all_tabs().next().is_some())
+            .unwrap_or_else(|| Persisted {
+                dock: DockState::new(vec![BrowserTab::new(1, places::home_dir())]),
+                show_hidden: false,
+                bookmarks: Vec::new(),
+                sidebar_mode: SidebarMode::default(),
+                tree: FolderTree::default(),
+            });
+        let Persisted {
+            dock,
+            show_hidden,
+            bookmarks,
+            sidebar_mode,
+            tree,
+        } = persisted;
         let next_tab_id = dock.iter_all_tabs().map(|(_, t)| t.id).max().unwrap_or(0) + 1;
 
         Self {
@@ -66,6 +90,8 @@ impl FilesApp {
                 app_actions: Vec::new(),
             },
             bookmarks,
+            sidebar_mode,
+            tree,
             next_tab_id,
             places: places::standard_places(),
             drives: places::drives(),
@@ -150,6 +176,16 @@ impl FilesApp {
                 ui.separator();
                 ui.label("Theme");
                 egui::widgets::global_theme_preference_buttons(ui);
+                ui.separator();
+                ui.label("Sidebar");
+                for (mode, label) in [
+                    (SidebarMode::Places, "Places"),
+                    (SidebarMode::Tree, "Folder tree"),
+                    (SidebarMode::Both, "Places and folder tree"),
+                    (SidebarMode::Hidden, "Hidden"),
+                ] {
+                    ui.radio_value(&mut self.sidebar_mode, mode, label);
+                }
             });
         });
     }
@@ -161,17 +197,58 @@ impl FilesApp {
             .map(|(_, tab)| tab.path.clone());
         // (path, open in new tab)
         let mut target: Option<(PathBuf, bool)> = None;
+        match self.sidebar_mode {
+            SidebarMode::Places => self.places_ui(ui, current.as_ref(), &mut target),
+            SidebarMode::Tree => self.tree_ui(ui, current.as_deref(), &mut target),
+            SidebarMode::Both => {
+                Panel::top("sidebar_places")
+                    .resizable(true)
+                    .default_size(260.0)
+                    .show(ui, |ui| self.places_ui(ui, current.as_ref(), &mut target));
+                CentralPanel::default()
+                    .frame(egui::Frame::NONE)
+                    .show(ui, |ui| self.tree_ui(ui, current.as_deref(), &mut target));
+            }
+            SidebarMode::Hidden => {}
+        }
+        if let Some((path, new_tab)) = target {
+            self.go_to(path, new_tab);
+        }
+    }
+
+    fn tree_ui(
+        &mut self,
+        ui: &mut Ui,
+        current: Option<&Path>,
+        target: &mut Option<(PathBuf, bool)>,
+    ) {
+        ui.add_space(4.0);
+        ui.label(RichText::new("Folders").small().weak());
+        let roots: Vec<&Place> = self.places.iter().take(1).chain(&self.drives).collect();
+        match self.tree.ui(ui, &roots, current, self.shared.show_hidden) {
+            Some(TreeAction::Navigate(path)) => *target = Some((path, false)),
+            Some(TreeAction::OpenInNewTab(path)) => *target = Some((path, true)),
+            None => {}
+        }
+    }
+
+    fn places_ui(
+        &mut self,
+        ui: &mut Ui,
+        current: Option<&PathBuf>,
+        target: &mut Option<(PathBuf, bool)>,
+    ) {
         let mut remove_bookmark = None;
 
         let mut place_button = |ui: &mut Ui, glyph: &str, label: &str, path: &PathBuf| {
-            let selected = current.as_ref() == Some(path);
+            let selected = current == Some(path);
             let response = ui
                 .add(Button::selectable(selected, format!("{glyph}  {label}")))
                 .on_hover_text(path.display().to_string());
             if response.clicked() {
-                target = Some((path.clone(), false));
+                *target = Some((path.clone(), false));
             } else if response.middle_clicked() {
-                target = Some((path.clone(), true));
+                *target = Some((path.clone(), true));
             }
             response
         };
@@ -194,7 +271,7 @@ impl FilesApp {
                         }
                     });
                 }
-                if let Some(path) = &current
+                if let Some(path) = current
                     && !self.bookmarks.contains(path)
                     && ui
                         .button(format!("{}  Bookmark this folder", icon::PLUS))
@@ -213,9 +290,6 @@ impl FilesApp {
 
         if let Some(i) = remove_bookmark {
             self.bookmarks.remove(i);
-        }
-        if let Some((path, new_tab)) = target {
-            self.go_to(path, new_tab);
         }
     }
 }
@@ -266,10 +340,12 @@ impl eframe::App for FilesApp {
         self.global_shortcuts(&ctx);
 
         Panel::top("menu_bar").show(ui, |ui| self.menu_bar(ui));
-        Panel::left("sidebar")
-            .resizable(true)
-            .default_size(190.0)
-            .show(ui, |ui| self.sidebar(ui));
+        if self.sidebar_mode != SidebarMode::Hidden {
+            Panel::left("sidebar")
+                .resizable(true)
+                .default_size(220.0)
+                .show(ui, |ui| self.sidebar(ui));
+        }
 
         let mut add_requests = Vec::new();
         CentralPanel::default()
@@ -299,6 +375,7 @@ impl eframe::App for FilesApp {
             match action {
                 AppAction::NewTab(path) => self.open_tab(path),
                 AppAction::RefreshAll => {
+                    self.tree.invalidate();
                     for (_, tab) in self.dock.iter_all_tabs_mut() {
                         tab.invalidate();
                     }
@@ -316,6 +393,8 @@ impl eframe::App for FilesApp {
             dock: &self.dock,
             show_hidden: self.shared.show_hidden,
             bookmarks: &self.bookmarks,
+            sidebar_mode: self.sidebar_mode,
+            tree: &self.tree,
         };
         eframe::set_value(storage, eframe::APP_KEY, &state);
     }

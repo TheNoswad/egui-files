@@ -4,7 +4,9 @@ mod app;
 mod fs;
 mod places;
 mod tab;
+mod tree;
 mod views;
+mod widgets;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
