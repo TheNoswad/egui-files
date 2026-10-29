@@ -23,8 +23,9 @@ pub const THUMBNAIL_SIZE: u32 = 256;
 /// Longest side of images shown in the preview pane.
 pub const PREVIEW_SIZE: u32 = 1600;
 
-/// Textures kept alive at most. Thumbnails are ~256 KiB each.
-const CAPACITY: usize = 400;
+/// GPU memory kept alive for textures at most: ~400 square thumbnails
+/// (256 KiB each), or fewer when large previews are cached too.
+const BUDGET_BYTES: usize = 100 << 20;
 /// Queued jobs beyond this are dropped, oldest first (e.g. after fast scrolling).
 const MAX_QUEUE: usize = 256;
 
@@ -49,6 +50,13 @@ pub struct Image {
     pub texture: TextureHandle,
     /// Size of the original image, before downscaling.
     pub original_size: [u32; 2],
+}
+
+impl Image {
+    fn byte_size(&self) -> usize {
+        let [w, h] = self.texture.size();
+        w * h * 4
+    }
 }
 
 enum Slot {
@@ -133,30 +141,36 @@ impl ImageCache {
     }
 
     fn evict(&mut self) {
-        let ready = self
+        let used: usize = self
             .slots
             .values()
-            .filter(|s| matches!(s, Slot::Ready { .. }))
-            .count();
-        if ready <= CAPACITY {
+            .map(|slot| match slot {
+                Slot::Ready { image, .. } => image.byte_size(),
+                _ => 0,
+            })
+            .sum();
+        if used <= BUDGET_BYTES {
             return;
         }
-        let mut by_age: Vec<(u64, Key)> = self
+        let mut by_age: Vec<(u64, usize, Key)> = self
             .slots
             .iter()
             .filter_map(|(key, slot)| match slot {
-                Slot::Ready { last_used, .. } => Some((*last_used, key.clone())),
+                Slot::Ready { image, last_used } => {
+                    Some((*last_used, image.byte_size(), key.clone()))
+                }
                 _ => None,
             })
             .collect();
-        by_age.sort_unstable_by_key(|(last_used, _)| *last_used);
+        by_age.sort_unstable_by_key(|(last_used, ..)| *last_used);
         // Evict down to 80% so this doesn't run every frame.
-        let excess = ready - CAPACITY * 4 / 5;
-        for (last_used, key) in by_age.into_iter().take(excess) {
-            if last_used == self.frame {
+        let mut excess = used - BUDGET_BYTES * 4 / 5;
+        for (last_used, size, key) in by_age {
+            if excess == 0 || last_used == self.frame {
                 break;
             }
             self.slots.remove(&key);
+            excess = excess.saturating_sub(size);
         }
     }
 
@@ -313,5 +327,37 @@ mod tests {
         }
 
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn evicts_least_recently_used_by_size() {
+        let ctx = Context::default();
+        let mut cache = ImageCache::new(&ctx);
+        // Eight 16 MiB textures exceed the budget; eviction goes down to 80%.
+        let side = 2048;
+        for i in 0..8 {
+            cache.frame += 1;
+            let key = Key {
+                path: PathBuf::from(format!("{i}.png")),
+                modified: None,
+                max_side: side as u32,
+            };
+            let texture = ctx.load_texture(
+                i.to_string(),
+                ColorImage::filled([side, side], egui::Color32::BLACK),
+                TextureOptions::LINEAR,
+            );
+            let image = Image {
+                texture,
+                original_size: [side as u32; 2],
+            };
+            let last_used = cache.frame;
+            cache.slots.insert(key, Slot::Ready { image, last_used });
+        }
+        cache.begin_frame();
+        let ready: Vec<_> = (0..8)
+            .filter(|i| cache.is_ready(Path::new(&format!("{i}.png")), None, side as u32))
+            .collect();
+        assert_eq!(ready, [3, 4, 5, 6, 7]);
     }
 }
