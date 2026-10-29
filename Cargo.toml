@@ -23,3 +23,10 @@ opt-level = 2
 
 [dev-dependencies]
 ron = "0.12"
+
+# Native Wayland drag and drop with other apps (winit doesn't implement it).
+[target.'cfg(target_os = "linux")'.dependencies]
+smithay-client-toolkit = { version = "0.19", default-features = false }
+wayland-client = "0.31"
+wayland-backend = { version = "0.3", features = ["client_system"] }
+raw-window-handle = "0.6"

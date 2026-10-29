@@ -44,6 +44,8 @@ pub struct FileClipboard {
 /// Requests a tab cannot fulfil on its own.
 pub enum AppAction {
     NewTab(PathBuf),
+    /// Bring the tab with this id to the front.
+    FocusTab(u64),
 }
 
 /// Everything a view or toolbar can ask the tab to do.
@@ -1461,6 +1463,101 @@ mod tests {
             egui::DragAndDrop::payload::<crate::dnd::FileDrag>(&ctx).is_none(),
             "drag ended"
         );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn external(
+        ctx: &Context,
+        tab: &mut BrowserTab,
+        shared: &mut Shared,
+        event: crate::dnd::ExternalEvent,
+    ) {
+        let mut input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1000.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        crate::dnd::inject_external(ctx, &mut input, event);
+        let mut output = ctx.run_ui(input, |ui| tab.ui(ui, shared));
+        output.textures_delta.clear();
+    }
+
+    #[test]
+    fn drops_from_other_apps_copy_into_the_folder_under_the_pointer() {
+        use crate::dnd::{ExternalEvent, FileDrag};
+
+        let root = fixture("external");
+        let a = root.join("a");
+        let elsewhere = root.join("elsewhere.txt");
+        std::fs::write(&elsewhere, "from another app").unwrap();
+        let ctx = Context::default();
+        let mut tab = BrowserTab::new(1, a.clone());
+        tab.view = ViewMode::Grid;
+        let mut shared = shared(&ctx, &tab);
+        run_frame(&ctx, &mut tab, &mut shared, &[]);
+        let folder_b = egui::pos2(48.0, 90.0);
+        let empty = egui::pos2(900.0, 450.0);
+
+        // Hovering marks an external drag (paths unknown yet); leaving cancels it.
+        external(&ctx, &mut tab, &mut shared, ExternalEvent::Hover(folder_b));
+        let payload = egui::DragAndDrop::payload::<FileDrag>(&ctx).expect("hovering");
+        assert!(payload.external && payload.paths.is_empty());
+        external(&ctx, &mut tab, &mut shared, ExternalEvent::Leave);
+        assert!(egui::DragAndDrop::payload::<FileDrag>(&ctx).is_none());
+
+        // Dropping on a folder copies into it; the original stays put.
+        external(&ctx, &mut tab, &mut shared, ExternalEvent::Hover(folder_b));
+        external(
+            &ctx,
+            &mut tab,
+            &mut shared,
+            ExternalEvent::Drop {
+                pos: folder_b,
+                paths: vec![elsewhere.clone()],
+                internal: false,
+            },
+        );
+        wait_for_jobs(&mut shared);
+        assert!(a.join("b/elsewhere.txt").is_file());
+        assert!(elsewhere.is_file(), "external drops copy");
+
+        // Dropping on empty space copies into the tab's folder, and the
+        // injected release isn't mistaken for a click that clears the selection.
+        tab.selection = HashSet::from([a.join("b")]);
+        external(
+            &ctx,
+            &mut tab,
+            &mut shared,
+            ExternalEvent::Drop {
+                pos: empty,
+                paths: vec![elsewhere.clone()],
+                internal: false,
+            },
+        );
+        wait_for_jobs(&mut shared);
+        assert!(a.join("elsewhere.txt").is_file());
+        assert!(tab.selection.contains(&a.join("b")), "selection kept");
+
+        // A drag that left this app and came back is an in-app drag: same drive, so it moves.
+        tab.mark_stale();
+        run_frame(&ctx, &mut tab, &mut shared, &[]);
+        let moved = a.join("elsewhere.txt");
+        external(
+            &ctx,
+            &mut tab,
+            &mut shared,
+            ExternalEvent::Drop {
+                pos: egui::pos2(150.0, 90.0),
+                paths: vec![moved.clone()],
+                internal: true,
+            },
+        );
+        wait_for_jobs(&mut shared);
+        assert!(a.join("c/elsewhere.txt").is_file());
+        assert!(!moved.exists(), "returning in-app drags move");
 
         std::fs::remove_dir_all(root).unwrap();
     }

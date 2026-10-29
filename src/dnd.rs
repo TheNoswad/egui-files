@@ -12,6 +12,9 @@ use crate::{fs, jobs::JobKind};
 /// The drag-and-drop payload.
 pub struct FileDrag {
     pub paths: Vec<PathBuf>,
+    /// Dragged in from another app. While hovering, `paths` may still be
+    /// empty: some apps only hand over the files on drop.
+    pub external: bool,
 }
 
 pub enum DropTarget {
@@ -24,7 +27,13 @@ pub fn source(response: &Response, paths: impl FnOnce() -> Vec<PathBuf>) {
     if response.drag_started() {
         let paths = paths();
         if !paths.is_empty() {
-            DragAndDrop::set_payload(&response.ctx, FileDrag { paths });
+            DragAndDrop::set_payload(
+                &response.ctx,
+                FileDrag {
+                    paths,
+                    external: false,
+                },
+            );
         }
     }
 }
@@ -38,8 +47,7 @@ pub fn target(response: &Response, target: DropTarget) -> Option<JobKind> {
     let ctx = &response.ctx;
     let payload = DragAndDrop::payload::<FileDrag>(ctx)?;
     let modifiers = ctx.input(|i| i.modifiers);
-    if !response.contains_pointer() || claimed(ctx) || !accepts(&payload.paths, &target, modifiers)
-    {
+    if !response.contains_pointer() || claimed(ctx) || !accepts(&payload, &target, modifiers) {
         return None;
     }
     claim(ctx);
@@ -57,10 +65,19 @@ pub fn target(response: &Response, target: DropTarget) -> Option<JobKind> {
     }
     let payload = DragAndDrop::take_payload::<FileDrag>(ctx)?;
     let paths = payload.paths.clone();
+    if paths.is_empty() {
+        return None;
+    }
     Some(match target {
         DropTarget::Trash => JobKind::Trash { paths },
         DropTarget::Folder(dest) => {
-            if should_copy(&paths, &dest, modifiers) {
+            // Files from other apps are copied unless Shift asks for a move.
+            let copy = if payload.external {
+                !modifiers.shift
+            } else {
+                should_copy(&paths, &dest, modifiers)
+            };
+            if copy {
                 JobKind::Copy {
                     sources: paths,
                     dest,
@@ -89,7 +106,12 @@ fn claim(ctx: &Context) {
     ctx.data_mut(|d| d.insert_temp(claim_id(), pass));
 }
 
-fn accepts(paths: &[PathBuf], target: &DropTarget, modifiers: Modifiers) -> bool {
+fn accepts(payload: &FileDrag, target: &DropTarget, modifiers: Modifiers) -> bool {
+    let paths = &payload.paths;
+    if payload.external && paths.is_empty() {
+        // Not known until dropped.
+        return true;
+    }
     match target {
         DropTarget::Trash => true,
         DropTarget::Folder(dest) => {
@@ -131,6 +153,10 @@ pub fn paint_preview(ctx: &Context) {
     let Some(payload) = DragAndDrop::payload::<FileDrag>(ctx) else {
         return;
     };
+    // The other app draws its own drag icon.
+    if payload.external {
+        return;
+    }
     let Some(pos) = ctx.pointer_latest_pos() else {
         return;
     };
@@ -157,4 +183,174 @@ pub fn paint_preview(ctx: &Context) {
                 ui.label(format!("{text}{hint}"));
             });
         });
+}
+
+// ---------------------------------------------------------------------------
+// Drags from other apps
+
+/// A drag from another app, as reported by the platform.
+pub enum ExternalEvent {
+    /// Files are held over the window at this position (in points).
+    Hover(egui::Pos2),
+    /// The drag left the window without dropping.
+    Leave,
+    Drop {
+        pos: egui::Pos2,
+        paths: Vec<PathBuf>,
+        /// The drag started in this app and came back (e.g. via the platform).
+        internal: bool,
+    },
+}
+
+/// Feeds an external drag into egui as if it were an internal one, so the
+/// usual drop targets highlight and handle it.
+pub fn inject_external(ctx: &Context, raw: &mut egui::RawInput, event: ExternalEvent) {
+    let is_external_drag = || DragAndDrop::payload::<FileDrag>(ctx).is_some_and(|p| p.external);
+    match event {
+        ExternalEvent::Hover(pos) => {
+            if DragAndDrop::payload::<FileDrag>(ctx).is_none() {
+                DragAndDrop::set_payload(
+                    ctx,
+                    FileDrag {
+                        paths: Vec::new(),
+                        external: true,
+                    },
+                );
+            }
+            raw.events.push(egui::Event::PointerMoved(pos));
+        }
+        ExternalEvent::Leave => {
+            if is_external_drag() {
+                DragAndDrop::clear_payload(ctx);
+            }
+            raw.events.push(egui::Event::PointerGone);
+        }
+        ExternalEvent::Drop {
+            pos,
+            paths,
+            internal,
+        } => {
+            DragAndDrop::set_payload(
+                ctx,
+                FileDrag {
+                    paths,
+                    external: !internal,
+                },
+            );
+            raw.events.push(egui::Event::PointerMoved(pos));
+            raw.events.push(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: ctx.input(|i| i.modifiers),
+            });
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// text/uri-list, the format file managers exchange file lists in
+
+/// Formats paths as a `text/uri-list` of `file://` URIs.
+pub fn uri_list(paths: &[PathBuf]) -> String {
+    paths
+        .iter()
+        .map(|path| format!("file://{}\r\n", percent_encode(path)))
+        .collect()
+}
+
+/// Parses the local files out of a `text/uri-list`.
+pub fn parse_uri_list(text: &str) -> Vec<PathBuf> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .filter_map(|line| line.strip_prefix("file://"))
+        // `file://host/path`: only local files are usable.
+        .filter_map(|rest| match rest.find('/') {
+            Some(0) => Some(rest),
+            Some(i) if &rest[..i] == "localhost" => Some(&rest[i..]),
+            _ => None,
+        })
+        .filter_map(percent_decode)
+        .collect()
+}
+
+fn percent_encode(path: &Path) -> String {
+    let bytes = path_bytes(path);
+    let mut out = String::with_capacity(bytes.len());
+    for &b in bytes.iter() {
+        if b.is_ascii_alphanumeric() || b"/-_.~".contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+fn percent_decode(text: &str) -> Option<PathBuf> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = std::str::from_utf8(bytes.get(i + 1..i + 3)?).ok()?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    Some(path_from_bytes(out))
+}
+
+#[cfg(unix)]
+fn path_bytes(path: &Path) -> std::borrow::Cow<'_, [u8]> {
+    use std::os::unix::ffi::OsStrExt;
+    path.as_os_str().as_bytes().into()
+}
+
+#[cfg(unix)]
+fn path_from_bytes(bytes: Vec<u8>) -> PathBuf {
+    use std::os::unix::ffi::OsStringExt;
+    std::ffi::OsString::from_vec(bytes).into()
+}
+
+#[cfg(not(unix))]
+fn path_bytes(path: &Path) -> std::borrow::Cow<'_, [u8]> {
+    path.to_string_lossy()
+        .replace('\\', "/")
+        .into_bytes()
+        .into()
+}
+
+#[cfg(not(unix))]
+fn path_from_bytes(bytes: Vec<u8>) -> PathBuf {
+    String::from_utf8_lossy(&bytes).into_owned().into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uri_list_round_trips_odd_names() {
+        let paths = vec![
+            PathBuf::from("/home/me/My File (1).txt"),
+            PathBuf::from("/tmp/100%/ünïcödé #tag?.md"),
+        ];
+        let list = uri_list(&paths);
+        assert!(list.starts_with("file:///home/me/My%20File%20%281%29.txt\r\n"));
+        assert_eq!(parse_uri_list(&list), paths);
+    }
+
+    #[test]
+    fn parses_what_other_apps_send() {
+        let text = "# comment\r\nfile:///a/b%20c\nfile://localhost/d\r\nhttps://example.com/x\r\nfile://otherhost/e\r\n\r\n";
+        assert_eq!(
+            parse_uri_list(text),
+            [PathBuf::from("/a/b c"), PathBuf::from("/d")]
+        );
+    }
 }

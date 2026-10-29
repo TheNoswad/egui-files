@@ -79,6 +79,13 @@ pub struct FilesApp {
     confirm_quit: bool,
     /// The user confirmed quitting with operations running.
     allow_close: bool,
+    /// Drag and drop with other apps on Wayland, when running there.
+    #[cfg(target_os = "linux")]
+    wayland: Option<crate::wayland_dnd::WaylandDnd>,
+    /// An in-app drag was handed to the platform and is still in progress.
+    drag_out_active: bool,
+    /// Files dropped onto the window via winit (X11, Windows).
+    os_dropped: Vec<PathBuf>,
 }
 
 impl FilesApp {
@@ -138,6 +145,10 @@ impl FilesApp {
             trash_count: TrashCount::new(&cc.egui_ctx),
             confirm_quit: false,
             allow_close: false,
+            #[cfg(target_os = "linux")]
+            wayland: crate::wayland_dnd::WaylandDnd::new(cc),
+            drag_out_active: false,
+            os_dropped: Vec::new(),
         }
     }
 
@@ -162,10 +173,21 @@ impl FilesApp {
     }
 
     /// Focuses the trash tab, opening one if needed.
-    fn open_trash(&mut self) {
-        if let Some(path) = self.dock.find_tab_from(DockTab::is_trash) {
+    fn focus_tab(&mut self, id: u64) {
+        if let Some(path) = self.dock.find_tab_from(|t| t.id() == id) {
             let _ = self.dock.set_active_tab(path);
             self.dock.set_focused_node_and_surface(path.node_path());
+        }
+    }
+
+    fn open_trash(&mut self) {
+        let trash_tab = self
+            .dock
+            .iter_all_tabs()
+            .find(|(_, t)| t.is_trash())
+            .map(|(_, t)| t.id());
+        if let Some(id) = trash_tab {
+            self.focus_tab(id);
         } else {
             let tab = DockTab::Trash(TrashTab::new(self.next_id()));
             self.dock.push_to_focused_leaf(tab);
@@ -388,6 +410,9 @@ impl FilesApp {
     }
 }
 
+/// Seconds a drag must hover over a tab title before switching to it.
+const TAB_SWITCH_DELAY: f64 = 0.6;
+
 struct Viewer<'a> {
     shared: &'a mut Shared,
     add_requests: &'a mut Vec<NodePath>,
@@ -428,6 +453,21 @@ impl TabViewer for Viewer<'_> {
         if let Some(job) = dnd::target(response, target) {
             self.shared.jobs.start(job);
         }
+
+        // Holding a drag over a tab's title switches to that tab.
+        let ctx = &response.ctx;
+        let key = Id::new(("dnd-tab-hover", tab.id()));
+        if response.dnd_hover_payload::<dnd::FileDrag>().is_some() {
+            let now = ctx.input(|i| i.time);
+            let since = ctx.data_mut(|d| *d.get_temp_mut_or_insert_with(key, || now));
+            if now - since > TAB_SWITCH_DELAY {
+                self.shared.app_actions.push(AppAction::FocusTab(tab.id()));
+            } else {
+                ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            }
+        } else {
+            ctx.data_mut(|d| d.remove::<f64>(key));
+        }
     }
 
     fn on_add(&mut self, path: NodePath) {
@@ -441,6 +481,26 @@ impl TabViewer for Viewer<'_> {
 }
 
 impl FilesApp {
+    /// Hands an in-app drag to the platform once it leaves the window, so it
+    /// can be dropped into other apps.
+    fn drag_out(&mut self, ctx: &egui::Context) {
+        #[cfg(target_os = "linux")]
+        if let Some(wayland) = &self.wayland
+            && !self.drag_out_active
+            && let Some(payload) = egui::DragAndDrop::payload::<dnd::FileDrag>(ctx)
+            && !payload.external
+            && ctx.input(|i| i.pointer.primary_down())
+            && let Some(pos) = ctx.input(|i| i.pointer.latest_pos())
+            && !ctx.content_rect().contains(pos)
+            && wayland.start_drag(payload.paths.clone())
+        {
+            self.drag_out_active = true;
+            egui::DragAndDrop::clear_payload(ctx);
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = ctx;
+    }
+
     /// Applies file-watcher changes, and refreshes everything when a job finishes
     /// (it may have touched folders that aren't watched).
     fn sync_with_disk(&mut self) {
@@ -547,6 +607,7 @@ impl eframe::App for FilesApp {
         for action in std::mem::take(&mut self.shared.app_actions) {
             match action {
                 AppAction::NewTab(path) => self.open_tab(path),
+                AppAction::FocusTab(id) => self.focus_tab(id),
             }
         }
         let shown = self
@@ -561,7 +622,62 @@ impl eframe::App for FilesApp {
             let tab = self.make_tab(places::home_dir());
             self.dock.push_to_first_leaf(tab);
         }
+        self.drag_out(&ctx);
+        if !self.os_dropped.is_empty() {
+            // winit reports no drop position, so use the focused folder.
+            let sources = std::mem::take(&mut self.os_dropped);
+            let dest = self.focused_path();
+            self.shared
+                .jobs
+                .start(crate::jobs::JobKind::Copy { sources, dest });
+        }
         dnd::paint_preview(&ctx);
+    }
+
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        #[cfg(target_os = "linux")]
+        if let Some(wayland) = &self.wayland {
+            // Wayland reports logical pixels; egui points also include the zoom.
+            let to_points = |p: egui::Pos2| (p.to_vec2() / ctx.zoom_factor()).to_pos2();
+            for event in wayland.poll() {
+                use crate::{dnd::ExternalEvent, wayland_dnd::DndEvent};
+                let event = match event {
+                    DndEvent::DragOutEnded => {
+                        self.drag_out_active = false;
+                        // egui never saw the button go up (the compositor had the
+                        // pointer); release it outside the window, over nothing.
+                        raw_input.events.push(egui::Event::PointerButton {
+                            pos: egui::pos2(-1.0, -1.0),
+                            button: egui::PointerButton::Primary,
+                            pressed: false,
+                            modifiers: egui::Modifiers::NONE,
+                        });
+                        continue;
+                    }
+                    DndEvent::External(ExternalEvent::Hover(pos)) => {
+                        ExternalEvent::Hover(to_points(pos))
+                    }
+                    DndEvent::External(ExternalEvent::Drop {
+                        pos,
+                        paths,
+                        internal,
+                    }) => ExternalEvent::Drop {
+                        pos: to_points(pos),
+                        paths,
+                        internal,
+                    },
+                    DndEvent::External(event) => event,
+                };
+                dnd::inject_external(ctx, raw_input, event);
+            }
+        }
+        self.os_dropped.extend(
+            raw_input
+                .dropped_files
+                .drain(..)
+                .map(|file| file.path().to_path_buf())
+                .filter(|path| !path.as_os_str().is_empty()),
+        );
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {

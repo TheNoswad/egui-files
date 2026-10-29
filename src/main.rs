@@ -13,6 +13,8 @@ mod trash;
 mod tree;
 mod views;
 mod watcher;
+#[cfg(target_os = "linux")]
+mod wayland_dnd;
 mod widgets;
 
 fn main() -> eframe::Result {

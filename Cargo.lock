@@ -589,9 +589,13 @@ dependencies = [
  "image",
  "notify",
  "open",
+ "raw-window-handle",
  "ron",
  "serde",
+ "smithay-client-toolkit 0.19.2",
  "trash",
+ "wayland-backend",
+ "wayland-client",
 ]
 
 [[package]]
