@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     fs::{self, Entry, Sort, SortKey},
     images::{self, ImageCache},
+    jobs::{JobKind, Jobs},
     preview::{self, TextCache},
     views::{self, ViewMode},
 };
@@ -30,6 +31,7 @@ pub struct Shared {
     pub app_actions: Vec<AppAction>,
     pub images: ImageCache,
     pub texts: TextCache,
+    pub jobs: Jobs,
 }
 
 pub struct FileClipboard {
@@ -40,7 +42,6 @@ pub struct FileClipboard {
 /// Requests a tab cannot fulfil on its own.
 pub enum AppAction {
     NewTab(PathBuf),
-    RefreshAll,
 }
 
 /// Everything a view or toolbar can ask the tab to do.
@@ -111,6 +112,9 @@ pub struct BrowserTab {
     pub filter: String,
     #[serde(skip)]
     entries: Option<Vec<Entry>>,
+    /// The listing is out of date and should be re-read, keeping the cursor.
+    #[serde(skip)]
+    stale: bool,
     #[serde(skip)]
     error: Option<String>,
     #[serde(skip)]
@@ -145,6 +149,7 @@ impl BrowserTab {
             forward: Vec::new(),
             filter: String::new(),
             entries: None,
+            stale: false,
             error: None,
             selection: HashSet::new(),
             anchor: None,
@@ -177,12 +182,33 @@ impl BrowserTab {
             .collect()
     }
 
-    pub fn invalidate(&mut self) {
-        self.entries = None;
+    pub fn mark_stale(&mut self) {
+        self.stale = true;
+    }
+
+    /// Reacts to the contents of `dirs` changing on disk.
+    pub fn dirs_changed(&mut self, dirs: &HashSet<PathBuf>) {
+        if dirs.contains(&self.path) {
+            self.stale = true;
+        }
+        self.column_cache.retain(|dir, _| !dirs.contains(dir));
+    }
+
+    /// Folders this tab is showing, for the file watcher.
+    pub fn shown_dirs(&self) -> impl Iterator<Item = &PathBuf> {
+        std::iter::once(&self.path).chain(self.column_cache.keys())
     }
 
     fn reload(&mut self) {
         self.column_cache.clear();
+        // If the folder was deleted or renamed away, fall back to the nearest parent.
+        let mut gone = None;
+        if !self.path.is_dir()
+            && let Some(existing) = self.path.ancestors().skip(1).find(|p| p.is_dir())
+        {
+            gone = Some(self.path.clone());
+            self.navigate(existing.to_path_buf());
+        }
         match fs::read_dir(&self.path) {
             Ok(mut entries) => {
                 fs::sort_entries(&mut entries, self.sort);
@@ -196,6 +222,32 @@ impl BrowserTab {
                 self.error = Some(format!("Cannot read {}: {err}", self.path.display()));
             }
         }
+        if let Some(gone) = gone {
+            self.error = Some(format!("{} no longer exists", gone.display()));
+        }
+    }
+
+    /// Re-reads the folder, keeping the cursor and anchor on the same items.
+    fn refresh(&mut self, show_hidden: bool) {
+        self.stale = false;
+        let path = self.path.clone();
+        let old_visible = self.visible(show_hidden);
+        let path_at = |tab: &Self, index: Option<usize>| {
+            index
+                .and_then(|i| old_visible.get(i))
+                .map(|&i| tab.entries()[i].path.clone())
+        };
+        let (cursor, anchor) = (path_at(self, self.cursor), path_at(self, self.anchor));
+        self.reload();
+        if self.path != path {
+            return;
+        }
+        let visible = self.visible(show_hidden);
+        let index_of = |tab: &Self, path: Option<PathBuf>| {
+            path.and_then(|p| visible.iter().position(|&i| tab.entries()[i].path == p))
+        };
+        self.cursor = index_of(self, cursor);
+        self.anchor = index_of(self, anchor);
     }
 
     pub fn navigate(&mut self, path: PathBuf) {
@@ -283,6 +335,8 @@ impl BrowserTab {
         ui.style_mut().interaction.selectable_labels = false;
         if self.entries.is_none() {
             self.reload();
+        } else if self.stale {
+            self.refresh(shared.show_hidden);
         }
 
         let mut actions = Vec::new();
@@ -650,6 +704,8 @@ impl BrowserTab {
                 }
                 let last = visible.len() - 1;
                 let index = match self.cursor {
+                    // End jumps to the last item even with no cursor yet.
+                    None if delta == isize::MAX => last,
                     None => 0,
                     Some(c) => c.saturating_add_signed(delta).min(last),
                 };
@@ -712,7 +768,7 @@ impl BrowserTab {
                     self.select_path(&child, shared.show_hidden);
                 }
             }
-            Action::Refresh => self.reload(),
+            Action::Refresh => self.refresh(shared.show_hidden),
             Action::SortBy(key) => {
                 if self.sort.key == key {
                     self.sort.ascending = !self.sort.ascending;
@@ -779,10 +835,7 @@ impl BrowserTab {
                 if paths.is_empty() {
                     return;
                 }
-                if let Err(err) = fs::trash(&paths) {
-                    self.error = Some(format!("Move to trash failed: {err}"));
-                }
-                shared.app_actions.push(AppAction::RefreshAll);
+                shared.jobs.start(JobKind::Trash { paths });
             }
             Action::Copy | Action::Cut => {
                 let paths = self.selected_paths();
@@ -801,13 +854,13 @@ impl BrowserTab {
                 let Some(clipboard) = &shared.clipboard else {
                     return;
                 };
-                if let Err(err) = fs::paste(&clipboard.paths, &self.path, clipboard.cut) {
-                    self.error = Some(format!("Paste failed: {err}"));
-                }
+                let (sources, dest) = (clipboard.paths.clone(), self.path.clone());
                 if clipboard.cut {
                     shared.clipboard = None;
+                    shared.jobs.start(JobKind::Move { sources, dest });
+                } else {
+                    shared.jobs.start(JobKind::Copy { sources, dest });
                 }
-                shared.app_actions.push(AppAction::RefreshAll);
             }
             Action::CopyPath => {
                 let paths = self.selected_paths();
@@ -894,6 +947,7 @@ mod tests {
             app_actions: Vec::new(),
             images: ImageCache::new(ctx),
             texts: TextCache::default(),
+            jobs: Jobs::new(ctx),
         }
     }
 
@@ -953,6 +1007,36 @@ mod tests {
             Some("file.txt")
         );
         run_frame(&ctx, &mut tab, &mut shared, &[]);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn disk_changes_keep_cursor_and_survive_deletion() {
+        let root = fixture("refresh");
+        let a = root.join("a");
+        let ctx = Context::default();
+        let mut tab = BrowserTab::new(1, a.clone());
+        let mut shared = shared(&ctx, &tab);
+        run_frame(&ctx, &mut tab, &mut shared, &[]);
+        // Visible: b, c. Put the cursor on c.
+        run_frame(&ctx, &mut tab, &mut shared, &[Key::End]);
+        assert_eq!(tab.cursor, Some(1));
+
+        // A new folder sorting before c shifts it down; the cursor follows c.
+        std::fs::create_dir(a.join("bb")).unwrap();
+        tab.dirs_changed(&HashSet::from([a.clone()]));
+        run_frame(&ctx, &mut tab, &mut shared, &[]);
+        assert_eq!(tab.visible(false).len(), 3);
+        assert_eq!(tab.cursor, Some(2));
+        assert!(tab.selection.contains(&a.join("c")));
+
+        // Deleting the open folder falls back to its parent.
+        std::fs::remove_dir_all(&a).unwrap();
+        tab.dirs_changed(&HashSet::from([a.clone()]));
+        run_frame(&ctx, &mut tab, &mut shared, &[]);
+        assert_eq!(tab.path, root);
+        assert!(tab.error.as_deref().unwrap().contains("no longer exists"));
 
         std::fs::remove_dir_all(root).unwrap();
     }

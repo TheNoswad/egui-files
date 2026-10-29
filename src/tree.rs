@@ -58,6 +58,10 @@ impl FolderTree {
         self.children.clear();
     }
 
+    pub fn dirs_changed(&mut self, dirs: &HashSet<PathBuf>) {
+        self.children.retain(|dir, _| !dirs.contains(dir));
+    }
+
     fn children(&mut self, dir: &Path) -> Arc<Vec<Node>> {
         self.children
             .entry(dir.to_path_buf())

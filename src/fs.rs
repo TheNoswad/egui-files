@@ -185,10 +185,6 @@ pub fn open(path: &Path) -> io::Result<()> {
     open::that_detached(path)
 }
 
-pub fn trash(paths: &[PathBuf]) -> Result<(), String> {
-    trash::delete_all(paths).map_err(|e| e.to_string())
-}
-
 pub fn rename(from: &Path, new_name: &str) -> io::Result<PathBuf> {
     let new_name = new_name.trim();
     if new_name.is_empty() || new_name.contains(['/', std::path::MAIN_SEPARATOR]) {
@@ -214,71 +210,12 @@ pub fn create_dir(parent: &Path) -> io::Result<PathBuf> {
     Ok(path)
 }
 
-/// Copies or moves `sources` into `dest_dir`, renaming on conflicts.
-pub fn paste(sources: &[PathBuf], dest_dir: &Path, cut: bool) -> io::Result<()> {
-    for src in sources {
-        let Some(name) = src.file_name() else {
-            continue;
-        };
-        if cut && src.parent() == Some(dest_dir) {
-            continue;
-        }
-        if src.is_dir() && dest_dir.starts_with(src) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("cannot paste {} into itself", src.display()),
-            ));
-        }
-        let target = unique_path(dest_dir, name);
-        if cut {
-            // Rename fails across filesystems; fall back to copy + delete.
-            if fs::rename(src, &target).is_err() {
-                copy_recursive(src, &target)?;
-                remove_all(src)?;
-            }
-        } else {
-            copy_recursive(src, &target)?;
-        }
-    }
-    Ok(())
-}
-
-fn copy_recursive(src: &Path, dst: &Path) -> io::Result<()> {
-    let meta = fs::symlink_metadata(src)?;
-    if meta.file_type().is_symlink() {
-        #[cfg(unix)]
-        return std::os::unix::fs::symlink(fs::read_link(src)?, dst);
-        #[cfg(not(unix))]
-        if fs::metadata(src)?.is_file() {
-            return fs::copy(src, dst).map(drop);
-        }
-    }
-    if meta.is_dir() {
-        fs::create_dir(dst)?;
-        for entry in fs::read_dir(src)? {
-            let entry = entry?;
-            copy_recursive(&entry.path(), &dst.join(entry.file_name()))?;
-        }
-        Ok(())
-    } else {
-        fs::copy(src, dst).map(drop)
-    }
-}
-
-fn remove_all(path: &Path) -> io::Result<()> {
-    if fs::symlink_metadata(path)?.is_dir() {
-        fs::remove_dir_all(path)
-    } else {
-        fs::remove_file(path)
-    }
-}
-
 fn exists(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok()
 }
 
 /// `dir/name`, or `dir/name (n).ext` if that is taken.
-fn unique_path(dir: &Path, name: &OsStr) -> PathBuf {
+pub fn unique_path(dir: &Path, name: &OsStr) -> PathBuf {
     let candidate = dir.join(name);
     if !exists(&candidate) {
         return candidate;

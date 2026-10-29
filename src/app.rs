@@ -9,10 +9,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     images::ImageCache,
+    jobs::Jobs,
     places::{self, Place},
     preview::TextCache,
     tab::{AppAction, BrowserTab, Shared},
     tree::{FolderTree, TreeAction},
+    watcher::DirWatcher,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,6 +70,11 @@ pub struct FilesApp {
     next_tab_id: u64,
     places: Vec<Place>,
     drives: Vec<Place>,
+    watcher: DirWatcher,
+    /// Showing the "operations still running" dialog.
+    confirm_quit: bool,
+    /// The user confirmed quitting with operations running.
+    allow_close: bool,
 }
 
 impl FilesApp {
@@ -109,6 +116,7 @@ impl FilesApp {
                 icon_size,
                 images: ImageCache::new(&cc.egui_ctx),
                 texts: TextCache::default(),
+                jobs: Jobs::new(&cc.egui_ctx),
                 clipboard: None,
                 focused_tab: None,
                 app_actions: Vec::new(),
@@ -119,6 +127,9 @@ impl FilesApp {
             next_tab_id,
             places: places::standard_places(),
             drives: places::drives(),
+            watcher: DirWatcher::new(&cc.egui_ctx),
+            confirm_quit: false,
+            allow_close: false,
         }
     }
 
@@ -361,14 +372,75 @@ impl TabViewer for Viewer<'_> {
     }
 }
 
+impl FilesApp {
+    /// Applies file-watcher changes, and refreshes everything when a job finishes
+    /// (it may have touched folders that aren't watched).
+    fn sync_with_disk(&mut self) {
+        let changed = self.watcher.poll();
+        if !changed.is_empty() {
+            self.tree.dirs_changed(&changed);
+            for (_, tab) in self.dock.iter_all_tabs_mut() {
+                tab.dirs_changed(&changed);
+            }
+        }
+        if self.shared.jobs.poll() {
+            self.tree.invalidate();
+            for (_, tab) in self.dock.iter_all_tabs_mut() {
+                tab.mark_stale();
+            }
+        }
+    }
+
+    /// Asks before quitting while file operations are running.
+    fn quit_guard(&mut self, ctx: &egui::Context) {
+        let running = self.shared.jobs.running();
+        if ctx.input(|i| i.viewport().close_requested()) && running > 0 && !self.allow_close {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.confirm_quit = true;
+        }
+        if !self.confirm_quit {
+            return;
+        }
+        if running == 0 {
+            self.confirm_quit = false;
+            return;
+        }
+        let modal = egui::Modal::new(Id::new("confirm_quit")).show(ctx, |ui| {
+            ui.heading("Quit egui-files?");
+            ui.label(format!(
+                "{running} file operation(s) still running. Quitting cancels them."
+            ));
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Cancel operations and quit").clicked() {
+                    self.shared.jobs.cancel_all_and_wait();
+                    self.allow_close = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                if ui.button("Keep running").clicked() {
+                    self.confirm_quit = false;
+                }
+            });
+        });
+        if modal.should_close() {
+            self.confirm_quit = false;
+        }
+    }
+}
+
 impl eframe::App for FilesApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.shared.images.begin_frame();
+        self.sync_with_disk();
+        self.quit_guard(&ctx);
         self.shared.focused_tab = self.dock.find_active_focused().map(|(_, tab)| tab.id);
         self.global_shortcuts(&ctx);
 
         Panel::top("menu_bar").show(ui, |ui| self.menu_bar(ui));
+        if !self.shared.jobs.is_empty() {
+            Panel::bottom("jobs").show(ui, |ui| self.shared.jobs.ui(ui));
+        }
         if self.sidebar_mode != SidebarMode::Hidden {
             Panel::left("sidebar")
                 .resizable(true)
@@ -403,14 +475,15 @@ impl eframe::App for FilesApp {
         for action in std::mem::take(&mut self.shared.app_actions) {
             match action {
                 AppAction::NewTab(path) => self.open_tab(path),
-                AppAction::RefreshAll => {
-                    self.tree.invalidate();
-                    for (_, tab) in self.dock.iter_all_tabs_mut() {
-                        tab.invalidate();
-                    }
-                }
             }
         }
+        let shown = self
+            .dock
+            .iter_all_tabs()
+            .flat_map(|(_, tab)| tab.shown_dirs())
+            .cloned()
+            .collect();
+        self.watcher.set_watched(shown);
         if self.dock.iter_all_tabs().next().is_none() {
             let tab = self.make_tab(places::home_dir());
             self.dock.push_to_first_leaf(tab);

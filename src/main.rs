@@ -3,11 +3,13 @@
 mod app;
 mod fs;
 mod images;
+mod jobs;
 mod places;
 mod preview;
 mod tab;
 mod tree;
 mod views;
+mod watcher;
 mod widgets;
 
 fn main() -> eframe::Result {
