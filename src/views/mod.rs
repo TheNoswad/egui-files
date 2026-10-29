@@ -38,7 +38,7 @@ pub fn show(
     actions: &mut Vec<Action>,
 ) {
     match tab.view {
-        ViewMode::Details => details::show(ui, tab, visible, actions),
+        ViewMode::Details => details::show(ui, tab, visible, shared.clipboard.is_some(), actions),
         ViewMode::Grid => grid::show(ui, tab, visible, shared, actions),
         ViewMode::Columns => columns::show(ui, tab, visible, shared, actions),
     }
@@ -50,6 +50,7 @@ pub(crate) fn item_interaction(
     index: usize,
     entry: &Entry,
     selected: bool,
+    can_paste: bool,
     actions: &mut Vec<Action>,
 ) {
     if response.double_clicked() {
@@ -66,10 +67,10 @@ pub(crate) fn item_interaction(
             modifiers: Modifiers::NONE,
         });
     }
-    response.context_menu(|ui| entry_menu(ui, entry, actions));
+    response.context_menu(|ui| entry_menu(ui, entry, can_paste, actions));
 }
 
-fn entry_menu(ui: &mut Ui, entry: &Entry, actions: &mut Vec<Action>) {
+fn entry_menu(ui: &mut Ui, entry: &Entry, can_paste: bool, actions: &mut Vec<Action>) {
     let mut item = |ui: &mut Ui, label: String, action: Action| {
         if ui.button(label).clicked() {
             actions.push(action);
@@ -91,6 +92,13 @@ fn entry_menu(ui: &mut Ui, entry: &Entry, actions: &mut Vec<Action>) {
     ui.separator();
     item(ui, format!("{} Cut", icon::SCISSORS), Action::Cut);
     item(ui, format!("{} Copy", icon::COPY), Action::Copy);
+    if entry.is_dir && can_paste {
+        item(
+            ui,
+            format!("{} Paste into folder", icon::CLIPBOARD),
+            Action::PasteInto(entry.path.clone()),
+        );
+    }
     item(
         ui,
         format!("{} Copy path", icon::CLIPBOARD),

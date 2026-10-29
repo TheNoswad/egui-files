@@ -1,12 +1,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod dock_tab;
 mod fs;
 mod images;
 mod jobs;
 mod places;
 mod preview;
 mod tab;
+mod trash;
 mod tree;
 mod views;
 mod watcher;

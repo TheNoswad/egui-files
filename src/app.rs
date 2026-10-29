@@ -8,11 +8,13 @@ use egui_phosphor::regular as icon;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    dock_tab::DockTab,
     images::ImageCache,
     jobs::Jobs,
     places::{self, Place},
     preview::TextCache,
     tab::{AppAction, BrowserTab, Shared},
+    trash::TrashTab,
     tree::{FolderTree, TreeAction},
     watcher::DirWatcher,
 };
@@ -29,7 +31,7 @@ enum SidebarMode {
 /// What survives a restart.
 #[derive(Deserialize)]
 struct Persisted {
-    dock: DockState<BrowserTab>,
+    dock: DockState<DockTab>,
     show_hidden: bool,
     bookmarks: Vec<PathBuf>,
     #[serde(default)]
@@ -52,7 +54,7 @@ fn default_icon_size() -> f32 {
 
 #[derive(Serialize)]
 struct PersistedRef<'a> {
-    dock: &'a DockState<BrowserTab>,
+    dock: &'a DockState<DockTab>,
     show_hidden: bool,
     bookmarks: &'a [PathBuf],
     sidebar_mode: SidebarMode,
@@ -62,7 +64,7 @@ struct PersistedRef<'a> {
 }
 
 pub struct FilesApp {
-    dock: DockState<BrowserTab>,
+    dock: DockState<DockTab>,
     shared: Shared,
     bookmarks: Vec<PathBuf>,
     sidebar_mode: SidebarMode,
@@ -89,7 +91,10 @@ impl FilesApp {
         let persisted = persisted
             .filter(|p| p.dock.iter_all_tabs().next().is_some())
             .unwrap_or_else(|| Persisted {
-                dock: DockState::new(vec![BrowserTab::new(1, places::home_dir())]),
+                dock: DockState::new(vec![DockTab::Browser(BrowserTab::new(
+                    1,
+                    places::home_dir(),
+                ))]),
                 show_hidden: false,
                 bookmarks: Vec::new(),
                 sidebar_mode: SidebarMode::default(),
@@ -106,7 +111,7 @@ impl FilesApp {
             show_thumbnails,
             icon_size,
         } = persisted;
-        let next_tab_id = dock.iter_all_tabs().map(|(_, t)| t.id).max().unwrap_or(0) + 1;
+        let next_tab_id = dock.iter_all_tabs().map(|(_, t)| t.id()).max().unwrap_or(0) + 1;
 
         Self {
             dock,
@@ -133,17 +138,35 @@ impl FilesApp {
         }
     }
 
-    fn make_tab(&mut self, path: PathBuf) -> BrowserTab {
-        let id = self.next_tab_id;
+    fn next_id(&mut self) -> u64 {
         self.next_tab_id += 1;
-        BrowserTab::new(id, path)
+        self.next_tab_id - 1
+    }
+
+    fn make_tab(&mut self, path: PathBuf) -> DockTab {
+        DockTab::Browser(BrowserTab::new(self.next_id(), path))
+    }
+
+    /// The focused browser tab's folder, if a browser tab is focused.
+    fn focused_folder(&mut self) -> Option<PathBuf> {
+        self.dock
+            .find_active_focused()
+            .and_then(|(_, tab)| tab.browser().map(|b| b.path.clone()))
     }
 
     fn focused_path(&mut self) -> PathBuf {
-        self.dock
-            .find_active_focused()
-            .map(|(_, tab)| tab.path.clone())
-            .unwrap_or_else(places::home_dir)
+        self.focused_folder().unwrap_or_else(places::home_dir)
+    }
+
+    /// Focuses the trash tab, opening one if needed.
+    fn open_trash(&mut self) {
+        if let Some(path) = self.dock.find_tab_from(DockTab::is_trash) {
+            let _ = self.dock.set_active_tab(path);
+            self.dock.set_focused_node_and_surface(path.node_path());
+        } else {
+            let tab = DockTab::Trash(TrashTab::new(self.next_id()));
+            self.dock.push_to_focused_leaf(tab);
+        }
     }
 
     fn open_tab(&mut self, path: PathBuf) {
@@ -155,14 +178,14 @@ impl FilesApp {
         let Some(id) = self.shared.focused_tab else {
             return;
         };
-        if let Some(path) = self.dock.find_tab_from(|t| t.id == id) {
+        if let Some(path) = self.dock.find_tab_from(|t| t.id() == id) {
             self.dock.remove_tab(path);
         }
     }
 
     /// Navigates the focused tab, or opens a new one if none is focused.
     fn go_to(&mut self, path: PathBuf, new_tab: bool) {
-        if !new_tab && let Some((_, tab)) = self.dock.find_active_focused() {
+        if !new_tab && let Some((_, DockTab::Browser(tab))) = self.dock.find_active_focused() {
             tab.navigate(path);
         } else {
             self.open_tab(path);
@@ -201,6 +224,9 @@ impl FilesApp {
                 {
                     self.close_focused_tab();
                 }
+                if ui.button(format!("{} Open trash", icon::TRASH)).clicked() {
+                    self.open_trash();
+                }
                 ui.separator();
                 if ui.button("Quit").clicked() {
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
@@ -230,10 +256,7 @@ impl FilesApp {
     }
 
     fn sidebar(&mut self, ui: &mut Ui) {
-        let current = self
-            .dock
-            .find_active_focused()
-            .map(|(_, tab)| tab.path.clone());
+        let current = self.focused_folder();
         // (path, open in new tab)
         let mut target: Option<(PathBuf, bool)> = None;
         match self.sidebar_mode {
@@ -278,6 +301,11 @@ impl FilesApp {
         target: &mut Option<(PathBuf, bool)>,
     ) {
         let mut remove_bookmark = None;
+        let mut trash_clicked = false;
+        let trash_focused = matches!(
+            self.dock.find_active_focused(),
+            Some((_, DockTab::Trash(_)))
+        );
 
         let mut place_button = |ui: &mut Ui, glyph: &str, label: &str, path: &PathBuf| {
             let selected = current == Some(path);
@@ -298,6 +326,12 @@ impl FilesApp {
                 for place in &self.places {
                     place_button(ui, place.icon, &place.label, &place.path);
                 }
+                trash_clicked = ui
+                    .add(Button::selectable(
+                        trash_focused,
+                        format!("{}  Trash", icon::TRASH),
+                    ))
+                    .clicked();
 
                 ui.add_space(8.0);
                 ui.label(RichText::new("Bookmarks").small().weak());
@@ -330,6 +364,9 @@ impl FilesApp {
         if let Some(i) = remove_bookmark {
             self.bookmarks.remove(i);
         }
+        if trash_clicked {
+            self.open_trash();
+        }
     }
 }
 
@@ -339,25 +376,27 @@ struct Viewer<'a> {
 }
 
 impl TabViewer for Viewer<'_> {
-    type Tab = BrowserTab;
+    type Tab = DockTab;
 
-    fn title(&mut self, tab: &mut BrowserTab) -> WidgetText {
+    fn title(&mut self, tab: &mut DockTab) -> WidgetText {
         tab.title().into()
     }
 
-    fn id(&mut self, tab: &mut BrowserTab) -> Id {
-        Id::new(("tab", tab.id))
+    fn id(&mut self, tab: &mut DockTab) -> Id {
+        Id::new(("tab", tab.id()))
     }
 
-    fn ui(&mut self, ui: &mut Ui, tab: &mut BrowserTab) {
+    fn ui(&mut self, ui: &mut Ui, tab: &mut DockTab) {
         tab.ui(ui, self.shared);
     }
 
-    fn context_menu(&mut self, ui: &mut Ui, tab: &mut BrowserTab, _path: NodePath) {
-        if ui.button("Duplicate tab").clicked() {
+    fn context_menu(&mut self, ui: &mut Ui, tab: &mut DockTab, _path: NodePath) {
+        if let Some(browser) = tab.browser()
+            && ui.button("Duplicate tab").clicked()
+        {
             self.shared
                 .app_actions
-                .push(AppAction::NewTab(tab.path.clone()));
+                .push(AppAction::NewTab(browser.path.clone()));
             ui.close();
         }
     }
@@ -366,7 +405,7 @@ impl TabViewer for Viewer<'_> {
         self.add_requests.push(path);
     }
 
-    fn scroll_bars(&self, _tab: &BrowserTab) -> [bool; 2] {
+    fn scroll_bars(&self, _tab: &DockTab) -> [bool; 2] {
         // Views manage their own scrolling.
         [false, false]
     }
@@ -434,7 +473,7 @@ impl eframe::App for FilesApp {
         self.shared.images.begin_frame();
         self.sync_with_disk();
         self.quit_guard(&ctx);
-        self.shared.focused_tab = self.dock.find_active_focused().map(|(_, tab)| tab.id);
+        self.shared.focused_tab = self.dock.find_active_focused().map(|(_, tab)| tab.id());
         self.global_shortcuts(&ctx);
 
         Panel::top("menu_bar").show(ui, |ui| self.menu_bar(ui));
@@ -481,7 +520,6 @@ impl eframe::App for FilesApp {
             .dock
             .iter_all_tabs()
             .flat_map(|(_, tab)| tab.shown_dirs())
-            .cloned()
             .collect();
         self.watcher.set_watched(shown);
         if self.dock.iter_all_tabs().next().is_none() {

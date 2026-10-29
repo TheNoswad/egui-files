@@ -589,6 +589,7 @@ dependencies = [
  "image",
  "notify",
  "open",
+ "ron",
  "serde",
  "trash",
 ]

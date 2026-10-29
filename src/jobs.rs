@@ -35,6 +35,13 @@ pub enum JobKind {
     Trash {
         paths: Vec<PathBuf>,
     },
+    Restore {
+        items: Vec<trash::TrashItem>,
+    },
+    /// Permanently deletes items from the trash.
+    Purge {
+        items: Vec<trash::TrashItem>,
+    },
 }
 
 impl JobKind {
@@ -54,6 +61,10 @@ impl JobKind {
                 format!("Moving {} to {}", items(sources.len()), display_name(dest))
             }
             Self::Trash { paths } => format!("Moving {} to trash", items(paths.len())),
+            Self::Restore { items: trashed } => format!("Restoring {}", items(trashed.len())),
+            Self::Purge { items: trashed } => {
+                format!("Permanently deleting {}", items(trashed.len()))
+            }
         }
     }
 }
@@ -346,6 +357,34 @@ fn run(kind: JobKind, p: &Progress) {
                 }
             }
         }
+        JobKind::Restore { items } => {
+            p.total_items.store(items.len() as u64, Relaxed);
+            for item in items {
+                if p.cancelled() {
+                    return;
+                }
+                let original = item.original_path();
+                p.set_current(&original);
+                if let Err(err) = trash::os_limited::restore_all([item]) {
+                    p.error(&original, restore_error(err));
+                }
+                p.done_items.fetch_add(1, Relaxed);
+            }
+        }
+        JobKind::Purge { items } => {
+            p.total_items.store(items.len() as u64, Relaxed);
+            for item in items {
+                if p.cancelled() {
+                    return;
+                }
+                let original = item.original_path();
+                p.set_current(&original);
+                if let Err(err) = trash::os_limited::purge_all([item]) {
+                    p.error(&original, err);
+                }
+                p.done_items.fetch_add(1, Relaxed);
+            }
+        }
         JobKind::Trash { paths } => {
             p.total_items.store(paths.len() as u64, Relaxed);
             for path in paths {
@@ -359,6 +398,15 @@ fn run(kind: JobKind, p: &Progress) {
                 p.done_items.fetch_add(1, Relaxed);
             }
         }
+    }
+}
+
+fn restore_error(err: trash::Error) -> String {
+    match err {
+        trash::Error::RestoreCollision { .. } => {
+            "something already exists at the original location".to_owned()
+        }
+        err => err.to_string(),
     }
 }
 

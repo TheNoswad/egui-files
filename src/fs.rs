@@ -32,28 +32,7 @@ impl Entry {
     }
 
     pub fn icon(&self) -> &'static str {
-        if self.is_dir {
-            return if self.is_symlink {
-                icon::FOLDER_SIMPLE
-            } else {
-                icon::FOLDER
-            };
-        }
-        match self.extension().as_str() {
-            "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" | "ico" | "tif" | "tiff" => {
-                icon::FILE_IMAGE
-            }
-            "mp3" | "flac" | "ogg" | "wav" | "opus" | "m4a" | "aac" => icon::FILE_AUDIO,
-            "mp4" | "mkv" | "webm" | "avi" | "mov" | "wmv" => icon::FILE_VIDEO,
-            "pdf" => icon::FILE_PDF,
-            "zip" | "tar" | "gz" | "xz" | "zst" | "7z" | "rar" | "bz2" => icon::FILE_ZIP,
-            "rs" | "py" | "js" | "ts" | "c" | "h" | "cpp" | "hpp" | "go" | "java" | "sh"
-            | "toml" | "json" | "yaml" | "yml" | "html" | "css" | "lua" | "ron" => icon::FILE_CODE,
-            "txt" | "md" | "log" | "ini" | "cfg" | "conf" => icon::FILE_TEXT,
-            "doc" | "docx" | "odt" | "rtf" => icon::FILE_DOC,
-            _ if self.is_symlink => icon::LINK,
-            _ => icon::FILE,
-        }
+        icon_for(&self.path, self.is_dir, self.is_symlink)
     }
 
     pub fn kind(&self) -> String {
@@ -64,6 +43,37 @@ impl Entry {
             ext if ext.is_empty() => "File".to_owned(),
             ext => format!("{} file", ext.to_ascii_uppercase()),
         }
+    }
+}
+
+/// Icon glyph for a path, based on its extension.
+pub fn icon_for(path: &Path, is_dir: bool, is_symlink: bool) -> &'static str {
+    if is_dir {
+        return if is_symlink {
+            icon::FOLDER_SIMPLE
+        } else {
+            icon::FOLDER
+        };
+    }
+    let extension = path
+        .extension()
+        .and_then(OsStr::to_str)
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    match extension.as_str() {
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" | "ico" | "tif" | "tiff" => {
+            icon::FILE_IMAGE
+        }
+        "mp3" | "flac" | "ogg" | "wav" | "opus" | "m4a" | "aac" => icon::FILE_AUDIO,
+        "mp4" | "mkv" | "webm" | "avi" | "mov" | "wmv" => icon::FILE_VIDEO,
+        "pdf" => icon::FILE_PDF,
+        "zip" | "tar" | "gz" | "xz" | "zst" | "7z" | "rar" | "bz2" => icon::FILE_ZIP,
+        "rs" | "py" | "js" | "ts" | "c" | "h" | "cpp" | "hpp" | "go" | "java" | "sh" | "toml"
+        | "json" | "yaml" | "yml" | "html" | "css" | "lua" | "ron" => icon::FILE_CODE,
+        "txt" | "md" | "log" | "ini" | "cfg" | "conf" => icon::FILE_TEXT,
+        "doc" | "docx" | "odt" | "rtf" => icon::FILE_DOC,
+        _ if is_symlink => icon::LINK,
+        _ => icon::FILE,
     }
 }
 
@@ -202,6 +212,19 @@ pub fn rename(from: &Path, new_name: &str) -> io::Result<PathBuf> {
     }
     fs::rename(from, &to)?;
     Ok(to)
+}
+
+/// Creates an empty file, or a copy of `template`, with a unique name in `parent`.
+pub fn create_file(parent: &Path, template: Option<&Path>) -> io::Result<PathBuf> {
+    let name = template
+        .and_then(Path::file_name)
+        .unwrap_or(OsStr::new("New File"));
+    let path = unique_path(parent, name);
+    match template {
+        Some(template) => fs::copy(template, &path).map(drop)?,
+        None => fs::File::create_new(&path).map(drop)?,
+    }
+    Ok(path)
 }
 
 pub fn create_dir(parent: &Path) -> io::Result<PathBuf> {

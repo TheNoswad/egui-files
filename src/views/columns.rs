@@ -45,7 +45,10 @@ pub fn show(
                         ancestor_column(ui, tab, pair[0], pair[1], show_hidden, actions);
                     });
                 }
-                column(ui, height, |ui| current_column(ui, tab, visible, actions));
+                let can_paste = shared.clipboard.is_some();
+                column(ui, height, |ui| {
+                    current_column(ui, tab, visible, can_paste, actions)
+                });
                 if let Some(entry) = tab.preview_entry() {
                     column(ui, height, |ui| {
                         if entry.is_dir {
@@ -170,7 +173,13 @@ fn ancestor_column(
     );
 }
 
-fn current_column(ui: &mut Ui, tab: &BrowserTab, visible: &[usize], actions: &mut Vec<Action>) {
+fn current_column(
+    ui: &mut Ui,
+    tab: &BrowserTab,
+    visible: &[usize],
+    can_paste: bool,
+    actions: &mut Vec<Action>,
+) {
     let scroll_to = match (tab.scroll_to, tab.cursor) {
         (Some(row), _) => ScrollTo::Always(row),
         (None, Some(row)) => ScrollTo::Once(row),
@@ -185,7 +194,7 @@ fn current_column(ui: &mut Ui, tab: &BrowserTab, visible: &[usize], actions: &mu
             let entry = &tab.entries()[visible[i]];
             let selected = tab.selection.contains(&entry.path);
             let response = entry_row(ui, entry, selected);
-            super::item_interaction(&response, i, entry, selected, actions);
+            super::item_interaction(&response, i, entry, selected, can_paste, actions);
         },
     );
 }

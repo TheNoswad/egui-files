@@ -43,6 +43,23 @@ pub fn standard_places() -> Vec<Place> {
     places
 }
 
+/// Files in the user's templates folder, for "New from template".
+pub fn templates() -> Vec<PathBuf> {
+    let Some(dir) = directories::UserDirs::new().and_then(|d| d.template_dir().map(PathBuf::from))
+    else {
+        return Vec::new();
+    };
+    let mut templates: Vec<PathBuf> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file())
+        .collect();
+    templates.sort();
+    templates
+}
+
 #[cfg(windows)]
 pub fn drives() -> Vec<Place> {
     ('A'..='Z')

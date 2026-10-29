@@ -20,3 +20,6 @@ trash = "5.2.9"
 # Image decoding is painfully slow unoptimized; optimize dependencies even in dev builds.
 [profile.dev.package."*"]
 opt-level = 2
+
+[dev-dependencies]
+ron = "0.12"

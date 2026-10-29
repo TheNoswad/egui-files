@@ -9,7 +9,13 @@ use crate::{
     tab::{Action, BrowserTab},
 };
 
-pub fn show(ui: &mut Ui, tab: &BrowserTab, visible: &[usize], actions: &mut Vec<Action>) {
+pub fn show(
+    ui: &mut Ui,
+    tab: &BrowserTab,
+    visible: &[usize],
+    can_paste: bool,
+    actions: &mut Vec<Action>,
+) {
     let row_height = ui.text_style_height(&TextStyle::Body) + 6.0;
     let mut table = TableBuilder::new(ui)
         .id_salt(("details", tab.id))
@@ -67,7 +73,14 @@ pub fn show(ui: &mut Ui, tab: &BrowserTab, visible: &[usize], actions: &mut Vec<
                 row.col(|ui| {
                     ui.label(entry.kind());
                 });
-                super::item_interaction(&row.response(), index, entry, selected, actions);
+                super::item_interaction(
+                    &row.response(),
+                    index,
+                    entry,
+                    selected,
+                    can_paste,
+                    actions,
+                );
             });
         });
 }

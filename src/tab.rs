@@ -16,6 +16,7 @@ use crate::{
     fs::{self, Entry, Sort, SortKey},
     images::{self, ImageCache},
     jobs::{JobKind, Jobs},
+    places,
     preview::{self, TextCache},
     views::{self, ViewMode},
 };
@@ -78,10 +79,14 @@ pub enum Action {
     StartRename,
     CommitRename,
     NewFolder,
+    /// Creates an empty file, or a copy of the given template.
+    NewFile(Option<PathBuf>),
     Trash,
     Copy,
     Cut,
     Paste,
+    /// Pastes into a subfolder instead of the current folder.
+    PasteInto(PathBuf),
     CopyPath,
     /// Copies the path of the folder itself, ignoring the selection.
     CopyFolderPath,
@@ -489,6 +494,9 @@ impl BrowserTab {
             if key(Modifiers::NONE, Key::Delete) {
                 actions.push(Action::Trash);
             }
+            if key(Modifiers::COMMAND | Modifiers::ALT, Key::N) {
+                actions.push(Action::NewFile(None));
+            }
             if key(cmd_shift, Key::N) {
                 actions.push(Action::NewFolder);
             }
@@ -606,6 +614,7 @@ impl BrowserTab {
             "Ctrl+V",
             Action::Paste,
         );
+        ui.separator();
         item(
             ui,
             true,
@@ -613,6 +622,26 @@ impl BrowserTab {
             "Ctrl+Shift+N",
             Action::NewFolder,
         );
+        item(
+            ui,
+            true,
+            format!("{} New file", icon::FILE_PLUS),
+            "Ctrl+Alt+N",
+            Action::NewFile(None),
+        );
+        let templates = places::templates();
+        if !templates.is_empty() {
+            ui.menu_button(format!("{} New from template", icon::FILE_PLUS), |ui| {
+                for template in templates {
+                    let label = format!(
+                        "{} {}",
+                        fs::icon_for(&template, false, false),
+                        fs::display_name(&template)
+                    );
+                    item(ui, true, label, "", Action::NewFile(Some(template)));
+                }
+            });
+        }
         ui.separator();
         item(
             ui,
@@ -939,17 +968,12 @@ impl BrowserTab {
                 }
             }
             Action::NewFolder => match fs::create_dir(&self.path) {
-                Ok(path) => {
-                    self.filter.clear();
-                    self.reload();
-                    self.select_path(&path, true);
-                    self.rename = Some(Rename {
-                        name: fs::display_name(&path),
-                        path,
-                        just_opened: true,
-                    });
-                }
+                Ok(path) => self.start_renaming_new(path),
                 Err(err) => self.error = Some(format!("Could not create folder: {err}")),
+            },
+            Action::NewFile(template) => match fs::create_file(&self.path, template.as_deref()) {
+                Ok(path) => self.start_renaming_new(path),
+                Err(err) => self.error = Some(format!("Could not create file: {err}")),
             },
             Action::Trash => {
                 let paths = self.selected_paths();
@@ -971,18 +995,8 @@ impl BrowserTab {
                     cut: matches!(action, Action::Cut),
                 });
             }
-            Action::Paste => {
-                let Some(clipboard) = &shared.clipboard else {
-                    return;
-                };
-                let (sources, dest) = (clipboard.paths.clone(), self.path.clone());
-                if clipboard.cut {
-                    shared.clipboard = None;
-                    shared.jobs.start(JobKind::Move { sources, dest });
-                } else {
-                    shared.jobs.start(JobKind::Copy { sources, dest });
-                }
-            }
+            Action::Paste => paste(shared, self.path.clone()),
+            Action::PasteInto(dest) => paste(shared, dest),
             Action::CopyFolderPath => ctx.copy_text(self.path.display().to_string()),
             Action::ClearSelection => {
                 self.selection.clear();
@@ -1000,6 +1014,18 @@ impl BrowserTab {
             Action::ToggleHidden => shared.show_hidden = !shared.show_hidden,
             Action::TogglePreview => self.show_preview = !self.show_preview,
         }
+    }
+
+    /// Selects a just-created item and opens the rename dialog for it.
+    fn start_renaming_new(&mut self, path: PathBuf) {
+        self.filter.clear();
+        self.reload();
+        self.select_path(&path, true);
+        self.rename = Some(Rename {
+            name: fs::display_name(&path),
+            path,
+            just_opened: true,
+        });
     }
 
     fn select(&mut self, index: usize, modifiers: Modifiers, visible: &[usize]) {
@@ -1038,6 +1064,20 @@ impl BrowserTab {
         } else if let Err(err) = fs::open(&path) {
             self.error = Some(format!("Could not open {}: {err}", path.display()));
         }
+    }
+}
+
+/// Starts copying or moving the clipboard contents into `dest`.
+fn paste(shared: &mut Shared, dest: PathBuf) {
+    let Some(clipboard) = &shared.clipboard else {
+        return;
+    };
+    let sources = clipboard.paths.clone();
+    if clipboard.cut {
+        shared.clipboard = None;
+        shared.jobs.start(JobKind::Move { sources, dest });
+    } else {
+        shared.jobs.start(JobKind::Copy { sources, dest });
     }
 }
 
@@ -1251,6 +1291,55 @@ mod tests {
         run_frame(&ctx, &mut tab, &mut shared, &[]);
         assert_eq!(tab.path, root);
         assert!(tab.error.as_deref().unwrap().contains("no longer exists"));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn new_file_from_template_and_paste_into_folder() {
+        let root = fixture("newfile");
+        let a = root.join("a");
+        let ctx = Context::default();
+        let mut tab = BrowserTab::new(1, a.clone());
+        let mut shared = shared(&ctx, &tab);
+        run_frame(&ctx, &mut tab, &mut shared, &[]);
+
+        // Empty file: created, selected, and the rename dialog opens.
+        tab.apply(Action::NewFile(None), &ctx, &mut shared);
+        let created = a.join("New File");
+        assert!(created.is_file());
+        assert!(tab.selection.contains(&created));
+        assert_eq!(
+            tab.rename.as_ref().map(|r| r.path.clone()),
+            Some(created.clone())
+        );
+        tab.rename = None;
+
+        // Template: copied with its name, and a second one gets a unique name.
+        let template = root.join("Report.md");
+        std::fs::write(&template, "# Title").unwrap();
+        tab.apply(Action::NewFile(Some(template.clone())), &ctx, &mut shared);
+        tab.apply(Action::NewFile(Some(template.clone())), &ctx, &mut shared);
+        assert_eq!(
+            std::fs::read_to_string(a.join("Report.md")).unwrap(),
+            "# Title"
+        );
+        assert!(a.join("Report (1).md").is_file());
+
+        // Paste into a subfolder rather than the current folder.
+        shared.clipboard = Some(FileClipboard {
+            paths: vec![created.clone()],
+            cut: false,
+        });
+        tab.apply(Action::PasteInto(a.join("c")), &ctx, &mut shared);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while shared.jobs.running() > 0 {
+            assert!(std::time::Instant::now() < deadline);
+            shared.jobs.poll();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(a.join("c/New File").is_file());
+        assert!(created.is_file(), "copy keeps the original");
 
         std::fs::remove_dir_all(root).unwrap();
     }

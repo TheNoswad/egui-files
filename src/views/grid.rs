@@ -100,7 +100,14 @@ pub fn show(
                     }
 
                     let response = response.on_hover_text(&entry.name);
-                    super::item_interaction(&response, index, entry, selected, actions);
+                    super::item_interaction(
+                        &response,
+                        index,
+                        entry,
+                        selected,
+                        shared.clipboard.is_some(),
+                        actions,
+                    );
                 }
             });
         });
