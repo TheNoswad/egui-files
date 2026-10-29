@@ -83,6 +83,9 @@ pub enum Action {
     Cut,
     Paste,
     CopyPath,
+    /// Copies the path of the folder itself, ignoring the selection.
+    CopyFolderPath,
+    ClearSelection,
     ToggleHidden,
     TogglePreview,
 }
@@ -376,6 +379,13 @@ impl BrowserTab {
         CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
+                // Registered before the view so items, drawn on top, take
+                // precedence; this only receives clicks on empty space.
+                let background = ui.interact(
+                    ui.max_rect(),
+                    Id::new(("background", self.id)),
+                    egui::Sense::click(),
+                );
                 if visible.is_empty() && self.view != ViewMode::Columns {
                     ui.centered_and_justified(|ui| {
                         ui.weak(if self.filter.is_empty() {
@@ -387,6 +397,10 @@ impl BrowserTab {
                 } else {
                     views::show(ui, self, &visible, shared, &mut actions);
                 }
+                if background.clicked() && !ui.input(|i| i.modifiers.command || i.modifiers.shift) {
+                    actions.push(Action::ClearSelection);
+                }
+                background.context_menu(|ui| self.background_menu(ui, shared, &mut actions));
             });
         self.rename_modal(ui.ctx(), &mut actions);
         self.scroll_to = None;
@@ -564,6 +578,113 @@ impl BrowserTab {
                 });
             });
         });
+    }
+
+    /// Context menu for empty space in the listing; acts on the folder itself.
+    fn background_menu(&self, ui: &mut Ui, shared: &Shared, actions: &mut Vec<Action>) {
+        let mut item =
+            |ui: &mut Ui, enabled: bool, label: String, shortcut: &str, action: Action| {
+                let button = Button::new(label).shortcut_text(shortcut);
+                if ui.add_enabled(enabled, button).clicked() {
+                    actions.push(action);
+                    ui.close();
+                }
+            };
+        let paste_label = match &shared.clipboard {
+            Some(clipboard) => format!(
+                "{} Paste {} item{}",
+                icon::CLIPBOARD,
+                clipboard.paths.len(),
+                if clipboard.paths.len() == 1 { "" } else { "s" }
+            ),
+            None => format!("{} Paste", icon::CLIPBOARD),
+        };
+        item(
+            ui,
+            shared.clipboard.is_some(),
+            paste_label,
+            "Ctrl+V",
+            Action::Paste,
+        );
+        item(
+            ui,
+            true,
+            format!("{} New folder", icon::FOLDER_PLUS),
+            "Ctrl+Shift+N",
+            Action::NewFolder,
+        );
+        ui.separator();
+        item(
+            ui,
+            true,
+            format!("{} Select all", icon::CHECK_SQUARE),
+            "Ctrl+A",
+            Action::SelectAll,
+        );
+        item(
+            ui,
+            true,
+            format!("{} Refresh", icon::ARROW_CLOCKWISE),
+            "F5",
+            Action::Refresh,
+        );
+        item(
+            ui,
+            true,
+            format!("{} Copy folder path", icon::COPY),
+            "",
+            Action::CopyFolderPath,
+        );
+        item(
+            ui,
+            true,
+            format!("{} Open in new tab", icon::PLUS),
+            "",
+            Action::OpenInNewTab(self.path.clone()),
+        );
+        ui.separator();
+        ui.menu_button(format!("{} View", icon::EYE), |ui| {
+            for (mode, glyph, label) in ViewMode::ALL {
+                if ui
+                    .radio(self.view == mode, format!("{glyph} {label}"))
+                    .clicked()
+                {
+                    actions.push(Action::SetView(mode));
+                    ui.close();
+                }
+            }
+        });
+        ui.menu_button(format!("{} Sort by", icon::SORT_ASCENDING), |ui| {
+            for (key, label) in [
+                (SortKey::Name, "Name"),
+                (SortKey::Size, "Size"),
+                (SortKey::Modified, "Modified"),
+                (SortKey::Kind, "Kind"),
+            ] {
+                let arrow = match (self.sort.key == key, self.sort.ascending) {
+                    (false, _) => "",
+                    (true, true) => icon::CARET_UP,
+                    (true, false) => icon::CARET_DOWN,
+                };
+                if ui
+                    .radio(self.sort.key == key, format!("{label} {arrow}"))
+                    .clicked()
+                {
+                    actions.push(Action::SortBy(key));
+                    ui.close();
+                }
+            }
+        });
+        let mut show_hidden = shared.show_hidden;
+        if ui.checkbox(&mut show_hidden, "Show hidden files").clicked() {
+            actions.push(Action::ToggleHidden);
+            ui.close();
+        }
+        let mut show_preview = self.show_preview;
+        if ui.checkbox(&mut show_preview, "Preview pane").clicked() {
+            actions.push(Action::TogglePreview);
+            ui.close();
+        }
     }
 
     fn filter_id(&self) -> Id {
@@ -862,6 +983,12 @@ impl BrowserTab {
                     shared.jobs.start(JobKind::Copy { sources, dest });
                 }
             }
+            Action::CopyFolderPath => ctx.copy_text(self.path.display().to_string()),
+            Action::ClearSelection => {
+                self.selection.clear();
+                self.anchor = None;
+                self.cursor = None;
+            }
             Action::CopyPath => {
                 let paths = self.selected_paths();
                 ctx.copy_text(if paths.is_empty() {
@@ -962,6 +1089,15 @@ mod tests {
                 modifiers: Modifiers::NONE,
             })
             .collect();
+        run_events(ctx, tab, shared, events);
+    }
+
+    fn run_events(
+        ctx: &Context,
+        tab: &mut BrowserTab,
+        shared: &mut Shared,
+        events: Vec<egui::Event>,
+    ) {
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -972,6 +1108,84 @@ mod tests {
         };
         let mut output = ctx.run_ui(input, |ui| tab.ui(ui, shared));
         output.textures_delta.clear();
+    }
+
+    /// Moves the pointer to `pos`, then presses and releases `button` over three frames.
+    fn click(
+        ctx: &Context,
+        tab: &mut BrowserTab,
+        shared: &mut Shared,
+        pos: egui::Pos2,
+        button: egui::PointerButton,
+    ) {
+        let press = |pressed| egui::Event::PointerButton {
+            pos,
+            button,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        run_events(ctx, tab, shared, vec![egui::Event::PointerMoved(pos)]);
+        run_events(ctx, tab, shared, vec![press(true)]);
+        run_events(ctx, tab, shared, vec![press(false)]);
+        run_events(ctx, tab, shared, vec![]);
+    }
+
+    #[test]
+    fn empty_space_has_context_menu_and_clears_selection() {
+        let root = fixture("background");
+        let a = root.join("a");
+        for view in [ViewMode::Details, ViewMode::Grid, ViewMode::Columns] {
+            let ctx = Context::default();
+            let mut tab = BrowserTab::new(1, a.clone());
+            tab.view = view;
+            let mut shared = shared(&ctx, &tab);
+            run_frame(&ctx, &mut tab, &mut shared, &[]);
+
+            // Well below the two entries, inside the listing area.
+            let empty = egui::pos2(900.0, 450.0);
+            click(
+                &ctx,
+                &mut tab,
+                &mut shared,
+                empty,
+                egui::PointerButton::Secondary,
+            );
+            assert!(
+                ctx.any_popup_open(),
+                "{view:?}: context menu on empty space"
+            );
+            run_events(
+                &ctx,
+                &mut tab,
+                &mut shared,
+                vec![egui::Event::Key {
+                    key: Key::Escape,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Modifiers::NONE,
+                }],
+            );
+            // Popup bookkeeping lags a couple of frames behind.
+            for _ in 0..3 {
+                run_frame(&ctx, &mut tab, &mut shared, &[]);
+            }
+            assert!(!ctx.any_popup_open(), "{view:?}: Escape closes the menu");
+
+            tab.selection = HashSet::from([a.join("b")]);
+            click(
+                &ctx,
+                &mut tab,
+                &mut shared,
+                empty,
+                egui::PointerButton::Primary,
+            );
+            assert!(
+                tab.selection.is_empty(),
+                "{view:?}: clicking empty space clears selection"
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
