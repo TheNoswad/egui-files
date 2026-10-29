@@ -15,6 +15,7 @@ use crate::{
     places::{self, Place},
     preview::TextCache,
     tab::{AppAction, BrowserTab, Shared},
+    terminal::TerminalPanel,
     trash::{self, TrashCount, TrashTab},
     tree::{FolderTree, TreeAction},
     watcher::DirWatcher,
@@ -43,6 +44,8 @@ struct Persisted {
     show_thumbnails: bool,
     #[serde(default = "default_icon_size")]
     icon_size: f32,
+    #[serde(default)]
+    show_terminal: bool,
 }
 
 fn default_true() -> bool {
@@ -62,6 +65,7 @@ struct PersistedRef<'a> {
     tree: &'a FolderTree,
     show_thumbnails: bool,
     icon_size: f32,
+    show_terminal: bool,
 }
 
 pub struct FilesApp {
@@ -86,6 +90,8 @@ pub struct FilesApp {
     drag_out_active: bool,
     /// Files dropped onto the window via winit (X11, Windows).
     os_dropped: Vec<PathBuf>,
+    show_terminal: bool,
+    terminal: TerminalPanel,
 }
 
 impl FilesApp {
@@ -110,6 +116,7 @@ impl FilesApp {
                 tree: FolderTree::default(),
                 show_thumbnails: default_true(),
                 icon_size: default_icon_size(),
+                show_terminal: false,
             });
         let Persisted {
             dock,
@@ -119,6 +126,7 @@ impl FilesApp {
             tree,
             show_thumbnails,
             icon_size,
+            show_terminal,
         } = persisted;
         let next_tab_id = dock.iter_all_tabs().map(|(_, t)| t.id()).max().unwrap_or(0) + 1;
 
@@ -149,6 +157,8 @@ impl FilesApp {
             wayland: crate::wayland_dnd::WaylandDnd::new(cc),
             drag_out_active: false,
             os_dropped: Vec::new(),
+            show_terminal,
+            terminal: TerminalPanel::default(),
         }
     }
 
@@ -217,7 +227,23 @@ impl FilesApp {
         }
     }
 
+    fn toggle_terminal(&mut self, ctx: &egui::Context) {
+        self.show_terminal = !self.show_terminal;
+        if self.show_terminal {
+            TerminalPanel::focus(ctx);
+        } else {
+            TerminalPanel::surrender_focus(ctx);
+        }
+    }
+
     fn global_shortcuts(&mut self, ctx: &egui::Context) {
+        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F4)) {
+            self.toggle_terminal(ctx);
+        }
+        // The shell gets everything else typed into it (Ctrl+W deletes a word).
+        if self.show_terminal && TerminalPanel::has_focus(ctx) {
+            return;
+        }
         let (new_tab, close_tab) = ctx.input_mut(|i| {
             (
                 i.consume_key(Modifiers::COMMAND, Key::T),
@@ -260,6 +286,10 @@ impl FilesApp {
             ui.menu_button("View", |ui| {
                 ui.checkbox(&mut self.shared.show_hidden, "Show hidden files (Ctrl+H)");
                 ui.checkbox(&mut self.shared.show_thumbnails, "Show thumbnails");
+                let mut terminal = self.show_terminal;
+                if ui.checkbox(&mut terminal, "Terminal (F4)").changed() {
+                    self.toggle_terminal(ui.ctx());
+                }
                 ui.add(
                     egui::Slider::new(&mut self.shared.icon_size, 32.0..=192.0).text("Icon size"),
                 );
@@ -523,6 +553,23 @@ impl FilesApp {
         }
     }
 
+    fn terminal_panel(&mut self, ui: &mut Ui) {
+        let folder = self.focused_folder();
+        let response = Panel::bottom("terminal")
+            .resizable(true)
+            .default_size(240.0)
+            .frame(egui::Frame::NONE)
+            .show(ui, |ui| self.terminal.ui(ui, folder.as_deref()))
+            .inner;
+        if let Some(path) = response.navigate {
+            self.go_to(path, false);
+        }
+        if response.close {
+            self.show_terminal = false;
+            self.terminal.reset();
+        }
+    }
+
     /// Asks before quitting while file operations are running.
     fn quit_guard(&mut self, ctx: &egui::Context) {
         let running = self.shared.jobs.running();
@@ -572,6 +619,9 @@ impl eframe::App for FilesApp {
         Panel::top("menu_bar").show(ui, |ui| self.menu_bar(ui));
         if !self.shared.jobs.is_empty() {
             Panel::bottom("jobs").show(ui, |ui| self.shared.jobs.ui(ui));
+        }
+        if self.show_terminal {
+            self.terminal_panel(ui);
         }
         if self.sidebar_mode != SidebarMode::Hidden {
             Panel::left("sidebar")
@@ -689,6 +739,7 @@ impl eframe::App for FilesApp {
             tree: &self.tree,
             show_thumbnails: self.shared.show_thumbnails,
             icon_size: self.shared.icon_size,
+            show_terminal: self.show_terminal,
         };
         eframe::set_value(storage, eframe::APP_KEY, &state);
     }

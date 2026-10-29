@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+alacritty_terminal = { version = "0.26", default-features = false }
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 directories = "6.0.0"
 eframe = { version = "0.36", default-features = false, features = ["wgpu", "default_fonts", "persistence", "wayland", "x11"] }
@@ -30,3 +31,4 @@ smithay-client-toolkit = { version = "0.19", default-features = false }
 wayland-client = "0.31"
 wayland-backend = { version = "0.3", features = ["client_system"] }
 raw-window-handle = "0.6"
+libc = "0.2"

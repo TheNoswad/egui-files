@@ -9,6 +9,7 @@ mod jobs;
 mod places;
 mod preview;
 mod tab;
+mod terminal;
 mod trash;
 mod tree;
 mod views;
