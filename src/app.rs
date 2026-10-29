@@ -15,7 +15,7 @@ use crate::{
     places::{self, Place},
     preview::TextCache,
     tab::{AppAction, BrowserTab, Shared},
-    terminal::TerminalPanel,
+    terminal_panel::TerminalPanel,
     trash::{self, TrashCount, TrashTab},
     tree::{FolderTree, TreeAction},
     watcher::DirWatcher,
@@ -230,9 +230,9 @@ impl FilesApp {
     fn toggle_terminal(&mut self, ctx: &egui::Context) {
         self.show_terminal = !self.show_terminal;
         if self.show_terminal {
-            TerminalPanel::focus(ctx);
+            self.terminal.focus();
         } else {
-            TerminalPanel::surrender_focus(ctx);
+            self.terminal.surrender_focus(ctx);
         }
     }
 
@@ -241,7 +241,7 @@ impl FilesApp {
             self.toggle_terminal(ctx);
         }
         // The shell gets everything else typed into it (Ctrl+W deletes a word).
-        if self.show_terminal && TerminalPanel::has_focus(ctx) {
+        if self.show_terminal && self.terminal.has_focus(ctx) {
             return;
         }
         let (new_tab, close_tab) = ctx.input_mut(|i| {

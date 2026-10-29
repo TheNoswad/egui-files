@@ -1,9 +1,9 @@
-//! An optional terminal panel running the user's shell.
+//! A terminal running the user's shell, shown in the terminal panel.
 //!
 //! The terminal emulation and the PTY come from `alacritty_terminal`; this
-//! module draws the grid with egui and translates input. On Linux the shell
-//! follows the focused folder while it sits at a prompt, and `cd` in the shell
-//! navigates the focused tab.
+//! module draws the grid with egui and translates input. On Linux a terminal
+//! set to follow the focused folder `cd`s along while it sits at a prompt, and
+//! `cd` in its shell navigates the focused tab.
 
 use std::{
     borrow::Cow,
@@ -31,28 +31,30 @@ use egui::{
     Color32, Context, CursorIcon, EventFilter, FontId, Id, Key, Modifiers, PointerButton, Pos2,
     Rect, Sense, Stroke, TextStyle, Ui, Vec2, pos2, vec2,
 };
-
-const TERMINAL_ID: &str = "terminal";
+use egui_dock::Split;
 
 /// Seconds to wait for the shell to report the folder it was sent to.
 #[cfg(target_os = "linux")]
 const CD_TIMEOUT: f64 = 2.0;
 
-fn terminal_id() -> Id {
-    Id::new(TERMINAL_ID)
-}
-
-/// What the app should do after the panel was drawn.
+/// What the panel should do after a terminal was drawn.
 #[derive(Default)]
 pub struct TerminalResponse {
     /// The shell changed folder; show it in the focused tab.
     pub navigate: Option<PathBuf>,
-    /// The shell exited or the user closed the panel.
+    /// The shell exited or the user closed the terminal.
     pub close: bool,
+    /// Open another terminal next to this one, or in a new tab when `None`.
+    pub open: Option<Option<Split>>,
 }
 
 #[derive(Default)]
-pub struct TerminalPanel {
+pub struct Terminal {
+    pub id: u64,
+    /// Keep the shell in the focused tab's folder, and the tab in the shell's.
+    pub follow: bool,
+    /// Give this terminal keyboard focus the next time it's drawn.
+    focus_requested: bool,
     session: Option<Session>,
     /// Why the shell couldn't be started.
     error: Option<String>,
@@ -68,26 +70,31 @@ pub struct TerminalPanel {
     last_mouse_cell: Option<(usize, usize)>,
 }
 
-impl TerminalPanel {
-    pub fn has_focus(ctx: &Context) -> bool {
-        ctx.memory(|m| m.has_focus(terminal_id()))
+impl Terminal {
+    pub fn new(id: u64, follow: bool) -> Self {
+        Self {
+            id,
+            follow,
+            focus_requested: true,
+            ..Default::default()
+        }
     }
 
-    pub fn focus(ctx: &Context) {
-        ctx.memory_mut(|m| m.request_focus(terminal_id()));
+    pub fn widget_id(&self) -> Id {
+        Id::new(("terminal", self.id))
     }
 
-    pub fn surrender_focus(ctx: &Context) {
-        ctx.memory_mut(|m| m.surrender_focus(terminal_id()));
+    pub fn request_focus(&mut self) {
+        self.focus_requested = true;
     }
 
-    /// Ends the shell; the next `ui` call starts a new one.
-    pub fn reset(&mut self) {
-        *self = Self::default();
+    /// The title the shell set, if any.
+    pub fn title(&self) -> Option<&str> {
+        self.session.as_ref()?.title.as_deref()
     }
 
-    /// Draws the terminal into the rest of `ui`. `folder` is the focused
-    /// browser tab's folder, which the shell follows.
+    /// Draws the terminal into the rest of `ui`, starting the shell in
+    /// `folder` (the focused browser tab's) if it isn't running yet.
     pub fn ui(&mut self, ui: &mut Ui, folder: Option<&Path>) -> TerminalResponse {
         let mut response = TerminalResponse::default();
         let font = TextStyle::Monospace.resolve(ui.style());
@@ -108,7 +115,7 @@ impl TerminalPanel {
             return response;
         }
         if self.session.is_none() {
-            match Session::spawn(ui.ctx(), folder, None, size, cell) {
+            match Session::spawn(ui.ctx(), folder, user_shell(), size, cell) {
                 Ok(session) => {
                     self.session = Some(session);
                     self.synced = folder.map(Path::to_path_buf);
@@ -131,10 +138,14 @@ impl TerminalPanel {
         }
         session.resize(size, cell);
 
-        let id = terminal_id();
+        let id = self.widget_id();
         let widget = ui.interact(rect, id, Sense::click_and_drag());
         ui.advance_cursor_after_rect(rect);
-        if widget.clicked() || widget.drag_started() || widget.secondary_clicked() {
+        if std::mem::take(&mut self.focus_requested)
+            || widget.clicked()
+            || widget.drag_started()
+            || widget.secondary_clicked()
+        {
             widget.request_focus();
         }
         let focused = widget.has_focus();
@@ -171,7 +182,9 @@ impl TerminalPanel {
         paint(ui, session, &grid, &font, &palette, focused);
 
         #[cfg(target_os = "linux")]
-        if let Some(folder) = folder {
+        if self.follow
+            && let Some(folder) = folder
+        {
             response.navigate = self.follow(ui.input(|i| i.time), folder);
         }
         #[cfg(not(target_os = "linux"))]
@@ -201,7 +214,7 @@ impl TerminalPanel {
             // The clipboard arrives as a paste event next frame.
             ui.ctx()
                 .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
-            Self::focus(ui.ctx());
+            self.focus_requested = true;
             ui.close();
         }
         if ui.button("Clear scrollback").clicked() {
@@ -211,7 +224,13 @@ impl TerminalPanel {
             ui.close();
         }
         ui.separator();
-        if ui.button("Close terminal").clicked() {
+        open_menu(ui, response);
+        ui.checkbox(&mut self.follow, "Follow folder");
+        ui.separator();
+        if ui
+            .add(egui::Button::new("Close terminal").shortcut_text("Ctrl+Shift+W"))
+            .clicked()
+        {
             response.close = true;
             ui.close();
         }
@@ -449,6 +468,29 @@ impl TerminalPanel {
     }
 }
 
+/// The shell to run: the user's login shell, except in tests, where its
+/// setup may prompt for things.
+fn user_shell() -> Option<tty::Shell> {
+    cfg!(test).then(|| tty::Shell::new("/bin/sh".into(), Vec::new()))
+}
+
+/// Buttons to open another terminal.
+pub fn open_menu(ui: &mut Ui, response: &mut TerminalResponse) {
+    for (label, shortcut, open) in [
+        ("New tab", "Ctrl+Shift+T", None),
+        ("Split right", "Ctrl+Shift+E", Some(Split::Right)),
+        ("Split below", "Ctrl+Shift+O", Some(Split::Below)),
+    ] {
+        if ui
+            .add(egui::Button::new(label).shortcut_text(shortcut))
+            .clicked()
+        {
+            response.open = Some(open);
+            ui.close();
+        }
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn shell_quote(path: &Path) -> String {
     format!("'{}'", path.to_string_lossy().replace('\'', r"'\''"))
@@ -509,6 +551,7 @@ struct Session {
     size: TermSize,
     cell: Vec2,
     exited: bool,
+    title: Option<String>,
     /// The shell's process id and a handle on the PTY, to tell whether the
     /// shell is at a prompt and which folder it's in.
     #[cfg(target_os = "linux")]
@@ -558,6 +601,7 @@ impl Session {
             size,
             cell,
             exited: false,
+            title: None,
             #[cfg(target_os = "linux")]
             shell,
         })
@@ -589,6 +633,8 @@ impl Session {
                 TermEvent::TextAreaSizeRequest(format) => {
                     self.write(format(self.size.window_size(self.cell)).into_bytes());
                 }
+                TermEvent::Title(title) => self.title = Some(title),
+                TermEvent::ResetTitle => self.title = None,
                 TermEvent::ChildExit(_) | TermEvent::Exit => self.exited = true,
                 _ => {}
             }
@@ -1088,15 +1134,16 @@ mod tests {
         };
         // Not the user's shell, whose setup may prompt for things.
         let sh = tty::Shell::new("/bin/sh".into(), Vec::new());
-        let mut panel = TerminalPanel {
+        let mut panel = Terminal {
             session: Some(
                 Session::spawn(&ctx, Some(&dir), Some(sh), size, vec2(8.0, 16.0)).unwrap(),
             ),
+            follow: true,
             synced: Some(dir.clone()),
             ..Default::default()
         };
         // Calls `follow` until `done` holds or it asks to navigate.
-        let wait = |panel: &mut TerminalPanel, folder: &Path, done: &dyn Fn(&Session) -> bool| {
+        let wait = |panel: &mut Terminal, folder: &Path, done: &dyn Fn(&Session) -> bool| {
             let start = std::time::Instant::now();
             loop {
                 let t = start.elapsed().as_secs_f64();
@@ -1150,11 +1197,12 @@ mod tests {
             lines: 24,
         };
         let sh = tty::Shell::new("/bin/sh".into(), Vec::new());
-        let mut panel = TerminalPanel {
+        let mut panel = Terminal {
+            focus_requested: true,
             session: Some(Session::spawn(&ctx, None, Some(sh), size, vec2(8.0, 16.0)).unwrap()),
             ..Default::default()
         };
-        let frame = |panel: &mut TerminalPanel, events: Vec<egui::Event>| {
+        let frame = |panel: &mut Terminal, events: Vec<egui::Event>| {
             let input = egui::RawInput {
                 events,
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800.0, 400.0))),
@@ -1168,7 +1216,7 @@ mod tests {
             output.textures_delta.clear();
             leaked
         };
-        let screen = |panel: &TerminalPanel| {
+        let screen = |panel: &Terminal| {
             let term = panel.session.as_ref().unwrap().term.lock();
             let grid = term.grid();
             (0..grid.screen_lines())
@@ -1181,7 +1229,6 @@ mod tests {
                 .collect::<Vec<_>>()
         };
 
-        TerminalPanel::focus(&ctx);
         frame(&mut panel, Vec::new());
         let key = |key, modifiers| egui::Event::Key {
             key,

@@ -10,6 +10,7 @@ mod places;
 mod preview;
 mod tab;
 mod terminal;
+mod terminal_panel;
 mod trash;
 mod tree;
 mod views;
