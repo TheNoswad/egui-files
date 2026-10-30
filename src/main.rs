@@ -7,6 +7,7 @@ mod dock_tab;
 mod fs;
 mod images;
 mod jobs;
+mod open_with;
 mod places;
 mod preview;
 mod sidebar;

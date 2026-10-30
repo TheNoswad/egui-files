@@ -490,6 +490,7 @@ mod tests {
             jobs: crate::jobs::Jobs::new(&ctx),
             archives: archive::Listings::new(&ctx),
             archive_prefs: Default::default(),
+            open_with: Default::default(),
         };
         let input = || egui::RawInput {
             screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(900.0, 300.0))),

@@ -334,6 +334,9 @@ pub struct ExtractJob {
     pub password: Option<String>,
     /// Move the archive to the trash once it extracted without errors.
     pub trash_after: bool,
+    /// With [`ExtractMode::Open`], the app to open the file with instead of
+    /// its default one.
+    pub open_with: Option<crate::open_with::Target>,
 }
 
 impl ExtractJob {
@@ -345,6 +348,7 @@ impl ExtractJob {
             selection: None,
             password: None,
             trash_after,
+            open_with: None,
         }
     }
 

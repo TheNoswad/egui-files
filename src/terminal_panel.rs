@@ -162,6 +162,14 @@ impl TerminalPanel {
         actions
     }
 
+    /// Runs a program in a new terminal tab, and focuses it.
+    pub fn run(&mut self, command: crate::open_with::Launch) {
+        let terminal = Terminal::with_command(self.next_id, command);
+        self.next_id += 1;
+        self.dock.push_to_focused_leaf(terminal);
+        self.focus();
+    }
+
     fn open(&mut self, from: Option<u64>, split: Option<Split>, leaf: Option<NodePath>) {
         let terminal = Terminal::new(self.next_id, false);
         self.next_id += 1;

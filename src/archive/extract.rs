@@ -35,6 +35,7 @@ pub fn extract(job: ExtractJob, p: &Progress) {
         selection,
         mut password,
         trash_after,
+        open_with,
     } = job;
     let dest = if mode == ExtractMode::Open {
         clean_opened();
@@ -95,7 +96,10 @@ pub fn extract(job: ExtractJob, p: &Progress) {
             if let Err(err) = fs::rename(&children[0], &opened) {
                 return p.error(&opened, err);
             }
-            p.set_outcome(Outcome::Open(opened));
+            p.set_outcome(match open_with {
+                Some(target) => Outcome::OpenWith(opened, target),
+                None => Outcome::Open(opened),
+            });
             return;
         }
         ExtractMode::Smart if children.len() == 1 => {

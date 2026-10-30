@@ -25,7 +25,8 @@ use crate::{
     dnd::{self, DropTarget},
     fs,
     jobs::JobKind,
-    tab::Shared,
+    open_with,
+    tab::{AppAction, Shared},
 };
 
 struct Item {
@@ -74,6 +75,8 @@ enum Action {
     CopyOriginalPath,
     /// Moves whatever was copied or cut to the trash.
     TrashClipboard,
+    /// Open the selection with an app, or ask which when `None`.
+    OpenWith(Option<open_with::Target>),
     StartJob(JobKind),
 }
 
@@ -158,6 +161,20 @@ impl TrashCount {
     }
 }
 
+/// Where a trashed item's contents are kept.
+fn stored_path(item: &TrashItem) -> Option<PathBuf> {
+    let id = Path::new(&item.id);
+    let path = if cfg!(windows) {
+        // The item's parsing name, a path inside the recycle bin.
+        id.to_path_buf()
+    } else {
+        // `<trash>/info/<name>.trashinfo` describes `<trash>/files/<name>`.
+        let name = id.file_stem()?;
+        id.parent()?.parent()?.join("files").join(name)
+    };
+    std::fs::symlink_metadata(&path).is_ok().then_some(path)
+}
+
 /// The folder whose changes mean the trash changed, for the file watcher.
 pub fn watched_dir() -> Option<PathBuf> {
     if cfg!(windows) {
@@ -234,6 +251,15 @@ impl TrashTab {
             .enumerate()
             .filter(|(_, i)| filter.is_empty() || i.name.to_lowercase().contains(&filter))
             .map(|(index, _)| index)
+            .collect()
+    }
+
+    /// Where the selected items' contents are, inside the trash.
+    fn selected_files(&self) -> Vec<PathBuf> {
+        self.items()
+            .iter()
+            .filter(|i| self.selection.contains(&i.item.id))
+            .filter_map(|i| stored_path(&i.item))
             .collect()
     }
 
@@ -497,6 +523,21 @@ impl TrashTab {
                         });
                     }
                     response.context_menu(|ui| {
+                        let open_with = open_with::submenu(ui, || {
+                            if selected {
+                                self.selected_files()
+                            } else {
+                                stored_path(&item.item).into_iter().collect()
+                            }
+                        });
+                        match open_with {
+                            Some(open_with::Choice::Open(target)) => {
+                                actions.push(Action::OpenWith(Some(target)));
+                            }
+                            Some(open_with::Choice::Other) => actions.push(Action::OpenWith(None)),
+                            None => {}
+                        }
+                        ui.separator();
                         let mut item = |ui: &mut Ui, label: String, action| {
                             if ui.button(label).clicked() {
                                 actions.push(action);
@@ -607,6 +648,15 @@ impl TrashTab {
                 }
             }
             Action::StartJob(job) => shared.jobs.start(job),
+            Action::OpenWith(target) => {
+                let paths = self.selected_files();
+                if !paths.is_empty() {
+                    let request = open_with::Request::Files(paths);
+                    shared
+                        .app_actions
+                        .push(AppAction::OpenWith(request, target));
+                }
+            }
             Action::CopyOriginalPath => {
                 let paths: Vec<String> = self
                     .items()
@@ -742,6 +792,7 @@ mod tests {
             jobs: Jobs::new(&ctx),
             archives: crate::archive::Listings::new(&ctx),
             archive_prefs: Default::default(),
+            open_with: Default::default(),
         };
         let trash_both = |shared: &mut Shared| {
             shared.jobs.start(JobKind::Trash {

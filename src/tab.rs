@@ -18,6 +18,7 @@ use crate::{
     fs::{self, Entry, Sort, SortKey},
     images::ImageCache,
     jobs::{JobKind, Jobs},
+    open_with::{self, OpenWith},
     places,
     preview::TextCache,
     video::Videos,
@@ -41,6 +42,7 @@ pub struct Shared {
     pub jobs: Jobs,
     pub archives: archive::Listings,
     pub archive_prefs: archive::Prefs,
+    pub open_with: OpenWith,
 }
 
 pub struct FileClipboard {
@@ -56,6 +58,8 @@ pub enum AppAction {
     TogglePreview,
     /// Show an archive's contents in a tab.
     OpenArchive(PathBuf),
+    /// Open files with an app, or ask which when `None`.
+    OpenWith(open_with::Request, Option<open_with::Target>),
 }
 
 /// Everything a view or toolbar can ask the tab to do.
@@ -108,8 +112,8 @@ pub enum Action {
     StartJob(JobKind),
     ToggleHidden,
     TogglePreview,
-    /// Open in the default app, even if it's an archive.
-    OpenExternally(PathBuf),
+    /// Open the selection with an app, or ask which when `None`.
+    OpenWith(Option<open_with::Target>),
     /// Extract the selected archives next to themselves.
     Extract(ExtractMode),
     /// Ask where to extract the selected archives.
@@ -955,9 +959,13 @@ impl BrowserTab {
                     self.activate(self.entries()[i].path.clone(), &mut shared.app_actions);
                 }
             }
-            Action::OpenExternally(path) => {
-                if let Err(err) = fs::open(&path) {
-                    self.error = Some(format!("Could not open {}: {err}", path.display()));
+            Action::OpenWith(target) => {
+                let paths = self.selected_paths();
+                if !paths.is_empty() {
+                    let request = open_with::Request::Files(paths);
+                    shared
+                        .app_actions
+                        .push(AppAction::OpenWith(request, target));
                 }
             }
             Action::Extract(mode) => {
@@ -1241,6 +1249,7 @@ mod tests {
             jobs: Jobs::new(ctx),
             archives: archive::Listings::new(ctx),
             archive_prefs: archive::Prefs::default(),
+            open_with: Default::default(),
         }
     }
 
@@ -1906,6 +1915,131 @@ mod tests {
                 .any(|(id, _)| id == Id::new("hover-video"))
         );
 
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Where `needle` was drawn, from the text shapes of a frame.
+    fn text_pos(output: &egui::FullOutput, needle: &str) -> Option<egui::Pos2> {
+        output
+            .shapes
+            .iter()
+            .find_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) if text.galley.text().contains(needle) => {
+                    Some(text.pos + text.galley.rect.center().to_vec2())
+                }
+                _ => None,
+            })
+    }
+
+    #[test]
+    fn open_with_menu_and_dialog() {
+        let root = fixture("open-with");
+        let b = root.join("a/b");
+        let file = b.join("file.txt");
+        let ctx = Context::default();
+        let mut tab = BrowserTab::new(1, b.clone());
+        let mut shared = shared(&ctx, &tab);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while crate::open_with::catalog(&ctx).is_none() {
+            assert!(std::time::Instant::now() < deadline, "app catalog loads");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let frame = |tab: &mut BrowserTab, shared: &mut Shared, events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1000.0, 600.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| {
+                tab.ui(ui, shared);
+                if let Some(chosen) = shared.open_with.ui(ui.ctx()) {
+                    shared
+                        .app_actions
+                        .push(AppAction::OpenWith(chosen.0, Some(chosen.1)));
+                }
+            });
+            output.textures_delta.clear();
+            output
+        };
+        let press = |pos, button, pressed| egui::Event::PointerButton {
+            pos,
+            button,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        let click = |tab: &mut BrowserTab, shared: &mut Shared, pos, button| {
+            frame(tab, shared, vec![egui::Event::PointerMoved(pos)]);
+            frame(tab, shared, vec![press(pos, button, true)]);
+            frame(tab, shared, vec![press(pos, button, false)]);
+            frame(tab, shared, vec![])
+        };
+
+        let output = frame(&mut tab, &mut shared, vec![]);
+        let row = text_pos(&output, "file.txt").expect("file row drawn");
+        let output = click(&mut tab, &mut shared, row, egui::PointerButton::Secondary);
+        let item = text_pos(&output, "Open with").expect("Open with in the menu");
+        frame(&mut tab, &mut shared, vec![egui::Event::PointerMoved(item)]);
+        let mut output = frame(&mut tab, &mut shared, vec![]);
+        for _ in 0..5 {
+            if text_pos(&output, "Other application").is_some() {
+                break;
+            }
+            output = frame(&mut tab, &mut shared, vec![]);
+        }
+        let other = text_pos(&output, "Other application").expect("submenu opens");
+        // Along the submenu first, so the pointer doesn't cross other items.
+        frame(
+            &mut tab,
+            &mut shared,
+            vec![egui::Event::PointerMoved(egui::pos2(other.x, item.y))],
+        );
+        click(&mut tab, &mut shared, other, egui::PointerButton::Primary);
+        let request = shared.app_actions.iter().find_map(|a| match a {
+            AppAction::OpenWith(open_with::Request::Files(paths), None) => Some(paths.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            request,
+            Some(vec![file.clone()]),
+            "Other… asks for the file"
+        );
+
+        shared.app_actions.clear();
+        shared
+            .open_with
+            .ask(open_with::Request::Files(vec![file.clone()]));
+        let mut output = frame(&mut tab, &mut shared, vec![]);
+        for _ in 0..5 {
+            output = frame(&mut tab, &mut shared, vec![]);
+        }
+        assert!(text_pos(&output, "Open “file.txt” with").is_some());
+        assert!(
+            text_pos(&output, "text/plain").is_some(),
+            "shows the file's type"
+        );
+        // Keys go to the dialog's search box, not the tab.
+        frame(
+            &mut tab,
+            &mut shared,
+            vec![egui::Event::Text("no-such-app-zzz".into())],
+        );
+        let output = frame(&mut tab, &mut shared, vec![]);
+        assert!(text_pos(&output, "No matching applications").is_some());
+        let key = |key| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        };
+        frame(&mut tab, &mut shared, vec![key(Key::Enter)]);
+        assert!(shared.app_actions.is_empty(), "nothing to open");
+        frame(&mut tab, &mut shared, vec![key(Key::Escape)]);
+        frame(&mut tab, &mut shared, vec![]);
+        assert!(!shared.open_with.is_asking(), "Escape closes the dialog");
         std::fs::remove_dir_all(root).unwrap();
     }
 }

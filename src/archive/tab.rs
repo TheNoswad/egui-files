@@ -24,7 +24,8 @@ use crate::{
     dnd::{self, ArchiveDrag},
     fs::{self, display_name, human_size},
     jobs::JobKind,
-    tab::Shared,
+    open_with,
+    tab::{AppAction, Shared},
 };
 
 const INDENT: f32 = 14.0;
@@ -162,6 +163,8 @@ enum Action {
     Right,
     Activate(usize),
     ActivateCursor,
+    /// Open a file with an app, or ask which when `None`.
+    OpenWith(usize, Option<open_with::Target>),
     ExtractHere {
         selected: bool,
     },
@@ -639,6 +642,7 @@ impl ArchiveTab {
                         });
                     }
                     response.context_menu(|ui| {
+                        let mut open_with = None;
                         let mut item = |ui: &mut Ui, label: String, action| {
                             if ui.button(label).clicked() {
                                 actions.push(action);
@@ -651,6 +655,15 @@ impl ArchiveTab {
                                 format!("{} Open", icon::ARROW_SQUARE_OUT),
                                 Action::Activate(index),
                             );
+                            let subject = open_with::Subject {
+                                path: PathBuf::from(&n.path),
+                                on_disk: false,
+                            };
+                            open_with = match open_with::submenu_for(ui, &[subject]) {
+                                Some(open_with::Choice::Open(target)) => Some(Some(target)),
+                                Some(open_with::Choice::Other) => Some(None),
+                                None => None,
+                            };
                             ui.separator();
                         }
                         let here = self.archive.parent().map(display_name).unwrap_or_default();
@@ -672,6 +685,9 @@ impl ArchiveTab {
                                 format!("{} Expand", icon::CARET_RIGHT)
                             };
                             item(ui, label, Action::Toggle(node));
+                        }
+                        if let Some(target) = open_with {
+                            actions.push(Action::OpenWith(index, target));
                         }
                     });
                 });
@@ -759,6 +775,14 @@ impl ArchiveTab {
                 }
             }
             Action::Activate(index) => self.activate(index, rows, shared),
+            Action::OpenWith(index, target) => {
+                if let Some(job) = self.open_job(index, rows, shared) {
+                    let request = open_with::Request::FromArchive(Box::new(job));
+                    shared
+                        .app_actions
+                        .push(AppAction::OpenWith(request, target));
+                }
+            }
             Action::ActivateCursor => {
                 if let Some(index) = self.cursor {
                     self.activate(index, rows, shared);
@@ -834,6 +858,17 @@ impl ArchiveTab {
             self.apply(Action::Toggle(node), rows, shared);
             return;
         }
+        if let Some(job) = self.open_job(index, rows, shared) {
+            shared.jobs.start(JobKind::Extract(job));
+        }
+    }
+
+    /// A job extracting a file to a temporary folder and opening it.
+    fn open_job(&self, index: usize, rows: &[Row], shared: &Shared) -> Option<ExtractJob> {
+        let n = &self.tree.as_ref()?.nodes[rows.get(index)?.node];
+        if n.is_dir {
+            return None;
+        }
         let mut job = ExtractJob::new(
             self.archive.clone(),
             PathBuf::new(),
@@ -842,7 +877,7 @@ impl ArchiveTab {
         );
         job.selection = Some(Selection::new(vec![n.path.clone()]));
         job.password = shared.archives.password(&self.archive);
-        shared.jobs.start(JobKind::Extract(job));
+        Some(job)
     }
 
     fn select(&mut self, index: usize, modifiers: Modifiers, rows: &[Row]) {
@@ -902,6 +937,7 @@ mod tests {
             jobs: Jobs::new(ctx),
             archives: Listings::new(ctx),
             archive_prefs: Prefs::default(),
+            open_with: Default::default(),
         }
     }
 

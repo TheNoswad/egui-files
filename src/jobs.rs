@@ -136,6 +136,8 @@ pub enum Outcome {
     Reveal(PathBuf),
     /// Open the file in its default app.
     Open(PathBuf),
+    /// Open the file with this app.
+    OpenWith(PathBuf, crate::open_with::Target),
 }
 
 impl Progress {

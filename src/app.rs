@@ -18,6 +18,7 @@ use crate::{
     fs::Entry,
     images::ImageCache,
     jobs::{Jobs, Outcome},
+    open_with::{self, OpenWith},
     places,
     preview::{self, TextCache},
     sidebar::{Sidebar, SidebarResponse},
@@ -66,6 +67,8 @@ struct Persisted {
     video_quality: Quality,
     #[serde(default)]
     archive_prefs: archive::Prefs,
+    #[serde(default)]
+    open_with: open_with::Prefs,
 }
 
 fn default_true() -> bool {
@@ -93,6 +96,7 @@ struct PersistedRef<'a> {
     video_volume: f64,
     video_quality: Quality,
     archive_prefs: &'a archive::Prefs,
+    open_with: &'a open_with::Prefs,
 }
 
 /// The panes a fresh layout starts with.
@@ -336,6 +340,7 @@ impl FilesApp {
                 video_volume: default_volume(),
                 video_quality: Quality::default(),
                 archive_prefs: archive::Prefs::default(),
+                open_with: open_with::Prefs::default(),
             });
         let Persisted {
             dock,
@@ -351,6 +356,7 @@ impl FilesApp {
             video_volume,
             video_quality,
             archive_prefs,
+            open_with,
         } = persisted;
         let pending_panes = if panes_docked {
             Vec::new()
@@ -385,6 +391,10 @@ impl FilesApp {
                 jobs: Jobs::new(&cc.egui_ctx),
                 archives: archive::Listings::new(&cc.egui_ctx),
                 archive_prefs,
+                open_with: {
+                    open_with::preload(&cc.egui_ctx);
+                    OpenWith::new(open_with)
+                },
                 clipboard: None,
                 focused_tab: None,
                 preview_shown: false,
@@ -790,6 +800,11 @@ impl FilesApp {
                 ui.add(
                     egui::Slider::new(&mut self.shared.icon_size, 32.0..=192.0).text("Icon size"),
                 );
+                ui.checkbox(
+                    &mut self.shared.open_with.prefs.custom_commands,
+                    "Custom commands in “Open with”",
+                )
+                .on_hover_text("The “Other application…” dialog gets a box for typing any command");
                 ui.menu_button("Video quality", |ui| {
                     for quality in Quality::ALL {
                         let selected = self.shared.videos.quality() == quality;
@@ -986,7 +1001,7 @@ impl FilesApp {
 
     /// Applies file-watcher changes, and refreshes everything when a job finishes
     /// (it may have touched folders that aren't watched).
-    fn sync_with_disk(&mut self) {
+    fn sync_with_disk(&mut self, ctx: &egui::Context) {
         let changed = self.watcher.poll();
         if trash::watched_dir().is_some_and(|dir| changed.contains(&dir)) {
             self.trash_count.request();
@@ -1017,6 +1032,9 @@ impl FilesApp {
                     if let Err(err) = crate::fs::open(&path) {
                         eprintln!("Could not open {}: {err}", path.display());
                     }
+                }
+                Outcome::OpenWith(path, target) => {
+                    self.open_with(ctx, open_with::Request::Files(vec![path]), target);
                 }
             }
         }
@@ -1098,6 +1116,30 @@ impl FilesApp {
         }
     }
 
+    /// Opens files with an app; a file in an archive is extracted first.
+    fn open_with(
+        &mut self,
+        ctx: &egui::Context,
+        request: open_with::Request,
+        target: open_with::Target,
+    ) {
+        match request {
+            open_with::Request::Files(paths) => {
+                for launch in self.shared.open_with.launch(ctx, &target, &paths) {
+                    self.terminal.run(launch);
+                    if !self.has_pane(Pane::Terminal) {
+                        dock_pane(&mut self.dock, Pane::Terminal, self.dock_size);
+                    }
+                    self.focus_pane(Pane::Terminal);
+                }
+            }
+            open_with::Request::FromArchive(mut job) => {
+                job.open_with = Some(target);
+                self.shared.jobs.start(crate::jobs::JobKind::Extract(*job));
+            }
+        }
+    }
+
     /// Asks before quitting while file operations are running.
     fn quit_guard(&mut self, ctx: &egui::Context) {
         let running = self.shared.jobs.running();
@@ -1140,7 +1182,7 @@ impl eframe::App for FilesApp {
         let ctx = ui.ctx().clone();
         self.shared.images.begin_frame();
         self.shared.videos.begin_frame();
-        self.sync_with_disk();
+        self.sync_with_disk(&ctx);
         self.quit_guard(&ctx);
         self.update_active_browser();
         self.global_shortcuts(&ctx);
@@ -1148,6 +1190,7 @@ impl eframe::App for FilesApp {
         // it follows; and with a shell focused, to nobody else.
         self.shared.focused_tab = match self.dock.find_active_focused() {
             _ if self.terminal.has_focus(&ctx) => None,
+            _ if self.shared.open_with.is_asking() => None,
             Some((_, tab)) if tab.pane().is_none() => Some(tab.id()),
             _ => self.active_browser,
         };
@@ -1233,7 +1276,14 @@ impl eframe::App for FilesApp {
                 AppAction::FocusTab(id) => self.focus_tab(id),
                 AppAction::TogglePreview => self.show_or_toggle_pane(&ctx, Pane::Preview),
                 AppAction::OpenArchive(path) => self.open_archive(path),
+                AppAction::OpenWith(request, Some(target)) => {
+                    self.open_with(&ctx, request, target);
+                }
+                AppAction::OpenWith(request, None) => self.shared.open_with.ask(request),
             }
+        }
+        if let Some((request, target)) = self.shared.open_with.ui(&ctx) {
+            self.open_with(&ctx, request, target);
         }
         let shown = self
             .dock
@@ -1317,6 +1367,7 @@ impl eframe::App for FilesApp {
             video_volume: self.shared.videos.volume(),
             video_quality: self.shared.videos.quality(),
             archive_prefs: &self.shared.archive_prefs,
+            open_with: &self.shared.open_with.prefs,
         };
         eframe::set_value(storage, eframe::APP_KEY, &state);
     }

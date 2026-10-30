@@ -13,6 +13,7 @@ use crate::{
     archive,
     dnd::{self, DropTarget},
     fs::Entry,
+    open_with,
     tab::{Action, BrowserTab, Shared},
 };
 
@@ -124,14 +125,13 @@ fn entry_menu(
         "",
         Action::Activate(entry.path.clone()),
     );
-    if is_archive {
-        item(
-            ui,
-            format!("{} Open with default app", icon::APP_WINDOW),
-            "",
-            Action::OpenExternally(entry.path.clone()),
-        );
-    }
+    let open_with = open_with::submenu(ui, || {
+        if tab.selection.contains(&entry.path) {
+            tab.selected_paths()
+        } else {
+            vec![entry.path.clone()]
+        }
+    });
     if entry.is_dir {
         item(
             ui,
@@ -206,4 +206,9 @@ fn entry_menu(
         "",
         Action::Trash,
     );
+    match open_with {
+        Some(open_with::Choice::Open(target)) => actions.push(Action::OpenWith(Some(target))),
+        Some(open_with::Choice::Other) => actions.push(Action::OpenWith(None)),
+        None => {}
+    }
 }

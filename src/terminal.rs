@@ -59,6 +59,10 @@ pub struct Terminal {
     /// The folder to start the shell in, overriding the focused tab's.
     #[serde(default)]
     pub dir: Option<PathBuf>,
+    /// A program to run instead of the shell ("Open with" a terminal app).
+    /// Not saved: after a restart the terminal has a shell.
+    #[serde(skip)]
+    command: Option<crate::open_with::Launch>,
     /// Give this terminal keyboard focus the next time it's drawn.
     #[serde(skip)]
     focus_requested: bool,
@@ -94,6 +98,16 @@ impl Terminal {
         }
     }
 
+    /// A terminal running `command` instead of the shell; it closes when the
+    /// program exits.
+    pub fn with_command(id: u64, command: crate::open_with::Launch) -> Self {
+        Self {
+            dir: command.dir.clone(),
+            command: Some(command),
+            ..Self::new(id, false)
+        }
+    }
+
     /// Remembers the shell's folder, so a restart opens the shell there.
     pub fn remember_dir(&mut self) {
         #[cfg(target_os = "linux")]
@@ -113,9 +127,16 @@ impl Terminal {
         self.focus_requested = true;
     }
 
-    /// The title the shell set, if any.
+    /// The title the shell (or program) set, else the program's name.
     pub fn title(&self) -> Option<&str> {
-        self.session.as_ref()?.title.as_deref()
+        let program = self.command.as_ref().map(|c| {
+            let name = Path::new(&c.program).file_name();
+            name.and_then(|n| n.to_str()).unwrap_or(&c.program)
+        });
+        self.session
+            .as_ref()
+            .and_then(|s| s.title.as_deref())
+            .or(program)
     }
 
     /// Draws the terminal into the rest of `ui`, starting the shell in
@@ -144,7 +165,14 @@ impl Terminal {
             // left, if that folder still exists.
             let saved = self.dir.take().filter(|d| !self.follow && d.is_dir());
             let start = saved.as_deref().or(folder);
-            match Session::spawn(ui.ctx(), start, user_shell(), size, cell) {
+            let shell = match &self.command {
+                Some(command) => Some(tty::Shell::new(
+                    command.program.clone(),
+                    command.args.clone(),
+                )),
+                None => user_shell(),
+            };
+            match Session::spawn(ui.ctx(), start, shell, size, cell) {
                 Ok(session) => {
                     self.session = Some(session);
                     self.synced = start.map(Path::to_path_buf);
