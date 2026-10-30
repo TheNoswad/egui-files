@@ -8,6 +8,7 @@ mod images;
 mod jobs;
 mod places;
 mod preview;
+mod sidebar;
 mod tab;
 mod terminal;
 mod terminal_panel;

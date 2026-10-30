@@ -3,6 +3,7 @@
 use std::{collections::HashSet, path::PathBuf};
 
 use egui::Ui;
+use egui_phosphor::regular as icon;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -19,6 +20,48 @@ use crate::{
 pub enum DockTab {
     Browser(BrowserTab),
     Trash(TrashTab),
+    Pane(PaneTab),
+}
+
+/// A tool docked alongside the tabs. Each is open at most once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Pane {
+    Places,
+    Tree,
+    Preview,
+    Terminal,
+}
+
+impl Pane {
+    pub const ALL: [Self; 4] = [Self::Places, Self::Tree, Self::Preview, Self::Terminal];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Places => "Places",
+            Self::Tree => "Folder tree",
+            Self::Preview => "Preview",
+            Self::Terminal => "Terminal",
+        }
+    }
+
+    pub fn icon(self) -> &'static str {
+        match self {
+            Self::Places => icon::COMPASS,
+            Self::Tree => icon::TREE_STRUCTURE,
+            Self::Preview => icon::EYE,
+            Self::Terminal => icon::TERMINAL_WINDOW,
+        }
+    }
+
+    /// Kept clear of browser and trash tab ids, which count up from 1.
+    pub fn id(self) -> u64 {
+        u64::MAX - self as u64
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct PaneTab {
+    pub pane: Pane,
 }
 
 impl DockTab {
@@ -26,6 +69,7 @@ impl DockTab {
         match self {
             Self::Browser(tab) => tab.id,
             Self::Trash(tab) => tab.id,
+            Self::Pane(tab) => tab.pane.id(),
         }
     }
 
@@ -33,13 +77,28 @@ impl DockTab {
         match self {
             Self::Browser(tab) => tab.title(),
             Self::Trash(tab) => tab.title(),
+            Self::Pane(tab) => format!("{} {}", tab.pane.icon(), tab.pane.label()),
         }
     }
 
     pub fn browser(&self) -> Option<&BrowserTab> {
         match self {
             Self::Browser(tab) => Some(tab),
-            Self::Trash(_) => None,
+            Self::Trash(_) | Self::Pane(_) => None,
+        }
+    }
+
+    pub fn browser_mut(&mut self) -> Option<&mut BrowserTab> {
+        match self {
+            Self::Browser(tab) => Some(tab),
+            Self::Trash(_) | Self::Pane(_) => None,
+        }
+    }
+
+    pub fn pane(&self) -> Option<Pane> {
+        match self {
+            Self::Pane(tab) => Some(tab.pane),
+            Self::Browser(_) | Self::Trash(_) => None,
         }
     }
 
@@ -47,10 +106,12 @@ impl DockTab {
         matches!(self, Self::Trash(_))
     }
 
+    /// Panes need more of the app than tabs do, so the app draws them.
     pub fn ui(&mut self, ui: &mut Ui, shared: &mut Shared) {
         match self {
             Self::Browser(tab) => tab.ui(ui, shared),
             Self::Trash(tab) => tab.ui(ui, shared),
+            Self::Pane(_) => {}
         }
     }
 
@@ -58,6 +119,7 @@ impl DockTab {
         match self {
             Self::Browser(tab) => tab.mark_stale(),
             Self::Trash(tab) => tab.mark_stale(),
+            Self::Pane(_) => {}
         }
     }
 
@@ -69,6 +131,7 @@ impl DockTab {
                     tab.mark_stale();
                 }
             }
+            Self::Pane(_) => {}
         }
     }
 
@@ -77,6 +140,7 @@ impl DockTab {
         match self {
             Self::Browser(tab) => tab.shown_dirs().cloned().collect(),
             Self::Trash(_) => trash::watched_dir().into_iter().collect(),
+            Self::Pane(_) => Vec::new(),
         }
     }
 }
@@ -104,12 +168,22 @@ mod tests {
             PathBuf::from("/"),
         ))]);
         new.push_to_first_leaf(DockTab::Trash(TrashTab::new(2)));
+        new.push_to_first_leaf(DockTab::Pane(PaneTab {
+            pane: Pane::Preview,
+        }));
         let saved = ron::ser::to_string(&new).unwrap();
         let loaded: DockState<DockTab> = ron::from_str(&saved).unwrap();
         let kinds: Vec<_> = loaded
             .iter_all_tabs()
-            .map(|(_, t)| (t.id(), t.is_trash()))
+            .map(|(_, t)| (t.id(), t.is_trash(), t.pane()))
             .collect();
-        assert_eq!(kinds, [(1, false), (2, true)]);
+        assert_eq!(
+            kinds,
+            [
+                (1, false, None),
+                (2, true, None),
+                (Pane::Preview.id(), false, Some(Pane::Preview))
+            ]
+        );
     }
 }

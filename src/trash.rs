@@ -734,6 +734,7 @@ mod tests {
             icon_size: 64.0,
             clipboard: None,
             focused_tab: Some(1),
+            preview_shown: false,
             app_actions: Vec::new(),
             images: ImageCache::new(&ctx),
             videos: crate::video::Videos::new(&ctx),

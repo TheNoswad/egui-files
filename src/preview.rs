@@ -12,7 +12,7 @@ use egui_phosphor::regular as icon;
 use crate::{
     fs::{self, Entry},
     images::{self, ImageCache, Lookup},
-    tab::Action,
+    tab::{Action, Shared},
     video::{self, Videos},
 };
 
@@ -75,6 +75,28 @@ fn read_text(path: &Path) -> Option<(String, bool)> {
         return None;
     }
     Some((String::from_utf8_lossy(&bytes).into_owned(), truncated))
+}
+
+/// The preview pane, showing the selection of the tab files were last browsed in.
+pub fn pane(ui: &mut Ui, entry: Option<&Entry>, shared: &mut Shared, actions: &mut Vec<Action>) {
+    egui::ScrollArea::vertical()
+        .id_salt("preview-pane")
+        .auto_shrink(false)
+        .show(ui, |ui| match entry {
+            Some(entry) => show(
+                ui,
+                entry,
+                &mut shared.images,
+                &mut shared.videos,
+                &mut shared.texts,
+                images::PREVIEW_SIZE,
+                actions,
+            ),
+            None => {
+                ui.add_space(16.0);
+                ui.vertical_centered(|ui| ui.weak("Select one item to preview"));
+            }
+        });
 }
 
 /// Shows a preview of `entry`. Images are decoded at most `max_side` pixels.

@@ -15,10 +15,10 @@ use serde::{Deserialize, Serialize};
 use crate::{
     dnd::{self, DropTarget},
     fs::{self, Entry, Sort, SortKey},
-    images::{self, ImageCache},
+    images::ImageCache,
     jobs::{JobKind, Jobs},
     places,
-    preview::{self, TextCache},
+    preview::TextCache,
     video::Videos,
     views::{self, ViewMode},
 };
@@ -31,6 +31,8 @@ pub struct Shared {
     pub icon_size: f32,
     pub clipboard: Option<FileClipboard>,
     pub focused_tab: Option<u64>,
+    /// The preview pane is open somewhere in the dock.
+    pub preview_shown: bool,
     pub app_actions: Vec<AppAction>,
     pub images: ImageCache,
     pub videos: Videos,
@@ -48,6 +50,7 @@ pub enum AppAction {
     NewTab(PathBuf),
     /// Bring the tab with this id to the front.
     FocusTab(u64),
+    TogglePreview,
 }
 
 /// Everything a view or toolbar can ask the tab to do.
@@ -114,7 +117,9 @@ pub struct BrowserTab {
     pub path: PathBuf,
     #[serde(default)]
     pub view: ViewMode,
-    #[serde(default)]
+    /// Only read, to carry the preview over from layouts saved before it
+    /// became a pane of its own.
+    #[serde(default, skip_serializing)]
     pub show_preview: bool,
     #[serde(default)]
     pub sort: Sort,
@@ -359,36 +364,13 @@ impl BrowserTab {
             self.keyboard(ui.ctx(), &mut actions);
         }
 
-        Panel::top(Id::new(("toolbar", self.id))).show(ui, |ui| self.toolbar(ui, &mut actions));
+        Panel::top(Id::new(("toolbar", self.id)))
+            .show(ui, |ui| self.toolbar(ui, shared, &mut actions));
         if self.view == ViewMode::Columns {
             self.prepare_columns();
         }
         let visible = self.visible(shared.show_hidden);
         Panel::bottom(Id::new(("status", self.id))).show(ui, |ui| self.status_bar(ui, &visible));
-        if self.show_preview {
-            Panel::right(Id::new(("preview", self.id)))
-                .resizable(true)
-                .default_size(280.0)
-                .show(ui, |ui| {
-                    egui::ScrollArea::vertical()
-                        .id_salt(("preview", self.id))
-                        .show(ui, |ui| match self.preview_entry() {
-                            Some(entry) => preview::show(
-                                ui,
-                                entry,
-                                &mut shared.images,
-                                &mut shared.videos,
-                                &mut shared.texts,
-                                images::PREVIEW_SIZE,
-                                &mut actions,
-                            ),
-                            None => {
-                                ui.add_space(16.0);
-                                ui.vertical_centered(|ui| ui.weak("Select one item to preview"));
-                            }
-                        });
-                });
-        }
         CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
@@ -536,7 +518,7 @@ impl BrowserTab {
         });
     }
 
-    fn toolbar(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
+    fn toolbar(&mut self, ui: &mut Ui, shared: &Shared, actions: &mut Vec<Action>) {
         ui.horizontal(|ui| {
             let nav = |ui: &mut Ui, enabled, glyph, tip| {
                 ui.add_enabled(enabled, Button::new(RichText::new(glyph).size(16.0)))
@@ -574,7 +556,7 @@ impl BrowserTab {
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let preview =
-                    Button::selectable(self.show_preview, RichText::new(icon::EYE).size(16.0));
+                    Button::selectable(shared.preview_shown, RichText::new(icon::EYE).size(16.0));
                 if ui.add(preview).on_hover_text("Preview pane (F3)").clicked() {
                     actions.push(Action::TogglePreview);
                 }
@@ -721,7 +703,7 @@ impl BrowserTab {
             actions.push(Action::ToggleHidden);
             ui.close();
         }
-        let mut show_preview = self.show_preview;
+        let mut show_preview = shared.preview_shown;
         if ui.checkbox(&mut show_preview, "Preview pane").clicked() {
             actions.push(Action::TogglePreview);
             ui.close();
@@ -1025,7 +1007,7 @@ impl BrowserTab {
                 });
             }
             Action::ToggleHidden => shared.show_hidden = !shared.show_hidden,
-            Action::TogglePreview => self.show_preview = !self.show_preview,
+            Action::TogglePreview => shared.app_actions.push(AppAction::TogglePreview),
         }
     }
 
@@ -1071,7 +1053,7 @@ impl BrowserTab {
         self.cursor = Some(index);
     }
 
-    fn activate(&mut self, path: PathBuf) {
+    pub fn activate(&mut self, path: PathBuf) {
         if path.is_dir() {
             self.navigate(path);
         } else if let Err(err) = fs::open(&path) {
@@ -1105,6 +1087,7 @@ fn join_paths(paths: &[PathBuf]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::images;
 
     /// `root/a/b/file.txt`, `root/a/c/`, `root/a/.hidden/`
     fn fixture(name: &str) -> PathBuf {
@@ -1124,6 +1107,7 @@ mod tests {
             icon_size: 64.0,
             clipboard: None,
             focused_tab: Some(tab.id),
+            preview_shown: false,
             app_actions: Vec::new(),
             images: ImageCache::new(ctx),
             videos: Videos::new(ctx),
@@ -1160,7 +1144,16 @@ mod tests {
             events,
             ..Default::default()
         };
-        let mut output = ctx.run_ui(input, |ui| tab.ui(ui, shared));
+        let mut output = ctx.run_ui(input, |ui| {
+            // Where the app docks the preview pane by default.
+            if shared.preview_shown {
+                let entry = tab.preview_entry().cloned();
+                Panel::right("preview").default_size(280.0).show(ui, |ui| {
+                    crate::preview::pane(ui, entry.as_ref(), shared, &mut Vec::new())
+                });
+            }
+            tab.ui(ui, shared);
+        });
         output.textures_delta.clear();
     }
 
@@ -1576,8 +1569,8 @@ mod tests {
         let ctx = Context::default();
         let mut tab = BrowserTab::new(1, b.clone());
         tab.view = ViewMode::Grid;
-        tab.show_preview = true;
         let mut shared = shared(&ctx, &tab);
+        shared.preview_shown = true;
 
         for name in ["pic.png", "file.txt"] {
             run_frame(&ctx, &mut tab, &mut shared, &[]);
@@ -1631,8 +1624,8 @@ mod tests {
         let ctx = Context::default();
         let mut tab = BrowserTab::new(1, b.clone());
         tab.view = ViewMode::Grid;
-        tab.show_preview = true;
         let mut shared = shared(&ctx, &tab);
+        shared.preview_shown = true;
         run_frame(&ctx, &mut tab, &mut shared, &[]);
         tab.selection = HashSet::from([clip.clone()]);
 
