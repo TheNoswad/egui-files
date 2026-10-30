@@ -13,6 +13,7 @@ mod open_with;
 mod places;
 mod preview;
 mod sidebar;
+mod system_theme;
 mod tab;
 mod terminal;
 mod terminal_panel;

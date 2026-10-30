@@ -25,6 +25,7 @@ use crate::{
     places,
     preview::{self, TextCache},
     sidebar::{Sidebar, SidebarResponse},
+    system_theme::SystemTheme,
     tab::{self, AppAction, BrowserTab, Shared},
     terminal_panel::{PanelResponse, TerminalPanel},
     trash::{self, TrashCount, TrashTab},
@@ -321,6 +322,7 @@ pub struct FilesApp {
     /// notice them changing.
     dock_shape: (Vec<u8>, Vec2),
     about: About,
+    system_theme: SystemTheme,
 }
 
 impl FilesApp {
@@ -434,6 +436,7 @@ impl FilesApp {
             add_menu: None,
             dock_shape: (Vec::new(), Vec2::ZERO),
             about: About::new(cc),
+            system_theme: SystemTheme::watch(&cc.egui_ctx),
         }
     }
 
@@ -1505,6 +1508,9 @@ impl eframe::App for FilesApp {
     }
 
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        if let Some(theme) = self.system_theme.get() {
+            raw_input.system_theme = Some(theme);
+        }
         #[cfg(target_os = "linux")]
         if let Some(wayland) = &self.wayland {
             // Wayland reports logical pixels; egui points also include the zoom.
