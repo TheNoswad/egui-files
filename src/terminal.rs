@@ -47,6 +47,28 @@ pub struct TerminalResponse {
     pub close: bool,
     /// Open another terminal next to this one, or in a new tab when `None`.
     pub open: Option<Option<Split>>,
+    /// Change which terminals follow the focused folder.
+    pub follow: Option<Follow>,
+}
+
+/// A change to which terminals follow the focused folder.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Follow {
+    /// This terminal follows, or stops.
+    This(bool),
+    /// Every terminal follows, or none does.
+    All(bool),
+    /// Terminals opened from now on follow.
+    New(bool),
+}
+
+/// The panel-wide side of folder following, for the menus.
+#[derive(Clone, Copy, Default)]
+pub struct FollowState {
+    /// Every terminal follows.
+    pub all: bool,
+    /// New terminals follow.
+    pub new: bool,
 }
 
 /// Saved with the panel's layout: which terminals there are, and where their
@@ -139,9 +161,26 @@ impl Terminal {
             .or(program)
     }
 
+    /// Starts or stops following the focused folder. A shell that starts
+    /// following goes to the tab's folder, rather than taking the tab along.
+    pub fn set_follow(&mut self, follow: bool) {
+        self.follow = follow;
+        #[cfg(target_os = "linux")]
+        if follow && let Some(cwd) = self.session.as_ref().and_then(Session::shell_cwd) {
+            self.synced = Some(cwd);
+            self.pending_cd = None;
+        }
+    }
+
     /// Draws the terminal into the rest of `ui`, starting the shell in
     /// `folder` (the focused browser tab's) if it isn't running yet.
-    pub fn ui(&mut self, ui: &mut Ui, folder: Option<&Path>) -> TerminalResponse {
+    /// `follow` is for the context menu.
+    pub fn ui(
+        &mut self,
+        ui: &mut Ui,
+        folder: Option<&Path>,
+        follow: FollowState,
+    ) -> TerminalResponse {
         let mut response = TerminalResponse::default();
         let font = TextStyle::Monospace.resolve(ui.style());
         let cell = ui
@@ -230,7 +269,7 @@ impl Terminal {
             });
         }
         if !mouse_mode {
-            widget.context_menu(|ui| self.context_menu(ui, &mut response));
+            widget.context_menu(|ui| self.context_menu(ui, follow, &mut response));
         }
 
         let Some(session) = &self.session else {
@@ -249,7 +288,7 @@ impl Terminal {
         response
     }
 
-    fn context_menu(&mut self, ui: &mut Ui, response: &mut TerminalResponse) {
+    fn context_menu(&mut self, ui: &mut Ui, follow: FollowState, response: &mut TerminalResponse) {
         let Some(session) = &self.session else {
             return;
         };
@@ -282,7 +321,8 @@ impl Terminal {
         }
         ui.separator();
         open_menu(ui, response);
-        ui.checkbox(&mut self.follow, "Follow folder");
+        ui.separator();
+        response.follow = follow_menu(ui, self.follow, follow);
         ui.separator();
         if ui
             .add(egui::Button::new("Close terminal").shortcut_text("Ctrl+Shift+W"))
@@ -546,6 +586,44 @@ pub fn open_menu(ui: &mut Ui, response: &mut TerminalResponse) {
             ui.close();
         }
     }
+}
+
+/// Menu items for folder following; `follow` is this terminal's setting.
+pub fn follow_menu(ui: &mut Ui, follow: bool, state: FollowState) -> Option<Follow> {
+    let mut change = None;
+    let mut this = follow;
+    if ui
+        .checkbox(&mut this, "Follow folder")
+        .on_hover_text(
+            "Keep the shell in the focused tab's folder, and the tab in the shell's (Ctrl+Shift+L)",
+        )
+        .changed()
+    {
+        change = Some(Follow::This(this));
+    }
+    let all = if state.all {
+        "No terminal follows"
+    } else {
+        "All terminals follow"
+    };
+    if ui
+        .add(egui::Button::new(all).shortcut_text("Ctrl+Shift+Alt+L"))
+        .clicked()
+    {
+        change = Some(Follow::All(!state.all));
+    }
+    let mut new = state.new;
+    if ui
+        .checkbox(&mut new, "New terminals follow")
+        .on_hover_text("Terminals opened from now on start out following the folder")
+        .changed()
+    {
+        change = Some(Follow::New(new));
+    }
+    if change.is_some() {
+        ui.close();
+    }
+    change
 }
 
 #[cfg(target_os = "linux")]
@@ -1240,7 +1318,25 @@ mod tests {
             .unwrap()
             .write(format!("cd {}\r", real.display()).into_bytes());
         let nav = wait(&mut panel, Path::new("/"), &|_| false);
-        assert_eq!(nav, Some(real));
+        assert_eq!(nav, Some(real.clone()));
+
+        // Turned off, the shell stays put when the tab moves.
+        panel.set_follow(false);
+        panel.session.as_ref().unwrap().write(b"cd /\r".to_vec());
+        let at_root = |s: &Session| cwd(s) == Some("/".into());
+        let start = std::time::Instant::now();
+        while !at_root(panel.session.as_ref().unwrap()) {
+            assert!(start.elapsed().as_secs() < 10, "shell didn't cd");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        // Turned back on, the shell goes to the tab's folder rather than
+        // taking the tab to its own.
+        panel.set_follow(true);
+        assert_eq!(
+            wait(&mut panel, &dir, &|s| cwd(s) == Some(real.clone())),
+            None
+        );
+        assert_eq!(cwd(panel.session.as_ref().unwrap()), Some(real));
     }
 
     /// Types into a focused panel through egui events, and checks the shell
@@ -1267,7 +1363,7 @@ mod tests {
             };
             let mut leaked = Vec::new();
             let mut output = ctx.run_ui(input, |ui| {
-                panel.ui(ui, None);
+                panel.ui(ui, None, FollowState::default());
                 leaked = ui.input(|i| i.events.clone());
             });
             output.textures_delta.clear();

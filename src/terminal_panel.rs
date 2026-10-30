@@ -8,7 +8,7 @@ use egui_phosphor::regular as icon;
 
 use serde::{Deserialize, Serialize};
 
-use crate::terminal::{self, Terminal, TerminalResponse};
+use crate::terminal::{self, Follow, FollowState, Terminal, TerminalResponse};
 
 /// What the app should do after the panel was drawn.
 #[derive(Default)]
@@ -24,6 +24,9 @@ pub struct PanelResponse {
 pub struct TerminalPanel {
     dock: DockState<Terminal>,
     next_id: u64,
+    /// Terminals opened from now on follow the focused folder.
+    #[serde(default)]
+    new_follow: bool,
 }
 
 impl Default for TerminalPanel {
@@ -33,6 +36,7 @@ impl Default for TerminalPanel {
         Self {
             dock: DockState::new(vec![Terminal::new(1, true)]),
             next_id: 2,
+            new_follow: false,
         }
     }
 }
@@ -45,6 +49,11 @@ enum Action {
         leaf: Option<NodePath>,
     },
     Close(u64),
+    /// `id` is the terminal the change came from.
+    Follow {
+        id: u64,
+        change: Follow,
+    },
 }
 
 impl TerminalPanel {
@@ -85,7 +94,62 @@ impl TerminalPanel {
 
     /// Ends every shell; the next `ui` call starts a single new one.
     pub fn reset(&mut self) {
-        *self = Self::default();
+        *self = Self {
+            new_follow: self.new_follow,
+            ..Self::default()
+        };
+    }
+
+    fn follow_state(&self) -> FollowState {
+        FollowState {
+            all: self.dock.iter_all_tabs().all(|(_, t)| t.follow),
+            new: self.new_follow,
+        }
+    }
+
+    fn set_follow(&mut self, id: u64, change: Follow) {
+        let set = |terminal: &mut Terminal, follow| {
+            if terminal.follow != follow {
+                terminal.set_follow(follow);
+            }
+        };
+        match change {
+            Follow::This(follow) => {
+                if let Some(terminal) = self
+                    .dock
+                    .iter_all_tabs_mut()
+                    .map(|(_, t)| t)
+                    .find(|t| t.id == id)
+                {
+                    set(terminal, follow);
+                }
+            }
+            Follow::All(follow) => {
+                for (_, terminal) in self.dock.iter_all_tabs_mut() {
+                    set(terminal, follow);
+                }
+            }
+            Follow::New(follow) => self.new_follow = follow,
+        }
+    }
+
+    /// Folder-following options for the app's menu, for the active terminal.
+    pub fn follow_menu(&mut self, ui: &mut Ui) {
+        let state = self.follow_state();
+        let active = match self.dock.find_active_focused() {
+            Some((_, terminal)) => Some((terminal.id, terminal.follow)),
+            None => self
+                .dock
+                .iter_all_tabs()
+                .next()
+                .map(|(_, t)| (t.id, t.follow)),
+        };
+        let Some((id, follow)) = active else {
+            return;
+        };
+        if let Some(change) = terminal::follow_menu(ui, follow, state) {
+            self.set_follow(id, change);
+        }
     }
 
     /// The focused terminal's id, if one has keyboard focus.
@@ -105,6 +169,7 @@ impl TerminalPanel {
         let single = self.dock.iter_all_tabs().nth(1).is_none();
         let mut viewer = Viewer {
             folder,
+            follow: self.follow_state(),
             actions: &mut actions,
             navigate: &mut response.navigate,
         };
@@ -127,6 +192,7 @@ impl TerminalPanel {
                     }
                     self.focus();
                 }
+                Action::Follow { id, change } => self.set_follow(id, change),
             }
         }
         response.close = self.dock.iter_all_tabs().next().is_none();
@@ -139,8 +205,24 @@ impl TerminalPanel {
             return Vec::new();
         };
         let ctrl_shift = Modifiers::COMMAND | Modifiers::SHIFT;
+        let all = self.follow_state().all;
+        let follow = self
+            .dock
+            .iter_all_tabs()
+            .any(|(_, t)| t.id == id && t.follow);
         let mut actions = Vec::new();
         ctx.input_mut(|i| {
+            // Extra modifiers don't stop a match, so the Alt one goes first.
+            let change = if i.consume_key(ctrl_shift | Modifiers::ALT, Key::L) {
+                Some(Follow::All(!all))
+            } else if i.consume_key(ctrl_shift, Key::L) {
+                Some(Follow::This(!follow))
+            } else {
+                None
+            };
+            if let Some(change) = change {
+                actions.push(Action::Follow { id, change });
+            }
             let open = |split| Action::Open {
                 from: Some(id),
                 split,
@@ -171,7 +253,7 @@ impl TerminalPanel {
     }
 
     fn open(&mut self, from: Option<u64>, split: Option<Split>, leaf: Option<NodePath>) {
-        let terminal = Terminal::new(self.next_id, false);
+        let terminal = Terminal::new(self.next_id, self.new_follow);
         self.next_id += 1;
         let from = from
             .and_then(|id| self.dock.find_tab_from(|t| t.id == id))
@@ -191,6 +273,7 @@ impl TerminalPanel {
 
 struct Viewer<'a> {
     folder: Option<&'a Path>,
+    follow: FollowState,
     actions: &'a mut Vec<Action>,
     navigate: &'a mut Option<PathBuf>,
 }
@@ -216,7 +299,8 @@ impl TabViewer for Viewer<'_> {
             navigate,
             close,
             open,
-        } = tab.ui(ui, self.folder);
+            follow,
+        } = tab.ui(ui, self.folder, self.follow);
         if navigate.is_some() {
             *self.navigate = navigate;
         }
@@ -230,6 +314,9 @@ impl TabViewer for Viewer<'_> {
                 leaf: None,
             });
         }
+        if let Some(change) = follow {
+            self.actions.push(Action::Follow { id: tab.id, change });
+        }
     }
 
     fn context_menu(&mut self, ui: &mut Ui, tab: &mut Terminal, _path: NodePath) {
@@ -242,12 +329,9 @@ impl TabViewer for Viewer<'_> {
                 leaf: None,
             });
         }
-        if ui
-            .checkbox(&mut tab.follow, "Follow folder")
-            .on_hover_text("Keep the shell in the focused tab's folder, and the tab in the shell's")
-            .changed()
-        {
-            ui.close();
+        ui.separator();
+        if let Some(change) = terminal::follow_menu(ui, tab.follow, self.follow) {
+            self.actions.push(Action::Follow { id: tab.id, change });
         }
     }
 
@@ -340,6 +424,46 @@ mod tests {
         }
         let response = frame(&ctx, &mut panel, vec![key(Key::W)]);
         assert!(response.close);
+    }
+
+    #[test]
+    fn follow_shortcuts_and_options() {
+        let ctx = Context::default();
+        let mut panel = TerminalPanel::default();
+        frame(&ctx, &mut panel, Vec::new());
+        frame(&ctx, &mut panel, vec![key(Key::E)]);
+        frame(&ctx, &mut panel, Vec::new());
+        let follow = |panel: &TerminalPanel| -> Vec<bool> {
+            panel.dock.iter_all_tabs().map(|(_, t)| t.follow).collect()
+        };
+        assert_eq!(follow(&panel), [true, false]);
+
+        // Ctrl+Shift+L toggles the focused (second) terminal.
+        frame(&ctx, &mut panel, vec![key(Key::L)]);
+        assert_eq!(follow(&panel), [true, true]);
+        frame(&ctx, &mut panel, vec![key(Key::L)]);
+        assert_eq!(follow(&panel), [true, false]);
+
+        // Ctrl+Shift+Alt+L: all follow unless all already do, then none.
+        let all = Event::Key {
+            key: Key::L,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::CTRL | Modifiers::COMMAND | Modifiers::SHIFT | Modifiers::ALT,
+        };
+        frame(&ctx, &mut panel, vec![all.clone()]);
+        assert_eq!(follow(&panel), [true, true]);
+        frame(&ctx, &mut panel, vec![all]);
+        assert_eq!(follow(&panel), [false, false]);
+
+        // "New terminals follow" applies to terminals opened afterwards, and
+        // outlives a reset.
+        panel.set_follow(0, Follow::New(true));
+        frame(&ctx, &mut panel, vec![key(Key::T)]);
+        assert_eq!(follow(&panel), [false, false, true]);
+        panel.reset();
+        assert!(panel.new_follow);
     }
 
     #[test]

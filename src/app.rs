@@ -941,6 +941,9 @@ impl FilesApp {
                         self.toggle_pane(ui.ctx(), pane);
                     }
                 }
+                ui.menu_button(format!("{} Terminal folder", icon::LINK_SIMPLE), |ui| {
+                    self.terminal.follow_menu(ui);
+                });
                 if ui
                     .button("Reset layout")
                     .on_hover_text("Put the panes back where they started; tabs stay open")
