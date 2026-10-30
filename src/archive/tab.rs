@@ -594,7 +594,16 @@ impl ArchiveTab {
                         } else {
                             &n.path
                         };
-                        ui.label(format!("{glyph} {name}"));
+                        let color = (!selected)
+                            .then(|| {
+                                crate::theme::colors(ui.ctx()).icon(fs::icon_kind(
+                                    Path::new(&n.name),
+                                    n.is_dir,
+                                    false,
+                                ))
+                            })
+                            .flatten();
+                        crate::widgets::icon_label(ui, glyph, color, name);
                         if n.encrypted {
                             ui.weak(icon::LOCK).on_hover_text("Encrypted");
                         }

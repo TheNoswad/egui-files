@@ -455,6 +455,8 @@ impl TrashTab {
 
     fn table(&self, ui: &mut Ui, visible: &[usize], actions: &mut Vec<Action>) {
         let row_height = ui.text_style_height(&TextStyle::Body) + 6.0;
+        let colors = crate::theme::colors(ui.ctx());
+        colors.apply_to_list(ui.visuals_mut());
         TableBuilder::new(ui)
             .id_salt(("trash", self.id))
             .striped(true)
@@ -492,8 +494,12 @@ impl TrashTab {
                     let selected = self.selection.contains(&item.item.id);
                     row.set_selected(selected);
                     row.col(|ui| {
-                        let glyph = fs::icon_for(Path::new(&item.name), item.is_dir, false);
-                        ui.label(format!("{glyph} {}", item.name));
+                        let path = Path::new(&item.name);
+                        let glyph = fs::icon_for(path, item.is_dir, false);
+                        let color = (!selected)
+                            .then(|| colors.icon(fs::icon_kind(path, item.is_dir, false)))
+                            .flatten();
+                        crate::widgets::icon_label(ui, glyph, color, &item.name);
                     });
                     row.col(|ui| {
                         ui.label(

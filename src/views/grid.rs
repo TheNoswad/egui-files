@@ -17,6 +17,7 @@ pub fn show(
 ) {
     let icon_size = shared.icon_size;
     let cell = vec2(icon_size + 32.0, icon_size + 40.0);
+    let colors = crate::theme::colors(ui.ctx());
     ScrollArea::vertical()
         .id_salt(("grid", tab.id))
         .auto_shrink(false)
@@ -33,21 +34,18 @@ pub fn show(
 
                     // Only paint (and request thumbnails for) cells on screen.
                     if ui.is_rect_visible(rect) {
-                        let visuals = ui.visuals();
+                        let files = &colors.files;
                         if selected {
-                            ui.painter()
-                                .rect_filled(rect, 4.0, visuals.selection.bg_fill);
+                            ui.painter().rect_filled(rect, 4.0, files.selection);
                         } else if response.hovered() {
-                            ui.painter().rect_filled(
-                                rect,
-                                4.0,
-                                visuals.widgets.hovered.weak_bg_fill,
-                            );
+                            ui.painter().rect_filled(rect, 4.0, files.hover);
                         }
                         let text_color = if selected {
-                            visuals.selection.stroke.color
+                            files.selection_text
                         } else {
-                            visuals.text_color()
+                            entry
+                                .name_color(&colors)
+                                .unwrap_or(ui.visuals().text_color())
                         };
 
                         let icon_rect = Rect::from_center_size(
@@ -100,7 +98,7 @@ pub fn show(
                                 egui::Align2::CENTER_CENTER,
                                 entry.icon(),
                                 FontId::proportional(icon_size * 0.75),
-                                text_color,
+                                entry.icon_color(&colors).unwrap_or(text_color),
                             );
                         }
 

@@ -28,6 +28,7 @@ use crate::{
     system_theme::SystemTheme,
     tab::{self, AppAction, BrowserTab, Shared},
     terminal_panel::{PanelResponse, TerminalPanel},
+    theme::{self, Themes},
     trash::{self, TrashCount, TrashTab},
     tree::FolderTree,
     video::{Quality, Videos},
@@ -75,6 +76,8 @@ struct Persisted {
     open_with: open_with::Prefs,
     #[serde(default)]
     editor: editor::Prefs,
+    #[serde(default)]
+    theme: theme::Prefs,
 }
 
 fn default_true() -> bool {
@@ -104,6 +107,7 @@ struct PersistedRef<'a> {
     archive_prefs: &'a archive::Prefs,
     open_with: &'a open_with::Prefs,
     editor: &'a editor::Prefs,
+    theme: &'a theme::Prefs,
 }
 
 /// The panes a fresh layout starts with.
@@ -323,6 +327,7 @@ pub struct FilesApp {
     dock_shape: (Vec<u8>, Vec2),
     about: About,
     system_theme: SystemTheme,
+    themes: Themes,
 }
 
 impl FilesApp {
@@ -355,6 +360,7 @@ impl FilesApp {
                 archive_prefs: archive::Prefs::default(),
                 open_with: open_with::Prefs::default(),
                 editor: editor::Prefs::default(),
+                theme: theme::Prefs::default(),
             });
         let Persisted {
             dock,
@@ -372,6 +378,7 @@ impl FilesApp {
             archive_prefs,
             open_with,
             editor,
+            theme,
         } = persisted;
         editor::highlight::preload();
         let pending_panes = if panes_docked {
@@ -437,6 +444,7 @@ impl FilesApp {
             dock_shape: (Vec::new(), Vec2::ZERO),
             about: About::new(cc),
             system_theme: SystemTheme::watch(&cc.egui_ctx),
+            themes: Themes::new(&cc.egui_ctx, theme),
         }
     }
 
@@ -926,8 +934,24 @@ impl FilesApp {
                     }
                 });
                 ui.separator();
-                ui.label("Theme");
-                egui::widgets::global_theme_preference_buttons(ui);
+                ui.menu_button(format!("{} Theme", icon::PAINT_BRUSH), |ui| {
+                    egui::widgets::global_theme_preference_buttons(ui);
+                    ui.separator();
+                    ui.menu_button(format!("{} Dark mode theme", icon::MOON), |ui| {
+                        self.themes.menu_ui(ui, egui::Theme::Dark);
+                    });
+                    ui.menu_button(format!("{} Light mode theme", icon::SUN), |ui| {
+                        self.themes.menu_ui(ui, egui::Theme::Light);
+                    });
+                    ui.separator();
+                    if ui
+                        .button(format!("{} Theme editor…", icon::PALETTE))
+                        .clicked()
+                    {
+                        self.themes.open_editor(ui.ctx());
+                        ui.close();
+                    }
+                });
                 ui.separator();
                 ui.label("Panes");
                 for pane in Pane::ALL {
@@ -1371,6 +1395,7 @@ impl FilesApp {
 impl eframe::App for FilesApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.themes.update(&ctx);
         self.shared.images.begin_frame();
         self.shared.videos.begin_frame();
         self.sync_with_disk(&ctx);
@@ -1390,6 +1415,9 @@ impl eframe::App for FilesApp {
 
         Panel::top("menu_bar").show(ui, |ui| self.menu_bar(ui));
         self.about.ui(&ctx);
+        if self.themes.editor.open {
+            self.themes.editor_ui(&ctx);
+        }
         if !self.shared.jobs.is_empty() {
             Panel::bottom("jobs").show(ui, |ui| self.shared.jobs.ui(ui));
         }
@@ -1572,6 +1600,7 @@ impl eframe::App for FilesApp {
             archive_prefs: &self.shared.archive_prefs,
             open_with: &self.shared.open_with.prefs,
             editor: &self.shared.editor,
+            theme: &self.themes.prefs,
         };
         eframe::set_value(storage, eframe::APP_KEY, &state);
     }

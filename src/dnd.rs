@@ -82,7 +82,7 @@ pub fn target(response: &Response, target: DropTarget) -> Option<JobKind> {
     }
     claim(ctx);
 
-    let stroke = Stroke::new(2.0, ctx.global_style().visuals.selection.stroke.color);
+    let stroke = Stroke::new(2.0, crate::theme::colors(ctx).files.drop_target);
     ctx.layer_painter(response.layer_id).rect_stroke(
         response.rect,
         3.0,

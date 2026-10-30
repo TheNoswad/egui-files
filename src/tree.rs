@@ -202,6 +202,7 @@ impl FolderTree {
         let mut toggle = None;
 
         ui.spacing_mut().item_spacing.y = 0.0;
+        let folder_color = crate::theme::colors(ui.ctx()).icon(crate::theme::IconKind::Folder);
         let output = ScrollArea::vertical()
             .id_salt("folder_tree")
             .auto_shrink(false)
@@ -218,6 +219,8 @@ impl FolderTree {
                         name: &row.name,
                         selected: current == Some(row.path.as_path()),
                         weak: row.hidden,
+                        icon_color: folder_color,
+                        name_color: None,
                         indent,
                         leading: Some(caret.unwrap_or("")),
                         trailing: None,

@@ -17,6 +17,8 @@ pub fn show(
     actions: &mut Vec<Action>,
 ) {
     let row_height = ui.text_style_height(&TextStyle::Body) + 6.0;
+    let colors = crate::theme::colors(ui.ctx());
+    colors.apply_to_list(ui.visuals_mut());
     let mut table = TableBuilder::new(ui)
         .id_salt(("details", tab.id))
         .striped(true)
@@ -59,8 +61,19 @@ pub fn show(
                 let selected = tab.selection.contains(&entry.path);
                 row.set_selected(selected);
                 row.col(|ui| {
-                    let name = RichText::new(format!("{} {}", entry.icon(), entry.name));
-                    ui.label(if entry.hidden { name.weak() } else { name });
+                    let mut name = RichText::new(&entry.name);
+                    let mut icon = RichText::new(entry.icon());
+                    if !selected {
+                        if let Some(color) = entry.name_color(&colors) {
+                            name = name.color(color);
+                        }
+                        if let Some(color) = entry.icon_color(&colors) {
+                            icon = icon.color(color);
+                        }
+                    }
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    ui.label(icon);
+                    ui.label(name);
                 });
                 row.col(|ui| {
                     if !entry.is_dir {

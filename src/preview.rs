@@ -174,7 +174,7 @@ pub fn show(
             let preview = texts.get(entry);
             editable = preview.text.is_some() && editor::can_edit(&entry.path, false);
             if preview.text.as_ref().is_some_and(|t| !t.trim().is_empty()) {
-                let theme = highlight::theme_name(editor_prefs.theme(ui.visuals().dark_mode));
+                let theme = editor_prefs.theme(ui);
                 let colors = ThemeColors::of(theme, ui.visuals());
                 preview.update_colors(ui.ctx(), theme);
                 let spans = preview.spans();
@@ -353,7 +353,12 @@ fn image(ui: &mut Ui, entry: &Entry, images: &mut ImageCache, max_side: u32) -> 
             let scale = (max_size.x / texture_size.x)
                 .min(max_size.y / texture_size.y)
                 .min(1.0);
-            ui.image((image.texture.id(), texture_size * scale));
+            let backdrop = crate::theme::colors(ui.ctx()).media.image_backdrop;
+            egui::Frame::NONE
+                .fill(backdrop.unwrap_or(Color32::TRANSPARENT))
+                .show(ui, |ui| {
+                    ui.image((image.texture.id(), texture_size * scale))
+                });
             Some(image.original_size)
         }
         Lookup::Pending => {
@@ -409,7 +414,8 @@ fn video_player(
     let video_rect = player.render_for(rect, ui.pixels_per_point());
     let painter = ui.painter_at(rect.union(video_rect));
     let full_uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
-    painter.rect_filled(rect, 0.0, Color32::BLACK);
+    let media = crate::theme::colors(ui.ctx()).media.clone();
+    painter.rect_filled(rect, 0.0, media.backdrop);
     if let Some(frame) = player.frame() {
         painter.image(frame.id(), video_rect, full_uv, Color32::WHITE);
     } else if let Some((texture, texture_size)) = thumbnail {
@@ -424,13 +430,13 @@ fn video_player(
             ui.visuals().error_fg_color,
         );
     } else if status.paused {
-        painter.circle_filled(rect.center(), 24.0, Color32::from_black_alpha(150));
+        painter.circle_filled(rect.center(), 24.0, media.overlay);
         painter.text(
             rect.center() + vec2(2.0, 0.0),
             Align2::CENTER_CENTER,
             icon::PLAY,
             FontId::proportional(24.0),
-            Color32::WHITE,
+            media.overlay_icon,
         );
     }
     let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);

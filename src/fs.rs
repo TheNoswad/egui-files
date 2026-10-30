@@ -9,6 +9,9 @@ use std::{
 };
 
 use egui_phosphor::regular as icon;
+
+use crate::theme::AppColors;
+pub use crate::theme::IconKind;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug)]
@@ -18,6 +21,7 @@ pub struct Entry {
     pub is_dir: bool,
     pub is_symlink: bool,
     pub hidden: bool,
+    pub executable: bool,
     pub size: u64,
     pub modified: Option<SystemTime>,
 }
@@ -35,6 +39,20 @@ impl Entry {
         icon_for(&self.path, self.is_dir, self.is_symlink)
     }
 
+    pub fn icon_kind(&self) -> IconKind {
+        icon_kind(&self.path, self.is_dir, self.is_symlink)
+    }
+
+    /// The theme's color for this entry's icon, if it has one.
+    pub fn icon_color(&self, colors: &AppColors) -> Option<egui::Color32> {
+        colors.icon(self.icon_kind())
+    }
+
+    /// The theme's color for this entry's name, if it isn't the usual one.
+    pub fn name_color(&self, colors: &AppColors) -> Option<egui::Color32> {
+        colors.name(self.hidden, self.is_symlink, self.executable)
+    }
+
     pub fn kind(&self) -> String {
         if self.is_dir {
             return "Folder".to_owned();
@@ -46,14 +64,10 @@ impl Entry {
     }
 }
 
-/// Icon glyph for a path, based on its extension.
-pub fn icon_for(path: &Path, is_dir: bool, is_symlink: bool) -> &'static str {
+/// What kind of file a path is, for its icon, based on its extension.
+pub fn icon_kind(path: &Path, is_dir: bool, is_symlink: bool) -> IconKind {
     if is_dir {
-        return if is_symlink {
-            icon::FOLDER_SIMPLE
-        } else {
-            icon::FOLDER
-        };
+        return IconKind::Folder;
     }
     let extension = path
         .extension()
@@ -62,18 +76,50 @@ pub fn icon_for(path: &Path, is_dir: bool, is_symlink: bool) -> &'static str {
         .unwrap_or_default();
     match extension.as_str() {
         "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" | "ico" | "tif" | "tiff" => {
-            icon::FILE_IMAGE
+            IconKind::Image
         }
-        "mp3" | "flac" | "ogg" | "wav" | "opus" | "m4a" | "aac" => icon::FILE_AUDIO,
-        "mp4" | "mkv" | "webm" | "avi" | "mov" | "wmv" => icon::FILE_VIDEO,
-        "pdf" => icon::FILE_PDF,
-        "zip" | "tar" | "gz" | "xz" | "zst" | "7z" | "rar" | "bz2" => icon::FILE_ZIP,
+        "mp3" | "flac" | "ogg" | "wav" | "opus" | "m4a" | "aac" => IconKind::Audio,
+        "mp4" | "mkv" | "webm" | "avi" | "mov" | "wmv" => IconKind::Video,
+        "pdf" => IconKind::Pdf,
+        "zip" | "tar" | "gz" | "xz" | "zst" | "7z" | "rar" | "bz2" => IconKind::Archive,
         "rs" | "py" | "js" | "ts" | "c" | "h" | "cpp" | "hpp" | "go" | "java" | "sh" | "toml"
-        | "json" | "yaml" | "yml" | "html" | "css" | "lua" | "ron" => icon::FILE_CODE,
-        "txt" | "md" | "log" | "ini" | "cfg" | "conf" => icon::FILE_TEXT,
-        "doc" | "docx" | "odt" | "rtf" => icon::FILE_DOC,
-        _ if is_symlink => icon::LINK,
-        _ => icon::FILE,
+        | "json" | "yaml" | "yml" | "html" | "css" | "lua" | "ron" => IconKind::Code,
+        "txt" | "md" | "log" | "ini" | "cfg" | "conf" => IconKind::Text,
+        "doc" | "docx" | "odt" | "rtf" => IconKind::Document,
+        _ if is_symlink => IconKind::Link,
+        _ => IconKind::File,
+    }
+}
+
+/// Icon glyph for a path, based on its extension.
+pub fn icon_for(path: &Path, is_dir: bool, is_symlink: bool) -> &'static str {
+    match icon_kind(path, is_dir, is_symlink) {
+        IconKind::Folder if is_symlink => icon::FOLDER_SIMPLE,
+        IconKind::Folder => icon::FOLDER,
+        IconKind::Image => icon::FILE_IMAGE,
+        IconKind::Audio => icon::FILE_AUDIO,
+        IconKind::Video => icon::FILE_VIDEO,
+        IconKind::Pdf => icon::FILE_PDF,
+        IconKind::Archive => icon::FILE_ZIP,
+        IconKind::Code => icon::FILE_CODE,
+        IconKind::Text => icon::FILE_TEXT,
+        IconKind::Document => icon::FILE_DOC,
+        IconKind::Link => icon::LINK,
+        IconKind::File => icon::FILE,
+    }
+}
+
+/// Whether a file can be run: any execute bit set, on Unix.
+fn is_executable(meta: Option<&fs::Metadata>) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.is_some_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        false
     }
 }
 
@@ -89,6 +135,7 @@ pub fn read_dir(dir: &Path) -> io::Result<Vec<Entry>> {
         let is_dir = meta.as_ref().is_some_and(fs::Metadata::is_dir);
         entries.push(Entry {
             hidden: is_hidden(&name, meta.as_ref()),
+            executable: is_executable(meta.as_ref()),
             size: meta
                 .as_ref()
                 .filter(|m| m.is_file())

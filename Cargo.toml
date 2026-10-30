@@ -36,6 +36,8 @@ filetime = "0.2"
 two-face = "0.5.2"
 syntect = { version = "5.3", default-features = false, features = ["parsing"] }
 memchr = "2"
+toml = "1"
+fontdb = "0.24"
 
 # Image decoding is painfully slow unoptimized; optimize dependencies even in dev builds.
 [profile.dev.package."*"]

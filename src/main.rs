@@ -17,6 +17,7 @@ mod system_theme;
 mod tab;
 mod terminal;
 mod terminal_panel;
+mod theme;
 mod thumbnails;
 mod trash;
 mod tree;

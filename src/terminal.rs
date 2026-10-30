@@ -226,7 +226,7 @@ impl Terminal {
             return response;
         };
 
-        let palette = Palette::new(ui.visuals());
+        let palette = Palette::new(ui.ctx());
         session.process_events(ui.ctx(), &palette);
         if session.exited {
             response.close = true;
@@ -981,6 +981,7 @@ impl Grid {
 struct Palette {
     fg: Color32,
     bg: Color32,
+    cursor: Color32,
     ansi: [Color32; 16],
     selection_bg: Color32,
     selection_fg: Color32,
@@ -1006,19 +1007,24 @@ fn dim(color: Color32) -> Color32 {
     Color32::from_rgb(f(r), f(g), f(b))
 }
 
+/// The ANSI colors for themes that don't set their own.
+pub fn default_ansi(dark: bool) -> [Color32; 16] {
+    if dark { DARK_ANSI } else { LIGHT_ANSI }.map(hex)
+}
+
 impl Palette {
-    fn new(visuals: &egui::Visuals) -> Self {
-        let ansi = if visuals.dark_mode {
-            DARK_ANSI
-        } else {
-            LIGHT_ANSI
-        };
+    fn new(ctx: &Context) -> Self {
+        let colors = crate::theme::colors(ctx);
+        let t = &colors.terminal;
         Self {
-            fg: visuals.strong_text_color(),
-            bg: visuals.extreme_bg_color,
-            ansi: ansi.map(hex),
-            selection_bg: visuals.selection.bg_fill,
-            selection_fg: visuals.selection.stroke.color,
+            fg: t.foreground,
+            bg: t.background,
+            cursor: t.cursor,
+            ansi: t
+                .ansi
+                .unwrap_or_else(|| default_ansi(ctx.global_style().visuals.dark_mode)),
+            selection_bg: t.selection,
+            selection_fg: t.selection_text,
         }
     }
 
@@ -1038,7 +1044,8 @@ impl Palette {
                 let v = (8 + (index - 232) * 10) as u8;
                 Color32::from_gray(v)
             }
-            256 | 258 | 267 => self.fg,
+            256 | 267 => self.fg,
+            258 => self.cursor,
             257 => self.bg,
             259..267 => dim(self.ansi[index - 259]),
             _ => dim(self.fg),
@@ -1283,7 +1290,7 @@ mod tests {
             loop {
                 let t = start.elapsed().as_secs_f64();
                 // Answer the shell's terminal queries, as the UI does each frame.
-                let palette = Palette::new(&egui::Visuals::dark());
+                let palette = Palette::new(&ctx);
                 panel
                     .session
                     .as_mut()

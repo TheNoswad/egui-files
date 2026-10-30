@@ -37,6 +37,9 @@ use crate::tab::Shared;
 pub struct Prefs {
     pub dark_theme: String,
     pub light_theme: String,
+    /// Use the app theme's suggestion instead of the named theme.
+    pub dark_matches_app: bool,
+    pub light_matches_app: bool,
 }
 
 impl Default for Prefs {
@@ -44,17 +47,25 @@ impl Default for Prefs {
         Self {
             dark_theme: highlight::DEFAULT_DARK_THEME.to_owned(),
             light_theme: highlight::DEFAULT_LIGHT_THEME.to_owned(),
+            dark_matches_app: true,
+            light_matches_app: true,
         }
     }
 }
 
 impl Prefs {
-    /// The theme for the current light or dark mode.
-    pub fn theme(&self, dark: bool) -> &str {
-        if dark {
-            &self.dark_theme
+    /// The syntax theme for the app theme showing in `ui`.
+    pub fn theme(&self, ui: &Ui) -> &'static str {
+        let dark = ui.visuals().dark_mode;
+        let (name, matches_app) = if dark {
+            (&self.dark_theme, self.dark_matches_app)
         } else {
-            &self.light_theme
+            (&self.light_theme, self.light_matches_app)
+        };
+        if matches_app {
+            highlight::theme_name(&crate::theme::colors(ui.ctx()).syntax)
+        } else {
+            highlight::theme_name(name)
         }
     }
 
@@ -66,15 +77,24 @@ impl Prefs {
         } else {
             "Used in light mode"
         });
-        let current = if dark {
-            &mut self.dark_theme
+        let suggested = crate::theme::colors(ui.ctx()).syntax.clone();
+        let (current, matches_app) = if dark {
+            (&mut self.dark_theme, &mut self.dark_matches_app)
         } else {
-            &mut self.light_theme
+            (&mut self.light_theme, &mut self.light_matches_app)
         };
+        if ui
+            .radio(*matches_app, format!("Match app theme ({suggested})"))
+            .clicked()
+        {
+            *matches_app = true;
+        }
+        ui.separator();
         ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
             for name in highlight::theme_names() {
-                if ui.radio(current == name, name).clicked() {
+                if ui.radio(!*matches_app && current == name, name).clicked() {
                     *current = name.to_owned();
+                    *matches_app = false;
                 }
             }
         });
@@ -573,7 +593,7 @@ impl EditorTab {
             Doc::Ready(buffer) => buffer,
         };
 
-        let theme = shared.editor.theme(ui.visuals().dark_mode).to_owned();
+        let theme = shared.editor.theme(ui).to_owned();
         let syntax = self.syntax.as_deref().unwrap_or(buffer.detected_syntax);
         update_highlighter(&ctx, buffer, syntax, &theme);
 

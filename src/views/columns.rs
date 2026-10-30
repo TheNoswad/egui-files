@@ -106,11 +106,14 @@ fn entry_list(
 }
 
 fn entry_row(ui: &mut Ui, entry: &Entry, selected: bool) -> egui::Response {
+    let colors = crate::theme::colors(ui.ctx());
     ListRow {
         icon: entry.icon(),
         name: &entry.name,
         selected,
         weak: entry.hidden,
+        icon_color: entry.icon_color(&colors),
+        name_color: entry.name_color(&colors),
         indent: 0.0,
         leading: None,
         trailing: entry.is_dir.then_some(icon::CARET_RIGHT),

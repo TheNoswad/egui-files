@@ -1,9 +1,20 @@
 //! Small reusable widgets for virtualized, fixed-height row lists.
 
 use egui::{
-    Align2, FontId, Response, Sense, TextStyle, Ui, scroll_area::ScrollAreaOutput, text::LayoutJob,
-    vec2,
+    Align2, Color32, FontId, Response, RichText, Sense, TextStyle, Ui,
+    scroll_area::ScrollAreaOutput, text::LayoutJob, vec2,
 };
+
+/// An icon in its theme color, then a name.
+pub fn icon_label(ui: &mut Ui, icon: &str, color: Option<Color32>, name: impl Into<RichText>) {
+    let mut icon = RichText::new(icon);
+    if let Some(color) = color {
+        icon = icon.color(color);
+    }
+    ui.spacing_mut().item_spacing.x = 4.0;
+    ui.label(icon);
+    ui.label(name.into());
+}
 
 pub fn row_height(ui: &Ui) -> f32 {
     ui.text_style_height(&TextStyle::Body) + 6.0
@@ -14,6 +25,9 @@ pub struct ListRow<'a> {
     pub name: &'a str,
     pub selected: bool,
     pub weak: bool,
+    /// The theme's colors for the icon and name, over the usual text color.
+    pub icon_color: Option<Color32>,
+    pub name_color: Option<Color32>,
     pub indent: f32,
     /// Glyph drawn before the icon, e.g. an expand caret.
     pub leading: Option<&'a str>,
@@ -35,18 +49,20 @@ impl ListRow<'_> {
 
         let visuals = ui.visuals();
         let painter = ui.painter();
+        let files = &crate::theme::colors(ui.ctx()).files;
         if self.selected {
-            painter.rect_filled(rect, 2.0, visuals.selection.bg_fill);
+            painter.rect_filled(rect, 2.0, files.selection);
         } else if response.hovered() {
-            painter.rect_filled(rect, 2.0, visuals.widgets.hovered.weak_bg_fill);
+            painter.rect_filled(rect, 2.0, files.hover);
         }
         let color = if self.selected {
-            visuals.selection.stroke.color
+            files.selection_text
         } else if self.weak {
-            visuals.weak_text_color()
+            files.hidden
         } else {
-            visuals.text_color()
+            self.name_color.unwrap_or(visuals.text_color())
         };
+        let icon_color = self.icon_color.unwrap_or(color);
         let font = FontId::proportional(ui.text_style_height(&TextStyle::Body) - 1.0);
 
         let mut x = rect.left() + 4.0 + self.indent;
@@ -65,7 +81,7 @@ impl ListRow<'_> {
             Align2::LEFT_CENTER,
             self.icon,
             font.clone(),
-            color,
+            icon_color,
         );
         x += font.size + 6.0;
 
