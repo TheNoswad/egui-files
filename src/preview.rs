@@ -10,6 +10,7 @@ use egui::{Align, Align2, Color32, FontId, Layout, Rect, RichText, Sense, Ui, Ve
 use egui_phosphor::regular as icon;
 
 use crate::{
+    archive::{self, ListState},
     fs::{self, Entry},
     images::{self, ImageCache, Lookup},
     tab::{Action, Shared},
@@ -83,15 +84,7 @@ pub fn pane(ui: &mut Ui, entry: Option<&Entry>, shared: &mut Shared, actions: &m
         .id_salt("preview-pane")
         .auto_shrink(false)
         .show(ui, |ui| match entry {
-            Some(entry) => show(
-                ui,
-                entry,
-                &mut shared.images,
-                &mut shared.videos,
-                &mut shared.texts,
-                images::PREVIEW_SIZE,
-                actions,
-            ),
+            Some(entry) => show(ui, entry, shared, images::PREVIEW_SIZE, actions),
             None => {
                 ui.add_space(16.0);
                 ui.vertical_centered(|ui| ui.weak("Select one item to preview"));
@@ -103,17 +96,23 @@ pub fn pane(ui: &mut Ui, entry: Option<&Entry>, shared: &mut Shared, actions: &m
 pub fn show(
     ui: &mut Ui,
     entry: &Entry,
-    images: &mut ImageCache,
-    videos: &mut Videos,
-    texts: &mut TextCache,
+    shared: &mut Shared,
     max_side: u32,
     actions: &mut Vec<Action>,
 ) {
+    let Shared {
+        images,
+        videos,
+        texts,
+        archives,
+        ..
+    } = shared;
     let mut dimensions = None;
     let mut duration = None;
+    let is_archive = !entry.is_dir && archive::is_archive(&entry.path);
     ui.vertical_centered(|ui| {
         ui.add_space(8.0);
-        if entry.is_dir {
+        if entry.is_dir || is_archive {
             big_icon(ui, entry);
         } else if video::is_video(&entry.path) {
             (dimensions, duration) = video_player(ui, entry, images, videos);
@@ -166,6 +165,94 @@ pub fn show(
             actions.push(Action::Activate(entry.path.clone()));
         }
     });
+    if is_archive {
+        ui.add_space(8.0);
+        archive_contents(ui, &entry.path, archives);
+    }
+}
+
+/// How many top-level entries of an archive the preview lists.
+const ARCHIVE_ROWS: usize = 30;
+
+fn archive_contents(ui: &mut Ui, path: &Path, archives: &mut archive::Listings) {
+    let listing = match archives.get(path) {
+        ListState::Ready(listing) => listing,
+        ListState::Loading => {
+            ui.vertical_centered(|ui| {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.weak("Reading contents…");
+                });
+            });
+            return;
+        }
+        ListState::NeedsPassword { .. } => {
+            ui.vertical_centered(|ui| {
+                ui.weak(format!(
+                    "{} Encrypted: open it to enter the password",
+                    icon::LOCK
+                ));
+            });
+            return;
+        }
+        ListState::Failed(error) => {
+            ui.vertical_centered(|ui| {
+                ui.colored_label(ui.visuals().error_fg_color, error);
+            });
+            return;
+        }
+    };
+    // Top-level items, with folders the archive only implies.
+    let mut top: Vec<(String, bool)> = Vec::new();
+    for entry in &listing.entries {
+        let (name, nested) = match entry.path.split_once('/') {
+            Some((name, _)) => (name, true),
+            None => (entry.path.as_str(), false),
+        };
+        let is_dir = nested || entry.is_dir;
+        match top.iter_mut().find(|(n, _)| n == name) {
+            Some(existing) => existing.1 |= is_dir,
+            None if !name.is_empty() => top.push((name.to_owned(), is_dir)),
+            None => {}
+        }
+    }
+    top.sort_by(|a, b| {
+        b.1.cmp(&a.1)
+            .then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase()))
+    });
+
+    let total = listing.total_size();
+    egui::Grid::new("archive-info")
+        .num_columns(2)
+        .show(ui, |ui| {
+            let row = |ui: &mut Ui, label: &str, value: String| {
+                ui.weak(label);
+                ui.label(value);
+                ui.end_row();
+            };
+            row(ui, "Format", listing.format.label().to_owned());
+            row(ui, "Files", listing.files().to_string());
+            row(ui, "Unpacked", fs::human_size(total));
+            if total > 0 {
+                row(
+                    ui,
+                    "Ratio",
+                    format!("{:.0}%", listing.archive_size as f64 * 100.0 / total as f64),
+                );
+            }
+            if listing.encrypted() {
+                row(ui, "Encrypted", format!("{} Yes", icon::LOCK));
+            }
+        });
+    ui.add_space(6.0);
+    ui.strong("Contents");
+    for (name, is_dir) in top.iter().take(ARCHIVE_ROWS) {
+        let glyph = fs::icon_for(Path::new(name), *is_dir, false);
+        ui.add(egui::Label::new(format!("{glyph} {name}")).truncate());
+    }
+    if top.len() > ARCHIVE_ROWS {
+        ui.weak(format!("… and {} more", top.len() - ARCHIVE_ROWS));
+    }
 }
 
 fn big_icon(ui: &mut Ui, entry: &Entry) {
@@ -389,25 +476,29 @@ mod tests {
         let entry = fs::read_dir(&dir).unwrap().remove(0);
 
         let ctx = Context::default();
-        let mut images = ImageCache::new(&ctx);
-        let mut videos = Videos::new(&ctx);
-        let mut texts = TextCache::default();
+        let mut shared = Shared {
+            show_hidden: false,
+            show_thumbnails: true,
+            icon_size: 64.0,
+            clipboard: None,
+            focused_tab: None,
+            preview_shown: true,
+            app_actions: Vec::new(),
+            images: ImageCache::new(&ctx),
+            videos: Videos::new(&ctx),
+            texts: TextCache::default(),
+            jobs: crate::jobs::Jobs::new(&ctx),
+            archives: archive::Listings::new(&ctx),
+            archive_prefs: Default::default(),
+        };
         let input = || egui::RawInput {
             screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(900.0, 300.0))),
             ..Default::default()
         };
         for _ in 0..3 {
-            videos.begin_frame();
+            shared.videos.begin_frame();
             let mut output = ctx.run_ui(input(), |ui| {
-                show(
-                    ui,
-                    &entry,
-                    &mut images,
-                    &mut videos,
-                    &mut texts,
-                    256,
-                    &mut Vec::new(),
-                );
+                show(ui, &entry, &mut shared, 256, &mut Vec::new());
             });
             output.textures_delta.clear();
         }

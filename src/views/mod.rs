@@ -10,6 +10,7 @@ use egui_phosphor::regular as icon;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    archive,
     dnd::{self, DropTarget},
     fs::Entry,
     tab::{Action, BrowserTab, Shared},
@@ -39,9 +40,23 @@ pub fn show(
     actions: &mut Vec<Action>,
 ) {
     match tab.view {
-        ViewMode::Details => details::show(ui, tab, visible, shared.clipboard.is_some(), actions),
+        ViewMode::Details => details::show(ui, tab, visible, MenuContext::new(shared), actions),
         ViewMode::Grid => grid::show(ui, tab, visible, shared, actions),
         ViewMode::Columns => columns::show(ui, tab, visible, shared, actions),
+    }
+}
+
+/// What the item context menu needs to know beyond the item.
+#[derive(Clone, Copy)]
+pub(crate) struct MenuContext {
+    can_paste: bool,
+}
+
+impl MenuContext {
+    pub(crate) fn new(shared: &Shared) -> Self {
+        Self {
+            can_paste: shared.clipboard.is_some(),
+        }
     }
 }
 
@@ -51,7 +66,7 @@ pub(crate) fn item_interaction(
     index: usize,
     entry: &Entry,
     tab: &BrowserTab,
-    can_paste: bool,
+    menu: MenuContext,
     actions: &mut Vec<Action>,
 ) {
     let selected = tab.selection.contains(&entry.path);
@@ -83,48 +98,112 @@ pub(crate) fn item_interaction(
             modifiers: Modifiers::NONE,
         });
     }
-    response.context_menu(|ui| entry_menu(ui, entry, can_paste, actions));
+    response.context_menu(|ui| entry_menu(ui, entry, tab, menu, actions));
 }
 
-fn entry_menu(ui: &mut Ui, entry: &Entry, can_paste: bool, actions: &mut Vec<Action>) {
-    let mut item = |ui: &mut Ui, label: String, action: Action| {
-        if ui.button(label).clicked() {
+fn entry_menu(
+    ui: &mut Ui,
+    entry: &Entry,
+    tab: &BrowserTab,
+    menu: MenuContext,
+    actions: &mut Vec<Action>,
+) {
+    let mut item = |ui: &mut Ui, label: String, shortcut: &str, action: Action| {
+        if ui
+            .add(egui::Button::new(label).shortcut_text(shortcut))
+            .clicked()
+        {
             actions.push(action);
             ui.close();
         }
     };
+    let is_archive = !entry.is_dir && archive::is_archive(&entry.path);
     item(
         ui,
         format!("{} Open", icon::ARROW_SQUARE_OUT),
+        "",
         Action::Activate(entry.path.clone()),
     );
+    if is_archive {
+        item(
+            ui,
+            format!("{} Open with default app", icon::APP_WINDOW),
+            "",
+            Action::OpenExternally(entry.path.clone()),
+        );
+    }
     if entry.is_dir {
         item(
             ui,
             format!("{} Open in new tab", icon::PLUS),
+            "",
             Action::OpenInNewTab(entry.path.clone()),
         );
     }
     ui.separator();
-    item(ui, format!("{} Cut", icon::SCISSORS), Action::Cut);
-    item(ui, format!("{} Copy", icon::COPY), Action::Copy);
-    if entry.is_dir && can_paste {
+    item(ui, format!("{} Cut", icon::SCISSORS), "", Action::Cut);
+    item(ui, format!("{} Copy", icon::COPY), "", Action::Copy);
+    if entry.is_dir && menu.can_paste {
         item(
             ui,
             format!("{} Paste into folder", icon::CLIPBOARD),
+            "",
             Action::PasteInto(entry.path.clone()),
         );
     }
     item(
         ui,
         format!("{} Copy path", icon::CLIPBOARD),
+        "",
         Action::CopyPath,
+    );
+    ui.separator();
+    if is_archive {
+        let archives: Vec<_> = tab
+            .selected_paths()
+            .into_iter()
+            .filter(|p| archive::is_archive(p))
+            .collect();
+        item(
+            ui,
+            format!("{} Extract here", icon::ARCHIVE),
+            "Ctrl+E",
+            Action::Extract(archive::ExtractMode::Smart),
+        );
+        item(
+            ui,
+            format!(
+                "{} {}",
+                icon::FOLDER_SIMPLE,
+                archive::subfolder_label(&archives)
+            ),
+            "",
+            Action::Extract(archive::ExtractMode::Subfolder),
+        );
+        item(
+            ui,
+            format!("{} Extract to…", icon::FOLDER_OPEN),
+            "Ctrl+Shift+E",
+            Action::ExtractTo,
+        );
+    }
+    item(
+        ui,
+        format!("{} Compress…", icon::FILE_ZIP),
+        "Ctrl+Shift+C",
+        Action::Compress,
     );
     ui.separator();
     item(
         ui,
         format!("{} Rename", icon::PENCIL_SIMPLE),
+        "",
         Action::StartRename,
     );
-    item(ui, format!("{} Move to trash", icon::TRASH), Action::Trash);
+    item(
+        ui,
+        format!("{} Move to trash", icon::TRASH),
+        "",
+        Action::Trash,
+    );
 }

@@ -13,6 +13,7 @@ use egui_phosphor::regular as icon;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    archive::{self, CompressDialog, ExtractDialog, ExtractJob, ExtractMode},
     dnd::{self, DropTarget},
     fs::{self, Entry, Sort, SortKey},
     images::ImageCache,
@@ -38,6 +39,8 @@ pub struct Shared {
     pub videos: Videos,
     pub texts: TextCache,
     pub jobs: Jobs,
+    pub archives: archive::Listings,
+    pub archive_prefs: archive::Prefs,
 }
 
 pub struct FileClipboard {
@@ -51,6 +54,8 @@ pub enum AppAction {
     /// Bring the tab with this id to the front.
     FocusTab(u64),
     TogglePreview,
+    /// Show an archive's contents in a tab.
+    OpenArchive(PathBuf),
 }
 
 /// Everything a view or toolbar can ask the tab to do.
@@ -103,6 +108,16 @@ pub enum Action {
     StartJob(JobKind),
     ToggleHidden,
     TogglePreview,
+    /// Open in the default app, even if it's an archive.
+    OpenExternally(PathBuf),
+    /// Extract the selected archives next to themselves.
+    Extract(ExtractMode),
+    /// Ask where to extract the selected archives.
+    ExtractTo,
+    /// Ask how to compress the selection.
+    Compress,
+    /// Ask how to compress the folder itself.
+    CompressFolder,
 }
 
 struct Rename {
@@ -155,6 +170,13 @@ pub struct BrowserTab {
     /// Listings of the extra folders shown by the columns view.
     #[serde(skip)]
     column_cache: HashMap<PathBuf, Vec<Entry>>,
+    #[serde(skip)]
+    compress: Option<CompressDialog>,
+    #[serde(skip)]
+    extract: Option<ExtractDialog>,
+    /// Select this once the listing has it, e.g. a just-made archive.
+    #[serde(skip)]
+    reveal: Option<PathBuf>,
 }
 
 impl BrowserTab {
@@ -179,6 +201,16 @@ impl BrowserTab {
             focus_path_edit: false,
             rename: None,
             column_cache: HashMap::new(),
+            compress: None,
+            extract: None,
+            reveal: None,
+        }
+    }
+
+    /// Selects `path` once this tab shows its folder's new contents.
+    pub fn reveal(&mut self, path: PathBuf) {
+        if path.parent() == Some(self.path.as_path()) {
+            self.reveal = Some(path);
         }
     }
 
@@ -358,6 +390,9 @@ impl BrowserTab {
         } else if self.stale {
             self.refresh(shared.show_hidden);
         }
+        if let Some(path) = self.reveal.take() {
+            self.select_path(&path, shared.show_hidden);
+        }
 
         let mut actions = Vec::new();
         if shared.focused_tab == Some(self.id) {
@@ -402,6 +437,7 @@ impl BrowserTab {
                 background.context_menu(|ui| self.background_menu(ui, shared, &mut actions));
             });
         self.rename_modal(ui.ctx(), &mut actions);
+        self.archive_dialogs(ui.ctx(), shared);
         self.scroll_to = None;
 
         if !actions.is_empty() {
@@ -413,7 +449,11 @@ impl BrowserTab {
     }
 
     fn keyboard(&mut self, ctx: &Context, actions: &mut Vec<Action>) {
-        if ctx.text_edit_focused() || self.rename.is_some() {
+        if ctx.text_edit_focused()
+            || self.rename.is_some()
+            || self.compress.is_some()
+            || self.extract.is_some()
+        {
             return;
         }
         let cmd = Modifiers::COMMAND;
@@ -506,9 +546,17 @@ impl BrowserTab {
             if key(cmd, Key::H) {
                 actions.push(Action::ToggleHidden);
             }
-            // egui-winit turns Ctrl+C/X/V into dedicated events.
+            if key(cmd_shift, Key::E) {
+                actions.push(Action::ExtractTo);
+            }
+            if key(cmd, Key::E) {
+                actions.push(Action::Extract(ExtractMode::Smart));
+            }
+            // egui-winit turns Ctrl+C/X/V into dedicated events, also with Shift.
+            let shift = i.modifiers.shift;
             for event in &i.events {
                 match event {
+                    egui::Event::Copy if shift => actions.push(Action::Compress),
                     egui::Event::Copy => actions.push(Action::Copy),
                     egui::Event::Cut => actions.push(Action::Cut),
                     egui::Event::Paste(_) => actions.push(Action::Paste),
@@ -664,6 +712,13 @@ impl BrowserTab {
             format!("{} Open in new tab", icon::PLUS),
             "",
             Action::OpenInNewTab(self.path.clone()),
+        );
+        item(
+            ui,
+            self.path.parent().is_some(),
+            format!("{} Compress this folder…", icon::FILE_ZIP),
+            "",
+            Action::CompressFolder,
         );
         ui.separator();
         ui.menu_button(format!("{} View", icon::EYE), |ui| {
@@ -829,6 +884,39 @@ impl BrowserTab {
         }
     }
 
+    fn archive_dialogs(&mut self, ctx: &Context, shared: &mut Shared) {
+        use archive::DialogResult;
+        let result = if let Some(dialog) = &mut self.compress {
+            dialog.show(ctx, &mut shared.archive_prefs, shared.show_hidden)
+        } else if let Some(dialog) = &mut self.extract {
+            dialog.show(ctx, &mut shared.archive_prefs, shared.show_hidden)
+        } else {
+            return;
+        };
+        match result {
+            DialogResult::Open => {}
+            DialogResult::Closed => {
+                self.compress = None;
+                self.extract = None;
+            }
+            DialogResult::Start(jobs) => {
+                for job in jobs {
+                    shared.jobs.start(job);
+                }
+                self.compress = None;
+                self.extract = None;
+            }
+        }
+    }
+
+    /// The selected archives.
+    fn selected_archives(&self) -> Vec<PathBuf> {
+        self.selected_paths()
+            .into_iter()
+            .filter(|p| !p.is_dir() && archive::is_archive(p))
+            .collect()
+    }
+
     // -----------------------------------------------------------------------
     // Actions
 
@@ -861,10 +949,45 @@ impl BrowserTab {
                 self.select(index, modifiers, &visible);
                 self.scroll_to = Some(index);
             }
-            Action::Activate(path) => self.activate(path),
+            Action::Activate(path) => self.activate(path, &mut shared.app_actions),
             Action::ActivateCursor => {
                 if let Some(&i) = self.cursor.and_then(|c| visible.get(c)) {
-                    self.activate(self.entries()[i].path.clone());
+                    self.activate(self.entries()[i].path.clone(), &mut shared.app_actions);
+                }
+            }
+            Action::OpenExternally(path) => {
+                if let Err(err) = fs::open(&path) {
+                    self.error = Some(format!("Could not open {}: {err}", path.display()));
+                }
+            }
+            Action::Extract(mode) => {
+                for archive in self.selected_archives() {
+                    let dest = archive
+                        .parent()
+                        .map_or_else(|| self.path.clone(), PathBuf::from);
+                    let job = ExtractJob::new(archive, dest, mode, false);
+                    shared.jobs.start(JobKind::Extract(job));
+                }
+            }
+            Action::ExtractTo => {
+                let archives = self.selected_archives();
+                if !archives.is_empty() {
+                    let id = Id::new(("extract-dialog", self.id));
+                    self.extract = Some(ExtractDialog::new(id, archives, None, None));
+                }
+            }
+            Action::Compress => {
+                let paths = self.selected_paths();
+                if !paths.is_empty() {
+                    let id = Id::new(("compress-dialog", self.id));
+                    self.compress = Some(CompressDialog::new(id, paths, &shared.archive_prefs));
+                }
+            }
+            Action::CompressFolder => {
+                if self.path.parent().is_some() {
+                    let id = Id::new(("compress-dialog", self.id));
+                    let paths = vec![self.path.clone()];
+                    self.compress = Some(CompressDialog::new(id, paths, &shared.archive_prefs));
                 }
             }
             Action::OpenInNewTab(path) => shared.app_actions.push(AppAction::NewTab(path)),
@@ -1053,9 +1176,12 @@ impl BrowserTab {
         self.cursor = Some(index);
     }
 
-    pub fn activate(&mut self, path: PathBuf) {
+    /// Opens folders here, archives in an archive tab, and files in their app.
+    pub fn activate(&mut self, path: PathBuf, app_actions: &mut Vec<AppAction>) {
         if path.is_dir() {
             self.navigate(path);
+        } else if archive::is_archive(&path) {
+            app_actions.push(AppAction::OpenArchive(path));
         } else if let Err(err) = fs::open(&path) {
             self.error = Some(format!("Could not open {}: {err}", path.display()));
         }
@@ -1113,6 +1239,8 @@ mod tests {
             videos: Videos::new(ctx),
             texts: TextCache::default(),
             jobs: Jobs::new(ctx),
+            archives: archive::Listings::new(ctx),
+            archive_prefs: archive::Prefs::default(),
         }
     }
 
@@ -1402,6 +1530,102 @@ mod tests {
             shared.jobs.poll();
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
+    }
+
+    /// Runs a frame with `modifiers` held.
+    fn run_held(
+        ctx: &Context,
+        tab: &mut BrowserTab,
+        shared: &mut Shared,
+        events: Vec<egui::Event>,
+        modifiers: Modifiers,
+    ) {
+        let mut held = vec![egui::Event::ModifiersChanged(modifiers)];
+        held.extend(events);
+        run_events(ctx, tab, shared, held);
+        run_events(
+            ctx,
+            tab,
+            shared,
+            vec![egui::Event::ModifiersChanged(Modifiers::NONE)],
+        );
+    }
+
+    /// What the app does when jobs finish.
+    fn finish_jobs(ctx: &Context, tab: &mut BrowserTab, shared: &mut Shared) {
+        wait_for_jobs(shared);
+        for outcome in shared.jobs.take_outcomes() {
+            if let crate::jobs::Outcome::Reveal(path) = outcome {
+                tab.reveal(path);
+            }
+        }
+        tab.mark_stale();
+        run_frame(ctx, tab, shared, &[]);
+    }
+
+    #[test]
+    fn compress_dialog_and_extract_shortcut() {
+        let root = fixture("archive-ui");
+        let a = root.join("a");
+        let ctx = Context::default();
+        let mut tab = BrowserTab::new(1, a.clone());
+        let mut shared = shared(&ctx, &tab);
+        run_frame(&ctx, &mut tab, &mut shared, &[]);
+
+        // Ctrl+Shift+C reaches us as a copy event with Shift held.
+        tab.selection = HashSet::from([a.join("b")]);
+        run_held(
+            &ctx,
+            &mut tab,
+            &mut shared,
+            vec![egui::Event::Copy],
+            Modifiers::COMMAND | Modifiers::SHIFT,
+        );
+        assert!(tab.compress.is_some(), "compress dialog opens");
+        assert!(shared.clipboard.is_none(), "and nothing was copied");
+        // The name field has focus; Enter compresses to `b.zip`.
+        run_frame(&ctx, &mut tab, &mut shared, &[]);
+        run_frame(&ctx, &mut tab, &mut shared, &[Key::Enter]);
+        assert!(tab.compress.is_none(), "dialog closes");
+        finish_jobs(&ctx, &mut tab, &mut shared);
+        let archive = a.join("b.zip");
+        assert!(archive.is_file());
+        assert_eq!(
+            tab.selection,
+            HashSet::from([archive.clone()]),
+            "new archive is selected"
+        );
+
+        // Ctrl+E: one top-level folder, so it comes out as `b/` again.
+        std::fs::remove_dir_all(a.join("b")).unwrap();
+        let ctrl_e = egui::Event::Key {
+            key: Key::E,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::COMMAND,
+        };
+        run_held(
+            &ctx,
+            &mut tab,
+            &mut shared,
+            vec![ctrl_e],
+            Modifiers::COMMAND,
+        );
+        finish_jobs(&ctx, &mut tab, &mut shared);
+        assert_eq!(std::fs::read_to_string(a.join("b/file.txt")).unwrap(), "hi");
+        assert_eq!(
+            tab.selection,
+            HashSet::from([a.join("b")]),
+            "extracted folder is selected"
+        );
+
+        // Opening an archive asks the app for an archive tab.
+        tab.activate(archive.clone(), &mut shared.app_actions);
+        assert!(
+            matches!(shared.app_actions.as_slice(), [AppAction::OpenArchive(p)] if *p == archive)
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

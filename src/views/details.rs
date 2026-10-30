@@ -13,7 +13,7 @@ pub fn show(
     ui: &mut Ui,
     tab: &BrowserTab,
     visible: &[usize],
-    can_paste: bool,
+    menu: super::MenuContext,
     actions: &mut Vec<Action>,
 ) {
     let row_height = ui.text_style_height(&TextStyle::Body) + 6.0;
@@ -73,7 +73,7 @@ pub fn show(
                 row.col(|ui| {
                     ui.label(entry.kind());
                 });
-                super::item_interaction(&row.response(), index, entry, tab, can_paste, actions);
+                super::item_interaction(&row.response(), index, entry, tab, menu, actions);
             });
         });
 }

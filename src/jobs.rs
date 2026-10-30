@@ -1,22 +1,26 @@
-//! Long-running file operations (copy, move, trash) on background threads,
-//! with progress, cancellation, and a status bar UI.
+//! Long-running file operations (copy, move, trash, archives) on background
+//! threads, with progress, cancellation, questions for the user, and a status
+//! bar UI.
 
 use std::{
     fs,
     io::{self, Read, Write},
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering::Relaxed},
     },
     thread::JoinHandle,
     time::{Duration, Instant},
 };
 
-use egui::{Button, ProgressBar, RichText, Ui};
+use egui::{Button, Id, Key, Modal, ProgressBar, RichText, TextEdit, Ui};
 use egui_phosphor::regular as icon;
 
-use crate::fs::{display_name, human_size, unique_path};
+use crate::{
+    archive::{self, CompressJob, ExtractJob},
+    fs::{display_name, format_time, human_size, unique_path},
+};
 
 const BUFFER_SIZE: usize = 1 << 20;
 const MAX_ERRORS: usize = 50;
@@ -42,6 +46,8 @@ pub enum JobKind {
     Purge {
         items: Vec<trash::TrashItem>,
     },
+    Compress(CompressJob),
+    Extract(ExtractJob),
 }
 
 impl JobKind {
@@ -65,6 +71,12 @@ impl JobKind {
             Self::Purge { items: trashed } => {
                 format!("Permanently deleting {}", items(trashed.len()))
             }
+            Self::Compress(job) => format!(
+                "Compressing {} to {}",
+                items(job.sources.len()),
+                display_name(&job.dest)
+            ),
+            Self::Extract(job) => job.title(),
         }
     }
 }
@@ -80,21 +92,161 @@ pub struct Progress {
     finished: AtomicBool,
     current: Mutex<String>,
     errors: Mutex<Vec<String>>,
+    /// A question the worker is waiting on the user for.
+    prompt: Mutex<Option<Prompt>>,
+    answer: Mutex<Option<Answer>>,
+    answered: Condvar,
+    outcome: Mutex<Option<Outcome>>,
+}
+
+/// Something only the user can decide, asked from a worker thread.
+pub enum Prompt {
+    Password {
+        archive: PathBuf,
+        /// The last password tried was wrong.
+        wrong: bool,
+    },
+    /// `incoming` would be placed where `existing` already is.
+    Conflict {
+        incoming: PathBuf,
+        existing: PathBuf,
+    },
+}
+
+pub enum Answer {
+    Password(String),
+    Conflict {
+        choice: ConflictChoice,
+        /// Use the same choice for the rest of the job.
+        all: bool,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConflictChoice {
+    Overwrite,
+    Skip,
+    KeepBoth,
+}
+
+/// What to do with a job's result once it finishes.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Outcome {
+    /// Select the new item in tabs showing its folder.
+    Reveal(PathBuf),
+    /// Open the file in its default app.
+    Open(PathBuf),
 }
 
 impl Progress {
-    fn cancelled(&self) -> bool {
+    pub(crate) fn cancelled(&self) -> bool {
         self.cancel.load(Relaxed)
     }
 
-    fn error(&self, path: &Path, err: impl std::fmt::Display) {
+    pub(crate) fn add_totals(&self, bytes: u64, items: u64) {
+        self.total_bytes.fetch_add(bytes, Relaxed);
+        self.total_items.fetch_add(items, Relaxed);
+    }
+
+    pub(crate) fn add_done(&self, bytes: u64, items: u64) {
+        self.done_bytes.fetch_add(bytes, Relaxed);
+        self.done_items.fetch_add(items, Relaxed);
+    }
+
+    /// For progress measured as a position, e.g. in the archive being read.
+    pub(crate) fn set_done_bytes(&self, bytes: u64) {
+        self.done_bytes.store(bytes, Relaxed);
+    }
+
+    /// Starts counting from scratch, e.g. when retrying with a password.
+    pub(crate) fn reset(&self) {
+        for counter in [
+            &self.total_bytes,
+            &self.done_bytes,
+            &self.total_items,
+            &self.done_items,
+        ] {
+            counter.store(0, Relaxed);
+        }
+    }
+
+    pub(crate) fn has_errors(&self) -> bool {
+        !self.errors.lock().expect("errors poisoned").is_empty()
+    }
+
+    pub(crate) fn set_outcome(&self, outcome: Outcome) {
+        *self.outcome.lock().expect("outcome poisoned") = Some(outcome);
+    }
+
+    /// Asks the user and waits for the answer; `None` if the job was cancelled.
+    pub(crate) fn ask(&self, prompt: Prompt) -> Option<Answer> {
+        *self.prompt.lock().expect("prompt poisoned") = Some(prompt);
+        let mut answer = self.answer.lock().expect("answer poisoned");
+        loop {
+            if let Some(answer) = answer.take() {
+                return Some(answer);
+            }
+            if self.cancelled() {
+                *self.prompt.lock().expect("prompt poisoned") = None;
+                return None;
+            }
+            // The UI repaints while jobs run, so it shows the prompt promptly.
+            answer = self
+                .answered
+                .wait_timeout(answer, Duration::from_millis(100))
+                .expect("answer poisoned")
+                .0;
+        }
+    }
+
+    fn reply(&self, answer: Answer) {
+        *self.prompt.lock().expect("prompt poisoned") = None;
+        *self.answer.lock().expect("answer poisoned") = Some(answer);
+        self.answered.notify_all();
+    }
+
+    /// Waits for the worker to ask something and answers it.
+    #[cfg(test)]
+    pub(crate) fn answer(&self, answer: impl FnOnce(&Prompt) -> Answer) {
+        loop {
+            if let Some(prompt) = &*self.prompt.lock().expect("prompt poisoned") {
+                let answer = answer(prompt);
+                *self.answer.lock().expect("answer poisoned") = Some(answer);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        *self.prompt.lock().expect("prompt poisoned") = None;
+        self.answered.notify_all();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cancel_for_test(&self) {
+        self.cancel.store(true, Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_outcome(&self) -> Option<Outcome> {
+        self.outcome.lock().expect("outcome poisoned").take()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn errors(&self) -> Vec<String> {
+        self.errors.lock().expect("errors poisoned").clone()
+    }
+
+    fn waiting(&self) -> bool {
+        self.prompt.lock().expect("prompt poisoned").is_some()
+    }
+
+    pub(crate) fn error(&self, path: &Path, err: impl std::fmt::Display) {
         let mut errors = self.errors.lock().expect("errors poisoned");
         if errors.len() < MAX_ERRORS {
             errors.push(format!("{}: {err}", path.display()));
         }
     }
 
-    fn set_current(&self, path: &Path) {
+    pub(crate) fn set_current(&self, path: &Path) {
         *self.current.lock().expect("current poisoned") = path.display().to_string();
     }
 
@@ -119,11 +271,22 @@ struct Job {
     progress: Arc<Progress>,
     handle: Option<JoinHandle<()>>,
     finished_at: Option<Instant>,
+    prompt_ui: PromptUi,
+}
+
+/// What the user has typed or ticked in a job's prompt so far.
+#[derive(Default)]
+struct PromptUi {
+    password: String,
+    show_password: bool,
+    apply_to_all: bool,
+    focus: bool,
 }
 
 pub struct Jobs {
     ctx: egui::Context,
     jobs: Vec<Job>,
+    outcomes: Vec<Outcome>,
 }
 
 impl Jobs {
@@ -131,7 +294,13 @@ impl Jobs {
         Self {
             ctx: ctx.clone(),
             jobs: Vec::new(),
+            outcomes: Vec::new(),
         }
+    }
+
+    /// Results of finished jobs for the app to act on.
+    pub fn take_outcomes(&mut self) -> Vec<Outcome> {
+        std::mem::take(&mut self.outcomes)
     }
 
     pub fn start(&mut self, kind: JobKind) {
@@ -152,6 +321,7 @@ impl Jobs {
             progress,
             handle: Some(handle),
             finished_at: None,
+            prompt_ui: PromptUi::default(),
         });
     }
 
@@ -172,6 +342,16 @@ impl Jobs {
                 job.finished_at = Some(now);
                 if let Some(handle) = job.handle.take() {
                     let _ = handle.join();
+                }
+                if let Some(outcome) = job
+                    .progress
+                    .outcome
+                    .lock()
+                    .expect("outcome poisoned")
+                    .take()
+                    && !job.progress.cancelled()
+                {
+                    self.outcomes.push(outcome);
                 }
                 any_finished = true;
             }
@@ -210,6 +390,9 @@ impl Jobs {
             let errors = p.errors.lock().expect("errors poisoned").clone();
             ui.horizontal(|ui| {
                 let (glyph, status) = match (finished, cancelled, errors.len()) {
+                    (false, false, _) if p.waiting() => {
+                        (icon::QUESTION, "Waiting for you…".to_owned())
+                    }
                     (false, true, _) => (icon::SPINNER_GAP, "Cancelling…".to_owned()),
                     (false, false, _) => (icon::SPINNER_GAP, String::new()),
                     (true, true, _) => (icon::X_CIRCLE, "Cancelled".to_owned()),
@@ -276,17 +459,132 @@ impl Jobs {
         if let Some(index) = dismiss {
             self.jobs.remove(index);
         }
+        self.prompt_modal(ui.ctx());
+    }
+
+    /// Shows the first question a job is waiting on.
+    fn prompt_modal(&mut self, ctx: &egui::Context) {
+        let Some(job) = self
+            .jobs
+            .iter_mut()
+            .find(|j| j.finished_at.is_none() && j.progress.waiting())
+        else {
+            return;
+        };
+        let p = job.progress.clone();
+        let guard = p.prompt.lock().expect("prompt poisoned");
+        let Some(prompt) = guard.as_ref() else {
+            return;
+        };
+        let state = &mut job.prompt_ui;
+        let mut answer = None;
+        let mut cancel = false;
+        Modal::new(Id::new(("job-prompt", Arc::as_ptr(&p) as usize))).show(ctx, |ui| {
+            ui.set_max_width(440.0);
+            match prompt {
+                Prompt::Password { archive, wrong } => {
+                    ui.heading(format!("{} Password required", icon::LOCK));
+                    ui.label(format!("“{}” is encrypted.", display_name(archive)));
+                    if *wrong {
+                        ui.colored_label(ui.visuals().error_fg_color, "Wrong password, try again.");
+                    }
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        let edit = ui.add(
+                            TextEdit::singleline(&mut state.password)
+                                .password(!state.show_password)
+                                .hint_text("Password")
+                                .desired_width(300.0),
+                        );
+                        if !std::mem::replace(&mut state.focus, true) {
+                            edit.request_focus();
+                        }
+                        let eye = if state.show_password {
+                            icon::EYE_SLASH
+                        } else {
+                            icon::EYE
+                        };
+                        if ui.button(eye).on_hover_text("Show password").clicked() {
+                            state.show_password = !state.show_password;
+                        }
+                        if edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                            answer = Some(Answer::Password(state.password.clone()));
+                        }
+                    });
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Unlock").clicked() {
+                            answer = Some(Answer::Password(state.password.clone()));
+                        }
+                        cancel = ui.button("Cancel").clicked();
+                    });
+                }
+                Prompt::Conflict { incoming, existing } => {
+                    ui.heading(format!("{} File already exists", icon::WARNING));
+                    ui.label(format!(
+                        "“{}” already exists in “{}”.",
+                        display_name(existing),
+                        existing.parent().map(display_name).unwrap_or_default()
+                    ));
+                    ui.add_space(4.0);
+                    let describe = |path: &Path| match fs::symlink_metadata(path) {
+                        Ok(meta) if meta.is_dir() => {
+                            format!("folder, modified {}", format_time(meta.modified().ok()))
+                        }
+                        Ok(meta) => format!(
+                            "{}, modified {}",
+                            human_size(meta.len()),
+                            format_time(meta.modified().ok())
+                        ),
+                        Err(_) => String::new(),
+                    };
+                    egui::Grid::new("conflict-details")
+                        .num_columns(2)
+                        .show(ui, |ui| {
+                            ui.strong("Existing:");
+                            ui.label(describe(existing));
+                            ui.end_row();
+                            ui.strong("New:");
+                            ui.label(describe(incoming));
+                            ui.end_row();
+                        });
+                    ui.add_space(4.0);
+                    ui.checkbox(&mut state.apply_to_all, "Do this for all conflicts");
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        for (choice, label) in [
+                            (ConflictChoice::Overwrite, "Overwrite"),
+                            (ConflictChoice::Skip, "Skip"),
+                            (ConflictChoice::KeepBoth, "Keep both"),
+                        ] {
+                            if ui.button(label).clicked() {
+                                answer = Some(Answer::Conflict {
+                                    choice,
+                                    all: state.apply_to_all,
+                                });
+                            }
+                        }
+                        ui.separator();
+                        cancel = ui.button("Cancel").clicked();
+                    });
+                }
+            }
+        });
+        drop(guard);
+        if let Some(answer) = answer {
+            // Ready for the next question.
+            state.focus = false;
+            p.reply(answer);
+        } else if cancel || ctx.input(|i| i.key_pressed(Key::Escape)) {
+            // Not on clicks beside the dialog: that would cancel the whole job.
+            p.cancel.store(true, Relaxed);
+        }
     }
 }
 
 impl Job {
     fn has_errors(&self) -> bool {
-        !self
-            .progress
-            .errors
-            .lock()
-            .expect("errors poisoned")
-            .is_empty()
+        self.progress.has_errors()
     }
 }
 
@@ -385,6 +683,8 @@ fn run(kind: JobKind, p: &Progress) {
                 p.done_items.fetch_add(1, Relaxed);
             }
         }
+        JobKind::Compress(job) => archive::compress(job, p),
+        JobKind::Extract(job) => archive::extract(job, p),
         JobKind::Trash { paths } => {
             p.total_items.store(paths.len() as u64, Relaxed);
             for path in paths {
@@ -421,7 +721,7 @@ fn check_not_into_itself(sources: &[PathBuf], dest: &Path) -> Result<(), String>
 }
 
 /// Adds the files and bytes under `path` to the totals.
-fn scan(path: &Path, p: &Progress) {
+pub(crate) fn scan(path: &Path, p: &Progress) {
     if p.cancelled() {
         return;
     }
@@ -441,7 +741,7 @@ fn scan(path: &Path, p: &Progress) {
 }
 
 /// Recursively copies `src` to `dst`. Returns true if everything was copied.
-fn copy_tree(src: &Path, dst: &Path, p: &Progress, buffer: &mut [u8]) -> bool {
+pub(crate) fn copy_tree(src: &Path, dst: &Path, p: &Progress, buffer: &mut [u8]) -> bool {
     if p.cancelled() {
         return false;
     }
@@ -532,7 +832,7 @@ fn copy_file(src: &Path, dst: &Path, meta: &fs::Metadata, p: &Progress, buffer: 
     }
 }
 
-fn remove_all(path: &Path) -> io::Result<()> {
+pub(crate) fn remove_all(path: &Path) -> io::Result<()> {
     if fs::symlink_metadata(path)?.is_dir() {
         fs::remove_dir_all(path)
     } else {

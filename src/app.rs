@@ -12,11 +12,12 @@ use egui_phosphor::regular as icon;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    archive::{self, ArchiveTab},
     dnd::{self, DropTarget},
     dock_tab::{DockTab, Pane, PaneTab},
     fs::Entry,
     images::ImageCache,
-    jobs::Jobs,
+    jobs::{Jobs, Outcome},
     places,
     preview::{self, TextCache},
     sidebar::{Sidebar, SidebarResponse},
@@ -63,6 +64,8 @@ struct Persisted {
     video_volume: f64,
     #[serde(default)]
     video_quality: Quality,
+    #[serde(default)]
+    archive_prefs: archive::Prefs,
 }
 
 fn default_true() -> bool {
@@ -89,6 +92,7 @@ struct PersistedRef<'a> {
     terminal: &'a TerminalPanel,
     video_volume: f64,
     video_quality: Quality,
+    archive_prefs: &'a archive::Prefs,
 }
 
 /// The panes a fresh layout starts with.
@@ -331,6 +335,7 @@ impl FilesApp {
                 terminal: TerminalPanel::default(),
                 video_volume: default_volume(),
                 video_quality: Quality::default(),
+                archive_prefs: archive::Prefs::default(),
             });
         let Persisted {
             dock,
@@ -345,6 +350,7 @@ impl FilesApp {
             mut terminal,
             video_volume,
             video_quality,
+            archive_prefs,
         } = persisted;
         let pending_panes = if panes_docked {
             Vec::new()
@@ -377,6 +383,8 @@ impl FilesApp {
                 },
                 texts: TextCache::default(),
                 jobs: Jobs::new(&cc.egui_ctx),
+                archives: archive::Listings::new(&cc.egui_ctx),
+                archive_prefs,
                 clipboard: None,
                 focused_tab: None,
                 preview_shown: false,
@@ -493,6 +501,21 @@ impl FilesApp {
             self.focus_tab(id);
         } else {
             let tab = DockTab::Trash(TrashTab::new(self.next_id()));
+            self.push_tab(tab);
+        }
+    }
+
+    /// Shows an archive's contents, in the tab already showing it if there is one.
+    fn open_archive(&mut self, path: PathBuf) {
+        let existing = self
+            .dock
+            .iter_all_tabs()
+            .find(|(_, t)| t.archive() == Some(path.as_path()))
+            .map(|(_, t)| t.id());
+        if let Some(id) = existing {
+            self.focus_tab(id);
+        } else {
+            let tab = DockTab::Archive(ArchiveTab::new(self.next_id(), path));
             self.push_tab(tab);
         }
     }
@@ -902,7 +925,7 @@ impl TabViewer for Viewer<'_> {
         let target = match tab {
             DockTab::Browser(browser) => Some(DropTarget::Folder(browser.path.clone())),
             DockTab::Trash(_) => Some(DropTarget::Trash),
-            DockTab::Pane(_) => None,
+            DockTab::Pane(_) | DockTab::Archive(_) => None,
         };
         if let Some(job) = target.and_then(|target| dnd::target(response, target)) {
             self.shared.jobs.start(job);
@@ -947,6 +970,8 @@ impl FilesApp {
             && !self.drag_out_active
             && let Some(payload) = egui::DragAndDrop::payload::<dnd::FileDrag>(ctx)
             && !payload.external
+            // Archive entries only exist once extracted.
+            && payload.archive.is_none()
             && ctx.input(|i| i.pointer.primary_down())
             && let Some(pos) = ctx.input(|i| i.pointer.latest_pos())
             && !ctx.content_rect().contains(pos)
@@ -977,6 +1002,22 @@ impl FilesApp {
             self.sidebar.tree.invalidate();
             for (_, tab) in self.dock.iter_all_tabs_mut() {
                 tab.mark_stale();
+            }
+        }
+        for outcome in self.shared.jobs.take_outcomes() {
+            match outcome {
+                Outcome::Reveal(path) => {
+                    for (_, tab) in self.dock.iter_all_tabs_mut() {
+                        if let Some(browser) = tab.browser_mut() {
+                            browser.reveal(path.clone());
+                        }
+                    }
+                }
+                Outcome::Open(path) => {
+                    if let Err(err) = crate::fs::open(&path) {
+                        eprintln!("Could not open {}: {err}", path.display());
+                    }
+                }
             }
         }
     }
@@ -1172,13 +1213,15 @@ impl eframe::App for FilesApp {
         if sidebar_response.open_trash {
             self.open_trash();
         }
+        let mut app_actions = Vec::new();
         for action in preview_actions {
             if let tab::Action::Activate(path) = action
                 && let Some(tab) = self.active_browser_mut()
             {
-                tab.activate(path);
+                tab.activate(path, &mut app_actions);
             }
         }
+        self.shared.app_actions.extend(app_actions);
         self.terminal_actions(&ctx, terminal_response);
         for leaf in add_requests {
             self.add_to_leaf(leaf, NewTab::Browser);
@@ -1189,6 +1232,7 @@ impl eframe::App for FilesApp {
                 AppAction::NewTab(path) => self.open_tab(path),
                 AppAction::FocusTab(id) => self.focus_tab(id),
                 AppAction::TogglePreview => self.show_or_toggle_pane(&ctx, Pane::Preview),
+                AppAction::OpenArchive(path) => self.open_archive(path),
             }
         }
         let shown = self
@@ -1272,6 +1316,7 @@ impl eframe::App for FilesApp {
             terminal: &self.terminal,
             video_volume: self.shared.videos.volume(),
             video_quality: self.shared.videos.quality(),
+            archive_prefs: &self.shared.archive_prefs,
         };
         eframe::set_value(storage, eframe::APP_KEY, &state);
     }

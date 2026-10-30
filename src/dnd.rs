@@ -7,7 +7,11 @@ use std::path::{Path, PathBuf};
 
 use egui::{Context, DragAndDrop, Id, Modifiers, Response, Stroke, StrokeKind};
 
-use crate::{fs, jobs::JobKind};
+use crate::{
+    archive::{ExtractJob, ExtractMode, Selection},
+    fs,
+    jobs::JobKind,
+};
 
 /// The drag-and-drop payload.
 pub struct FileDrag {
@@ -15,6 +19,31 @@ pub struct FileDrag {
     /// Dragged in from another app. While hovering, `paths` may still be
     /// empty: some apps only hand over the files on drop.
     pub external: bool,
+    /// Entries dragged out of an archive tab; `paths` is empty. Dropping
+    /// them on a folder extracts them there.
+    pub archive: Option<ArchiveDrag>,
+}
+
+pub struct ArchiveDrag {
+    pub archive: PathBuf,
+    pub selection: Selection,
+    pub password: Option<String>,
+}
+
+/// Starts dragging entries of an archive if the user began dragging `response`.
+pub fn archive_source(response: &Response, drag: impl FnOnce() -> Option<ArchiveDrag>) {
+    if response.drag_started()
+        && let Some(drag) = drag()
+    {
+        DragAndDrop::set_payload(
+            &response.ctx,
+            FileDrag {
+                paths: Vec::new(),
+                external: false,
+                archive: Some(drag),
+            },
+        );
+    }
 }
 
 pub enum DropTarget {
@@ -32,6 +61,7 @@ pub fn source(response: &Response, paths: impl FnOnce() -> Vec<PathBuf>) {
                 FileDrag {
                     paths,
                     external: false,
+                    archive: None,
                 },
             );
         }
@@ -64,6 +94,12 @@ pub fn target(response: &Response, target: DropTarget) -> Option<JobKind> {
         return None;
     }
     let payload = DragAndDrop::take_payload::<FileDrag>(ctx)?;
+    if let (Some(drag), DropTarget::Folder(dest)) = (&payload.archive, &target) {
+        let mut job = ExtractJob::new(drag.archive.clone(), dest.clone(), ExtractMode::Into, false);
+        job.selection = Some(drag.selection.clone());
+        job.password = drag.password.clone();
+        return Some(JobKind::Extract(job));
+    }
     let paths = payload.paths.clone();
     if paths.is_empty() {
         return None;
@@ -108,6 +144,9 @@ fn claim(ctx: &Context) {
 
 fn accepts(payload: &FileDrag, target: &DropTarget, modifiers: Modifiers) -> bool {
     let paths = &payload.paths;
+    if payload.archive.is_some() {
+        return matches!(target, DropTarget::Folder(_));
+    }
     if payload.external && paths.is_empty() {
         // Not known until dropped.
         return true;
@@ -161,13 +200,29 @@ pub fn paint_preview(ctx: &Context) {
         return;
     };
     ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
-    let text = match payload.paths.as_slice() {
-        [single] => format!(
-            "{} {}",
-            fs::icon_for(single, single.is_dir(), false),
-            fs::display_name(single)
-        ),
-        paths => format!("{} {} items", egui_phosphor::regular::FILES, paths.len()),
+    let text = if let Some(drag) = &payload.archive {
+        match drag.selection.paths.as_slice() {
+            [single] => format!(
+                "{} {}",
+                egui_phosphor::regular::FILE_ARROW_DOWN,
+                single.rsplit('/').next().unwrap_or(single)
+            ),
+            many => format!(
+                "{} {} items from {}",
+                egui_phosphor::regular::FILE_ARROW_DOWN,
+                many.len(),
+                fs::display_name(&drag.archive)
+            ),
+        }
+    } else {
+        match payload.paths.as_slice() {
+            [single] => format!(
+                "{} {}",
+                fs::icon_for(single, single.is_dir(), false),
+                fs::display_name(single)
+            ),
+            paths => format!("{} {} items", egui_phosphor::regular::FILES, paths.len()),
+        }
     };
     let hint = if ctx.input(|i| i.modifiers.command) {
         "  (copy)"
@@ -214,6 +269,7 @@ pub fn inject_external(ctx: &Context, raw: &mut egui::RawInput, event: ExternalE
                     FileDrag {
                         paths: Vec::new(),
                         external: true,
+                        archive: None,
                     },
                 );
             }
@@ -235,6 +291,7 @@ pub fn inject_external(ctx: &Context, raw: &mut egui::RawInput, event: ExternalE
                 FileDrag {
                     paths,
                     external: !internal,
+                    archive: None,
                 },
             );
             raw.events.push(egui::Event::PointerMoved(pos));

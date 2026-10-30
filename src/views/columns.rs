@@ -46,9 +46,9 @@ pub fn show(
                         ancestor_column(ui, tab, pair[0], pair[1], show_hidden, actions);
                     });
                 }
-                let can_paste = shared.clipboard.is_some();
+                let menu = super::MenuContext::new(shared);
                 column(ui, height, |ui| {
-                    current_column(ui, tab, visible, can_paste, actions)
+                    current_column(ui, tab, visible, menu, actions)
                 });
                 if let Some(entry) = tab.preview_entry() {
                     column(ui, height, |ui| {
@@ -184,7 +184,7 @@ fn current_column(
     ui: &mut Ui,
     tab: &BrowserTab,
     visible: &[usize],
-    can_paste: bool,
+    menu: super::MenuContext,
     actions: &mut Vec<Action>,
 ) {
     let scroll_to = match (tab.scroll_to, tab.cursor) {
@@ -201,7 +201,7 @@ fn current_column(
             let entry = &tab.entries()[visible[i]];
             let selected = tab.selection.contains(&entry.path);
             let response = entry_row(ui, entry, selected);
-            super::item_interaction(&response, i, entry, tab, can_paste, actions);
+            super::item_interaction(&response, i, entry, tab, menu, actions);
         },
     );
 }
@@ -238,14 +238,6 @@ fn preview_file(
         .id_salt(("column-preview", tab.id))
         .auto_shrink(false)
         .show(ui, |ui| {
-            preview::show(
-                ui,
-                entry,
-                &mut shared.images,
-                &mut shared.videos,
-                &mut shared.texts,
-                images::THUMBNAIL_SIZE,
-                actions,
-            );
+            preview::show(ui, entry, shared, images::THUMBNAIL_SIZE, actions);
         });
 }

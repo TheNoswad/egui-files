@@ -127,7 +127,7 @@ pub fn show(
                         index,
                         entry,
                         tab,
-                        shared.clipboard.is_some(),
+                        super::MenuContext::new(shared),
                         actions,
                     );
                 }

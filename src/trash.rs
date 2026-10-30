@@ -740,6 +740,8 @@ mod tests {
             videos: crate::video::Videos::new(&ctx),
             texts: TextCache::default(),
             jobs: Jobs::new(&ctx),
+            archives: crate::archive::Listings::new(&ctx),
+            archive_prefs: Default::default(),
         };
         let trash_both = |shared: &mut Shared| {
             shared.jobs.start(JobKind::Trash {

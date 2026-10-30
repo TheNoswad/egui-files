@@ -7,6 +7,7 @@ use egui_phosphor::regular as icon;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    archive::ArchiveTab,
     tab::{BrowserTab, Shared},
     trash::{self, TrashTab},
 };
@@ -21,6 +22,8 @@ pub enum DockTab {
     Browser(BrowserTab),
     Trash(TrashTab),
     Pane(PaneTab),
+    /// After the others: its saved form (`id`, `archive`) matches none of them.
+    Archive(ArchiveTab),
 }
 
 /// A tool docked alongside the tabs. Each is open at most once.
@@ -70,6 +73,7 @@ impl DockTab {
             Self::Browser(tab) => tab.id,
             Self::Trash(tab) => tab.id,
             Self::Pane(tab) => tab.pane.id(),
+            Self::Archive(tab) => tab.id,
         }
     }
 
@@ -78,27 +82,28 @@ impl DockTab {
             Self::Browser(tab) => tab.title(),
             Self::Trash(tab) => tab.title(),
             Self::Pane(tab) => format!("{} {}", tab.pane.icon(), tab.pane.label()),
+            Self::Archive(tab) => tab.title(),
         }
     }
 
     pub fn browser(&self) -> Option<&BrowserTab> {
         match self {
             Self::Browser(tab) => Some(tab),
-            Self::Trash(_) | Self::Pane(_) => None,
+            Self::Trash(_) | Self::Pane(_) | Self::Archive(_) => None,
         }
     }
 
     pub fn browser_mut(&mut self) -> Option<&mut BrowserTab> {
         match self {
             Self::Browser(tab) => Some(tab),
-            Self::Trash(_) | Self::Pane(_) => None,
+            Self::Trash(_) | Self::Pane(_) | Self::Archive(_) => None,
         }
     }
 
     pub fn pane(&self) -> Option<Pane> {
         match self {
             Self::Pane(tab) => Some(tab.pane),
-            Self::Browser(_) | Self::Trash(_) => None,
+            Self::Browser(_) | Self::Trash(_) | Self::Archive(_) => None,
         }
     }
 
@@ -106,11 +111,19 @@ impl DockTab {
         matches!(self, Self::Trash(_))
     }
 
+    pub fn archive(&self) -> Option<&std::path::Path> {
+        match self {
+            Self::Archive(tab) => Some(&tab.archive),
+            _ => None,
+        }
+    }
+
     /// Panes need more of the app than tabs do, so the app draws them.
     pub fn ui(&mut self, ui: &mut Ui, shared: &mut Shared) {
         match self {
             Self::Browser(tab) => tab.ui(ui, shared),
             Self::Trash(tab) => tab.ui(ui, shared),
+            Self::Archive(tab) => tab.ui(ui, shared),
             Self::Pane(_) => {}
         }
     }
@@ -119,7 +132,8 @@ impl DockTab {
         match self {
             Self::Browser(tab) => tab.mark_stale(),
             Self::Trash(tab) => tab.mark_stale(),
-            Self::Pane(_) => {}
+            // Listings notice changes to the archive themselves.
+            Self::Pane(_) | Self::Archive(_) => {}
         }
     }
 
@@ -131,7 +145,7 @@ impl DockTab {
                     tab.mark_stale();
                 }
             }
-            Self::Pane(_) => {}
+            Self::Pane(_) | Self::Archive(_) => {}
         }
     }
 
@@ -140,6 +154,7 @@ impl DockTab {
         match self {
             Self::Browser(tab) => tab.shown_dirs().cloned().collect(),
             Self::Trash(_) => trash::watched_dir().into_iter().collect(),
+            Self::Archive(tab) => tab.dir().into_iter().collect(),
             Self::Pane(_) => Vec::new(),
         }
     }
@@ -171,18 +186,23 @@ mod tests {
         new.push_to_first_leaf(DockTab::Pane(PaneTab {
             pane: Pane::Preview,
         }));
+        new.push_to_first_leaf(DockTab::Archive(ArchiveTab::new(
+            3,
+            PathBuf::from("/tmp/a.zip"),
+        )));
         let saved = ron::ser::to_string(&new).unwrap();
         let loaded: DockState<DockTab> = ron::from_str(&saved).unwrap();
         let kinds: Vec<_> = loaded
             .iter_all_tabs()
-            .map(|(_, t)| (t.id(), t.is_trash(), t.pane()))
+            .map(|(_, t)| (t.id(), t.is_trash(), t.pane(), t.archive().is_some()))
             .collect();
         assert_eq!(
             kinds,
             [
-                (1, false, None),
-                (2, true, None),
-                (Pane::Preview.id(), false, Some(Pane::Preview))
+                (1, false, None, false),
+                (2, true, None, false),
+                (Pane::Preview.id(), false, Some(Pane::Preview), false),
+                (3, false, None, true),
             ]
         );
     }
