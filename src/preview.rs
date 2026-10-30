@@ -158,7 +158,6 @@ pub fn show(
         editor: editor_prefs,
         ..
     } = shared;
-    let mut editable = false;
     let mut dimensions = None;
     let mut duration = None;
     let is_archive = !entry.is_dir && archive::is_archive(&entry.path);
@@ -171,9 +170,13 @@ pub fn show(
         } else if images::is_image(&entry.path) {
             dimensions = image(ui, entry, images, max_side);
         } else {
+            // Text can be arbitrarily long, so its details and buttons go first
+            // where they stay reachable.
             let preview = texts.get(entry);
-            editable = preview.text.is_some() && editor::can_edit(&entry.path, false);
+            let editable = preview.text.is_some() && editor::can_edit(&entry.path, false);
             if preview.text.as_ref().is_some_and(|t| !t.trim().is_empty()) {
+                details(ui, entry, None, None, editable, actions);
+                ui.add_space(8.0);
                 let theme = editor_prefs.theme(ui);
                 let colors = ThemeColors::of(theme, ui.visuals());
                 preview.update_colors(ui.ctx(), theme);
@@ -198,48 +201,62 @@ pub fn show(
                     });
             } else {
                 big_icon(ui, entry);
+                ui.add_space(8.0);
+                details(ui, entry, None, None, editable, actions);
             }
+            return;
         }
-
         ui.add_space(8.0);
-        ui.add(egui::Label::new(RichText::new(&entry.name).strong()).wrap());
-        ui.add_space(4.0);
-        ui.weak(entry.kind());
-        if !entry.is_dir {
-            ui.weak(fs::human_size(entry.size));
-        }
-        if let Some([w, h]) = dimensions {
-            ui.weak(format!("{w} × {h} px"));
-        }
-        if let Some(duration) = duration {
-            ui.weak(video::format_time(duration));
-        }
-        ui.weak(fs::format_time(entry.modified));
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            let buttons = if editable { 2.0 } else { 1.0 };
-            let width = 70.0 * buttons;
-            ui.add_space(((ui.available_width() - width) / 2.0).max(0.0));
-            if ui
-                .button(format!("{} Open", icon::ARROW_SQUARE_OUT))
-                .clicked()
-            {
-                actions.push(Action::Activate(entry.path.clone()));
-            }
-            if editable
-                && ui
-                    .button(format!("{} Edit", icon::NOTE_PENCIL))
-                    .on_hover_text("Edit in a tab (Shift+F4)")
-                    .clicked()
-            {
-                actions.push(Action::Edit(entry.path.clone()));
-            }
-        });
+        details(ui, entry, dimensions, duration, false, actions);
     });
     if is_archive {
         ui.add_space(8.0);
         archive_contents(ui, &entry.path, archives);
     }
+}
+
+/// The name, metadata and Open/Edit buttons under (or above) a preview.
+fn details(
+    ui: &mut Ui,
+    entry: &Entry,
+    dimensions: Option<[u32; 2]>,
+    duration: Option<f64>,
+    editable: bool,
+    actions: &mut Vec<Action>,
+) {
+    ui.add(egui::Label::new(RichText::new(&entry.name).strong()).wrap());
+    ui.add_space(4.0);
+    ui.weak(entry.kind());
+    if !entry.is_dir {
+        ui.weak(fs::human_size(entry.size));
+    }
+    if let Some([w, h]) = dimensions {
+        ui.weak(format!("{w} × {h} px"));
+    }
+    if let Some(duration) = duration {
+        ui.weak(video::format_time(duration));
+    }
+    ui.weak(fs::format_time(entry.modified));
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        let buttons = if editable { 2.0 } else { 1.0 };
+        let width = 70.0 * buttons;
+        ui.add_space(((ui.available_width() - width) / 2.0).max(0.0));
+        if ui
+            .button(format!("{} Open", icon::ARROW_SQUARE_OUT))
+            .clicked()
+        {
+            actions.push(Action::Activate(entry.path.clone()));
+        }
+        if editable
+            && ui
+                .button(format!("{} Edit", icon::NOTE_PENCIL))
+                .on_hover_text("Edit in a tab (Shift+F4)")
+                .clicked()
+        {
+            actions.push(Action::Edit(entry.path.clone()));
+        }
+    });
 }
 
 /// How many top-level entries of an archive the preview lists.
