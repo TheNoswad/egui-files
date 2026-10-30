@@ -7,6 +7,7 @@ use egui::{
 };
 use egui_dock::{
     DockArea, DockState, Node, NodeIndex, NodePath, Split, Style, TabInsert, TabViewer, Tree,
+    tab_viewer::OnCloseResponse,
 };
 use egui_phosphor::regular as icon;
 use serde::{Deserialize, Serialize};
@@ -15,6 +16,7 @@ use crate::{
     archive::{self, ArchiveTab},
     dnd::{self, DropTarget},
     dock_tab::{DockTab, Pane, PaneTab},
+    editor::{self, EditorTab},
     fs::Entry,
     images::ImageCache,
     jobs::{Jobs, Outcome},
@@ -69,6 +71,8 @@ struct Persisted {
     archive_prefs: archive::Prefs,
     #[serde(default)]
     open_with: open_with::Prefs,
+    #[serde(default)]
+    editor: editor::Prefs,
 }
 
 fn default_true() -> bool {
@@ -97,6 +101,7 @@ struct PersistedRef<'a> {
     video_quality: Quality,
     archive_prefs: &'a archive::Prefs,
     open_with: &'a open_with::Prefs,
+    editor: &'a editor::Prefs,
 }
 
 /// The panes a fresh layout starts with.
@@ -289,8 +294,12 @@ pub struct FilesApp {
     active_browser: Option<u64>,
     watcher: DirWatcher,
     trash_count: TrashCount,
-    /// Showing the "operations still running" dialog.
+    /// Showing the "operations still running" or "unsaved changes" dialog.
     confirm_quit: bool,
+    /// Editor tabs with unsaved changes waiting for "Save changes?" answers.
+    confirm_close: Vec<u64>,
+    /// Why saving before quitting failed.
+    quit_error: Option<String>,
     /// The user confirmed quitting with operations running.
     allow_close: bool,
     /// Drag and drop with other apps on Wayland, when running there.
@@ -341,6 +350,7 @@ impl FilesApp {
                 video_quality: Quality::default(),
                 archive_prefs: archive::Prefs::default(),
                 open_with: open_with::Prefs::default(),
+                editor: editor::Prefs::default(),
             });
         let Persisted {
             dock,
@@ -357,7 +367,9 @@ impl FilesApp {
             video_quality,
             archive_prefs,
             open_with,
+            editor,
         } = persisted;
+        editor::highlight::preload();
         let pending_panes = if panes_docked {
             Vec::new()
         } else {
@@ -395,6 +407,7 @@ impl FilesApp {
                     open_with::preload(&cc.egui_ctx);
                     OpenWith::new(open_with)
                 },
+                editor,
                 clipboard: None,
                 focused_tab: None,
                 preview_shown: false,
@@ -406,6 +419,8 @@ impl FilesApp {
             watcher: DirWatcher::new(&cc.egui_ctx),
             trash_count: TrashCount::new(&cc.egui_ctx),
             confirm_quit: false,
+            confirm_close: Vec::new(),
+            quit_error: None,
             allow_close: false,
             #[cfg(target_os = "linux")]
             wayland: crate::wayland_dnd::WaylandDnd::new(cc),
@@ -530,6 +545,93 @@ impl FilesApp {
         }
     }
 
+    /// Edits a file, in the tab already editing it if there is one.
+    fn open_editor(&mut self, path: PathBuf) {
+        let existing = self
+            .dock
+            .iter_all_tabs()
+            .find(|(_, t)| t.editor().is_some_and(|e| e.edit == path))
+            .map(|(_, t)| t.id());
+        if let Some(id) = existing {
+            self.focus_tab(id);
+        } else {
+            let tab = DockTab::Editor(EditorTab::new(self.next_id(), path));
+            self.push_tab(tab);
+        }
+    }
+
+    fn editor_mut(&mut self, id: u64) -> Option<&mut EditorTab> {
+        self.dock
+            .iter_all_tabs_mut()
+            .find(|(_, t)| t.id() == id)
+            .and_then(|(_, t)| t.editor_mut())
+    }
+
+    fn remove_tab(&mut self, id: u64) {
+        if let Some(path) = self.dock.find_tab_from(|t| t.id() == id) {
+            self.dock.remove_tab(path);
+        }
+    }
+
+    /// Closes a tab, first asking about unsaved changes in an editor.
+    fn request_close(&mut self, id: u64) {
+        if self.editor_mut(id).is_some_and(|e| e.is_dirty()) {
+            if !self.confirm_close.contains(&id) {
+                self.confirm_close.push(id);
+            }
+            self.focus_tab(id);
+        } else {
+            self.remove_tab(id);
+        }
+    }
+
+    /// Asks whether to save an editor's changes before closing it.
+    fn confirm_close_ui(&mut self, ctx: &egui::Context) {
+        let Some(&id) = self.confirm_close.first() else {
+            return;
+        };
+        let Some(editor) = self.editor_mut(id).filter(|e| e.is_dirty()) else {
+            // Saved or closed meanwhile.
+            self.confirm_close.remove(0);
+            return;
+        };
+        let name = crate::fs::display_name(&editor.edit);
+        let mut answer = None;
+        let modal = egui::Modal::new(Id::new("confirm_close")).show(ctx, |ui| {
+            ui.heading(format!("Save changes to “{name}”?"));
+            ui.label("Your changes are lost if you don't save them.");
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button(format!("{} Save", icon::FLOPPY_DISK)).clicked() {
+                    answer = Some(true);
+                }
+                if ui.button("Don't save").clicked() {
+                    answer = Some(false);
+                }
+                if ui.button("Cancel").clicked() {
+                    self.confirm_close.remove(0);
+                }
+            });
+        });
+        if modal.should_close() && answer.is_none() && self.confirm_close.first() == Some(&id) {
+            self.confirm_close.remove(0);
+        }
+        match answer {
+            Some(true) => {
+                self.confirm_close.remove(0);
+                // A failed save shows its error in the tab, which stays open.
+                if self.editor_mut(id).is_some_and(|e| e.save().is_ok()) {
+                    self.remove_tab(id);
+                }
+            }
+            Some(false) => {
+                self.confirm_close.remove(0);
+                self.remove_tab(id);
+            }
+            None => {}
+        }
+    }
+
     fn open_tab(&mut self, path: PathBuf) {
         let tab = self.make_tab(path);
         self.push_tab(tab);
@@ -545,9 +647,7 @@ impl FilesApp {
         else {
             return;
         };
-        if let Some(path) = self.dock.find_tab_from(|t| t.id() == id) {
-            self.dock.remove_tab(path);
-        }
+        self.request_close(id);
     }
 
     /// Shows `path` in the active browser tab, or a new one, and focuses it.
@@ -745,7 +845,10 @@ impl FilesApp {
     }
 
     fn global_shortcuts(&mut self, ctx: &egui::Context) {
-        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F4)) {
+        // Shift+F4 edits the selection.
+        if !ctx.input(|i| i.modifiers.shift)
+            && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F4))
+        {
             self.show_or_toggle_pane(ctx, Pane::Terminal);
         }
         // The shell gets everything else typed into it (Ctrl+W deletes a word).
@@ -805,6 +908,9 @@ impl FilesApp {
                     "Custom commands in “Open with”",
                 )
                 .on_hover_text("The “Other application…” dialog gets a box for typing any command");
+                ui.menu_button(format!("{} Syntax colors", icon::PALETTE), |ui| {
+                    self.shared.editor.menu_ui(ui);
+                });
                 ui.menu_button("Video quality", |ui| {
                     for quality in Quality::ALL {
                         let selected = self.shared.videos.quality() == quality;
@@ -940,7 +1046,7 @@ impl TabViewer for Viewer<'_> {
         let target = match tab {
             DockTab::Browser(browser) => Some(DropTarget::Folder(browser.path.clone())),
             DockTab::Trash(_) => Some(DropTarget::Trash),
-            DockTab::Pane(_) | DockTab::Archive(_) => None,
+            DockTab::Pane(_) | DockTab::Archive(_) | DockTab::Editor(_) => None,
         };
         if let Some(job) = target.and_then(|target| dnd::target(response, target)) {
             self.shared.jobs.start(job);
@@ -964,6 +1070,16 @@ impl TabViewer for Viewer<'_> {
 
     fn on_add(&mut self, path: NodePath) {
         self.add_requests.push(path);
+    }
+
+    /// Editors with unsaved changes ask first.
+    fn on_close(&mut self, tab: &mut DockTab) -> OnCloseResponse {
+        if tab.editor().is_some_and(EditorTab::is_dirty) {
+            self.shared.app_actions.push(AppAction::CloseTab(tab.id()));
+            OnCloseResponse::Ignore
+        } else {
+            OnCloseResponse::Close
+        }
     }
 
     fn is_closeable(&self, tab: &DockTab) -> bool {
@@ -1140,39 +1256,96 @@ impl FilesApp {
         }
     }
 
-    /// Asks before quitting while file operations are running.
+    /// Asks before quitting while file operations are running or editors
+    /// have unsaved changes.
     fn quit_guard(&mut self, ctx: &egui::Context) {
         let running = self.shared.jobs.running();
-        if ctx.input(|i| i.viewport().close_requested()) && running > 0 && !self.allow_close {
+        let unsaved: Vec<String> = self
+            .dock
+            .iter_all_tabs()
+            .filter_map(|(_, t)| t.editor())
+            .filter(|e| e.is_dirty())
+            .map(|e| crate::fs::display_name(&e.edit))
+            .collect();
+        let blocked = running > 0 || !unsaved.is_empty();
+        if ctx.input(|i| i.viewport().close_requested()) && blocked && !self.allow_close {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.confirm_quit = true;
         }
         if !self.confirm_quit {
             return;
         }
-        if running == 0 {
+        if !blocked {
             self.confirm_quit = false;
             return;
         }
+        let mut quit = false;
+        let mut save_all = false;
         let modal = egui::Modal::new(Id::new("confirm_quit")).show(ctx, |ui| {
             ui.heading("Quit egui-files?");
-            ui.label(format!(
-                "{running} file operation(s) still running. Quitting cancels them."
-            ));
+            if !unsaved.is_empty() {
+                ui.label(format!("{} file(s) have unsaved changes:", unsaved.len()));
+                for name in unsaved.iter().take(10) {
+                    ui.label(format!("  {} {name}", icon::NOTE_PENCIL));
+                }
+                if unsaved.len() > 10 {
+                    ui.weak(format!("  … and {} more", unsaved.len() - 10));
+                }
+            }
+            if running > 0 {
+                ui.label(format!(
+                    "{running} file operation(s) still running. Quitting cancels them."
+                ));
+            }
+            if let Some(error) = &self.quit_error {
+                ui.colored_label(ui.visuals().error_fg_color, error);
+            }
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if ui.button("Cancel operations and quit").clicked() {
-                    self.shared.jobs.cancel_all_and_wait();
-                    self.allow_close = true;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                if !unsaved.is_empty() {
+                    if ui
+                        .button(format!("{} Save all and quit", icon::FLOPPY_DISK))
+                        .clicked()
+                    {
+                        save_all = true;
+                    }
+                    if ui.button("Quit without saving").clicked() {
+                        quit = true;
+                    }
+                } else if ui.button("Cancel operations and quit").clicked() {
+                    quit = true;
                 }
-                if ui.button("Keep running").clicked() {
+                if ui.button("Don't quit").clicked() {
                     self.confirm_quit = false;
                 }
             });
         });
-        if modal.should_close() {
+        if save_all {
+            let errors: Vec<String> = self
+                .dock
+                .iter_all_tabs_mut()
+                .filter_map(|(_, t)| t.editor_mut())
+                .filter(|e| e.is_dirty())
+                .filter_map(|e| {
+                    e.save()
+                        .err()
+                        .map(|err| format!("{}: {err}", crate::fs::display_name(&e.edit)))
+                })
+                .collect();
+            if errors.is_empty() {
+                quit = true;
+            } else {
+                self.quit_error = Some(errors.join("\n"));
+            }
+        }
+        if quit {
+            self.shared.jobs.cancel_all_and_wait();
+            self.allow_close = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        if modal.should_close() || !self.confirm_quit {
             self.confirm_quit = false;
+            self.quit_error = None;
         }
     }
 }
@@ -1191,6 +1364,7 @@ impl eframe::App for FilesApp {
         self.shared.focused_tab = match self.dock.find_active_focused() {
             _ if self.terminal.has_focus(&ctx) => None,
             _ if self.shared.open_with.is_asking() => None,
+            _ if !self.confirm_close.is_empty() || self.confirm_quit => None,
             Some((_, tab)) if tab.pane().is_none() => Some(tab.id()),
             _ => self.active_browser,
         };
@@ -1258,10 +1432,14 @@ impl eframe::App for FilesApp {
         }
         let mut app_actions = Vec::new();
         for action in preview_actions {
-            if let tab::Action::Activate(path) = action
-                && let Some(tab) = self.active_browser_mut()
-            {
-                tab.activate(path, &mut app_actions);
+            match action {
+                tab::Action::Activate(path) => {
+                    if let Some(tab) = self.active_browser_mut() {
+                        tab.activate(path, &mut app_actions);
+                    }
+                }
+                tab::Action::Edit(path) => app_actions.push(AppAction::Edit(path)),
+                _ => {}
             }
         }
         self.shared.app_actions.extend(app_actions);
@@ -1280,8 +1458,11 @@ impl eframe::App for FilesApp {
                     self.open_with(&ctx, request, target);
                 }
                 AppAction::OpenWith(request, None) => self.shared.open_with.ask(request),
+                AppAction::Edit(path) => self.open_editor(path),
+                AppAction::CloseTab(id) => self.request_close(id),
             }
         }
+        self.confirm_close_ui(&ctx);
         if let Some((request, target)) = self.shared.open_with.ui(&ctx) {
             self.open_with(&ctx, request, target);
         }
@@ -1368,6 +1549,7 @@ impl eframe::App for FilesApp {
             video_quality: self.shared.videos.quality(),
             archive_prefs: &self.shared.archive_prefs,
             open_with: &self.shared.open_with.prefs,
+            editor: &self.shared.editor,
         };
         eframe::set_value(storage, eframe::APP_KEY, &state);
     }

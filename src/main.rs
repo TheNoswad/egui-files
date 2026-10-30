@@ -4,6 +4,7 @@ mod app;
 mod archive;
 mod dnd;
 mod dock_tab;
+mod editor;
 mod fs;
 mod images;
 mod jobs;

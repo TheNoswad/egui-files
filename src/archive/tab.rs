@@ -938,6 +938,7 @@ mod tests {
             archives: Listings::new(ctx),
             archive_prefs: Prefs::default(),
             open_with: Default::default(),
+            editor: Default::default(),
         }
     }
 

@@ -30,6 +30,9 @@ sevenz-rust2 = "0.24.1"
 unrar = "0.5.8"
 lzma-rust2 = "0.23"
 filetime = "0.2"
+two-face = "0.5.2"
+syntect = { version = "5.3", default-features = false, features = ["parsing"] }
+memchr = "2"
 
 # Image decoding is painfully slow unoptimized; optimize dependencies even in dev builds.
 [profile.dev.package."*"]

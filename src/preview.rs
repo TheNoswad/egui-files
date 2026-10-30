@@ -3,6 +3,7 @@
 use std::{
     io::Read,
     path::{Path, PathBuf},
+    sync::Arc,
     time::SystemTime,
 };
 
@@ -11,6 +12,10 @@ use egui_phosphor::regular as icon;
 
 use crate::{
     archive::{self, ListState},
+    editor::{
+        self,
+        highlight::{self, Highlighter, LineSpans, ThemeColors},
+    },
     fs::{self, Entry},
     images::{self, ImageCache, Lookup},
     tab::{Action, Shared},
@@ -27,6 +32,48 @@ struct TextPreview {
     /// `None` if the file looks binary or could not be read.
     text: Option<String>,
     truncated: bool,
+    syntax: &'static str,
+    colors: Option<Colors>,
+}
+
+/// Syntax colors for a preview, for one theme.
+struct Colors {
+    theme: &'static str,
+    /// Until it's done.
+    highlighter: Option<Highlighter>,
+    spans: Vec<LineSpans>,
+}
+
+impl TextPreview {
+    /// Highlights the text in the background, and picks up the results.
+    fn update_colors(&mut self, ctx: &egui::Context, theme: &'static str) {
+        let Some(text) = &self.text else {
+            return;
+        };
+        if self.syntax == highlight::PLAIN_TEXT {
+            return;
+        }
+        if self.colors.as_ref().is_none_or(|c| c.theme != theme) {
+            let highlighter = Highlighter::new(ctx, self.syntax, theme);
+            highlighter.update(1, Arc::from(text.as_str()));
+            self.colors = Some(Colors {
+                theme,
+                highlighter: Some(highlighter),
+                spans: Vec::new(),
+            });
+        }
+        let colors = self.colors.as_mut().expect("just set");
+        if let Some(result) = colors.highlighter.as_ref().and_then(Highlighter::poll) {
+            colors.spans = result.lines;
+            if result.done {
+                colors.highlighter = None;
+            }
+        }
+    }
+
+    fn spans(&self) -> &[LineSpans] {
+        self.colors.as_ref().map_or(&[], |c| &c.spans)
+    }
 }
 
 /// The last few text previews, so switching tabs doesn't re-read files every frame.
@@ -36,7 +83,7 @@ pub struct TextCache {
 }
 
 impl TextCache {
-    fn get(&mut self, entry: &Entry) -> &TextPreview {
+    fn get(&mut self, entry: &Entry) -> &mut TextPreview {
         let position = self
             .entries
             .iter()
@@ -49,16 +96,19 @@ impl TextCache {
                 }
                 let (text, truncated) =
                     read_text(&entry.path).map_or((None, false), |(t, tr)| (Some(t), tr));
+                let first_line = text.as_deref().and_then(|t| t.lines().next()).unwrap_or("");
                 self.entries.push(TextPreview {
                     path: entry.path.clone(),
                     modified: entry.modified,
+                    syntax: highlight::detect(&entry.path, first_line),
                     text,
                     truncated,
+                    colors: None,
                 });
                 self.entries.len() - 1
             }
         };
-        &self.entries[index]
+        &mut self.entries[index]
     }
 }
 
@@ -105,8 +155,10 @@ pub fn show(
         videos,
         texts,
         archives,
+        editor: editor_prefs,
         ..
     } = shared;
+    let mut editable = false;
     let mut dimensions = None;
     let mut duration = None;
     let is_archive = !entry.is_dir && archive::is_archive(&entry.path);
@@ -119,27 +171,33 @@ pub fn show(
         } else if images::is_image(&entry.path) {
             dimensions = image(ui, entry, images, max_side);
         } else {
-            match texts.get(entry) {
-                TextPreview {
-                    text: Some(text),
-                    truncated,
-                    ..
-                } if !text.trim().is_empty() => {
-                    egui::Frame::group(ui.style()).show(ui, |ui| {
+            let preview = texts.get(entry);
+            editable = preview.text.is_some() && editor::can_edit(&entry.path, false);
+            if preview.text.as_ref().is_some_and(|t| !t.trim().is_empty()) {
+                let theme = highlight::theme_name(editor_prefs.theme(ui.visuals().dark_mode));
+                let colors = ThemeColors::of(theme, ui.visuals());
+                preview.update_colors(ui.ctx(), theme);
+                let spans = preview.spans();
+                let text = preview.text.as_deref().unwrap_or_default();
+                egui::Frame::group(ui.style())
+                    .fill(colors.background)
+                    .show(ui, |ui| {
                         ui.with_layout(Layout::top_down(Align::Min), |ui| {
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(text.as_str()).monospace().size(11.0),
-                                )
-                                .wrap(),
+                            let job = highlight::layout_job(
+                                text,
+                                spans,
+                                FontId::monospace(11.0),
+                                colors.foreground,
+                                ui.available_width(),
                             );
-                            if *truncated {
-                                ui.weak("…");
+                            ui.add(egui::Label::new(job).wrap());
+                            if preview.truncated {
+                                ui.colored_label(colors.foreground, "…");
                             }
                         });
                     });
-                }
-                _ => big_icon(ui, entry),
+            } else {
+                big_icon(ui, entry);
             }
         }
 
@@ -158,12 +216,25 @@ pub fn show(
         }
         ui.weak(fs::format_time(entry.modified));
         ui.add_space(8.0);
-        if ui
-            .button(format!("{} Open", icon::ARROW_SQUARE_OUT))
-            .clicked()
-        {
-            actions.push(Action::Activate(entry.path.clone()));
-        }
+        ui.horizontal(|ui| {
+            let buttons = if editable { 2.0 } else { 1.0 };
+            let width = 70.0 * buttons;
+            ui.add_space(((ui.available_width() - width) / 2.0).max(0.0));
+            if ui
+                .button(format!("{} Open", icon::ARROW_SQUARE_OUT))
+                .clicked()
+            {
+                actions.push(Action::Activate(entry.path.clone()));
+            }
+            if editable
+                && ui
+                    .button(format!("{} Edit", icon::NOTE_PENCIL))
+                    .on_hover_text("Edit in a tab (Shift+F4)")
+                    .clicked()
+            {
+                actions.push(Action::Edit(entry.path.clone()));
+            }
+        });
     });
     if is_archive {
         ui.add_space(8.0);
@@ -491,6 +562,7 @@ mod tests {
             archives: archive::Listings::new(&ctx),
             archive_prefs: Default::default(),
             open_with: Default::default(),
+            editor: Default::default(),
         };
         let input = || egui::RawInput {
             screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(900.0, 300.0))),

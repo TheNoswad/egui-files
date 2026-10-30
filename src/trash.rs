@@ -793,6 +793,7 @@ mod tests {
             archives: crate::archive::Listings::new(&ctx),
             archive_prefs: Default::default(),
             open_with: Default::default(),
+            editor: Default::default(),
         };
         let trash_both = |shared: &mut Shared| {
             shared.jobs.start(JobKind::Trash {

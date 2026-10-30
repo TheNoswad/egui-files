@@ -43,6 +43,7 @@ pub struct Shared {
     pub archives: archive::Listings,
     pub archive_prefs: archive::Prefs,
     pub open_with: OpenWith,
+    pub editor: crate::editor::Prefs,
 }
 
 pub struct FileClipboard {
@@ -60,6 +61,10 @@ pub enum AppAction {
     OpenArchive(PathBuf),
     /// Open files with an app, or ask which when `None`.
     OpenWith(open_with::Request, Option<open_with::Target>),
+    /// Open a file in an editor tab.
+    Edit(PathBuf),
+    /// Close a tab, asking first if it has unsaved changes.
+    CloseTab(u64),
 }
 
 /// Everything a view or toolbar can ask the tab to do.
@@ -114,6 +119,9 @@ pub enum Action {
     TogglePreview,
     /// Open the selection with an app, or ask which when `None`.
     OpenWith(Option<open_with::Target>),
+    /// Open the selected files in editor tabs.
+    EditSelected,
+    Edit(PathBuf),
     /// Extract the selected archives next to themselves.
     Extract(ExtractMode),
     /// Ask where to extract the selected archives.
@@ -519,6 +527,9 @@ impl BrowserTab {
             }
             if key(Modifiers::NONE, Key::Enter) {
                 actions.push(Action::ActivateCursor);
+            }
+            if key(Modifiers::SHIFT, Key::F4) {
+                actions.push(Action::EditSelected);
             }
             if key(Modifiers::NONE, Key::F2) {
                 actions.push(Action::StartRename);
@@ -968,6 +979,14 @@ impl BrowserTab {
                         .push(AppAction::OpenWith(request, target));
                 }
             }
+            Action::Edit(path) => shared.app_actions.push(AppAction::Edit(path)),
+            Action::EditSelected => {
+                for path in self.selected_paths() {
+                    if crate::editor::can_edit(&path, path.is_dir()) {
+                        shared.app_actions.push(AppAction::Edit(path));
+                    }
+                }
+            }
             Action::Extract(mode) => {
                 for archive in self.selected_archives() {
                     let dest = archive
@@ -1250,6 +1269,7 @@ mod tests {
             archives: archive::Listings::new(ctx),
             archive_prefs: archive::Prefs::default(),
             open_with: Default::default(),
+            editor: Default::default(),
         }
     }
 

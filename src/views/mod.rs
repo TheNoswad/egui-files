@@ -125,6 +125,18 @@ fn entry_menu(
         "",
         Action::Activate(entry.path.clone()),
     );
+    if crate::editor::can_edit(&entry.path, entry.is_dir) {
+        item(
+            ui,
+            format!("{} Edit", icon::NOTE_PENCIL),
+            "Shift+F4",
+            if tab.selection.contains(&entry.path) {
+                Action::EditSelected
+            } else {
+                Action::Edit(entry.path.clone())
+            },
+        );
+    }
     let open_with = open_with::submenu(ui, || {
         if tab.selection.contains(&entry.path) {
             tab.selected_paths()
