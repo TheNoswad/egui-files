@@ -50,7 +50,7 @@ pub struct Thumbnail {
     pub original_size: Option<[u32; 2]>,
 }
 
-fn cache_dir() -> Option<PathBuf> {
+pub fn cache_dir() -> Option<PathBuf> {
     // Tests mustn't read or fill the user's real cache.
     if cfg!(windows) || cfg!(test) {
         return None;

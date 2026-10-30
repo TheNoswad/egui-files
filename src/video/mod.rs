@@ -38,6 +38,31 @@ pub fn is_video(path: &Path) -> bool {
         .is_some_and(|e| EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
 }
 
+/// The libmpv found at runtime, for the About window.
+pub struct Libmpv {
+    pub library: &'static str,
+    pub api_version: String,
+    pub mpv_version: Option<String>,
+    pub ffmpeg_version: Option<String>,
+}
+
+/// Loads libmpv, if it isn't already, and asks it for its versions.
+pub fn libmpv() -> Result<Libmpv, String> {
+    let (library, api_version) = mpv::library()?;
+    let mpv = mpv::Mpv::new()?;
+    // The version properties only exist once the core is running.
+    for (name, value) in [("config", "no"), ("vo", "null"), ("ao", "null")] {
+        mpv.set_option(name, value)?;
+    }
+    mpv.initialize()?;
+    Ok(Libmpv {
+        library,
+        api_version,
+        mpv_version: mpv.get_string("mpv-version"),
+        ffmpeg_version: mpv.get_string("ffmpeg-version"),
+    })
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     /// Starts paused on the first frame, with sound.

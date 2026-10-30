@@ -2,7 +2,7 @@
 //! runtime so the app still starts when mpv isn't installed.
 
 use std::{
-    ffi::{CStr, CString, c_char, c_int, c_void},
+    ffi::{CStr, CString, c_char, c_int, c_ulong, c_void},
     path::Path,
     sync::OnceLock,
 };
@@ -16,6 +16,7 @@ const LIBRARY_NAMES: &[&str] = &["libmpv-2.dll", "mpv-2.dll"];
 #[cfg(target_os = "macos")]
 const LIBRARY_NAMES: &[&str] = &["libmpv.2.dylib", "libmpv.dylib"];
 
+pub const FORMAT_STRING: c_int = 1;
 pub const FORMAT_FLAG: c_int = 3;
 pub const FORMAT_INT64: c_int = 4;
 pub const FORMAT_DOUBLE: c_int = 5;
@@ -92,15 +93,17 @@ macro_rules! api {
     ($($field:ident: fn($($arg:ty),*) $(-> $ret:ty)?;)*) => {
         struct Api {
             _library: Library,
+            /// The file name it was loaded by.
+            name: &'static str,
             $($field: unsafe extern "C" fn($($arg),*) $(-> $ret)?,)*
         }
 
         impl Api {
             fn load() -> Result<Self, String> {
-                let library = LIBRARY_NAMES
+                let (name, library) = LIBRARY_NAMES
                     .iter()
                     // SAFETY: libmpv has no library constructors with preconditions.
-                    .find_map(|name| unsafe { Library::new(name) }.ok())
+                    .find_map(|name| Some((*name, unsafe { Library::new(name) }.ok()?)))
                     .ok_or("libmpv not found (install mpv)")?;
                 // SAFETY: the signatures match libmpv's client.h and render.h.
                 unsafe {
@@ -109,6 +112,7 @@ macro_rules! api {
                             .get(concat!("mpv_", stringify!($field), "\0").as_bytes())
                             .map_err(|e| e.to_string())?,)*
                         _library: library,
+                        name,
                     })
                 }
             }
@@ -117,6 +121,8 @@ macro_rules! api {
 }
 
 api! {
+    client_api_version: fn() -> c_ulong;
+    free: fn(*mut c_void);
     create: fn() -> *mut c_void;
     initialize: fn(*mut c_void) -> c_int;
     terminate_destroy: fn(*mut c_void);
@@ -144,6 +150,14 @@ fn api() -> Result<&'static Api, String> {
 /// Whether libmpv can be loaded.
 pub fn available() -> Result<(), String> {
     api().map(|_| ())
+}
+
+/// The library file loaded and its client API version, as "major.minor".
+pub fn library() -> Result<(&'static str, String), String> {
+    let api = api()?;
+    // SAFETY: no preconditions.
+    let version = unsafe { (api.client_api_version)() };
+    Ok((api.name, format!("{}.{}", version >> 16, version & 0xffff)))
 }
 
 fn error_string(api: &Api, code: c_int) -> String {
@@ -257,6 +271,31 @@ impl Mpv {
             )
         };
         (code >= 0).then_some(value)
+    }
+
+    /// A property's current value as a string, if available.
+    pub fn get_string(&self, name: &str) -> Option<String> {
+        let name = cstring(name);
+        let mut value: *mut c_char = std::ptr::null_mut();
+        // SAFETY: valid handle and C string; STRING writes a char* that we
+        // own and free with mpv_free.
+        let code = unsafe {
+            (self.api.get_property)(
+                self.handle,
+                name.as_ptr(),
+                FORMAT_STRING,
+                (&raw mut value).cast(),
+            )
+        };
+        if code < 0 || value.is_null() {
+            return None;
+        }
+        // SAFETY: mpv returned a valid C string, freed once copied.
+        unsafe {
+            let string = CStr::from_ptr(value).to_string_lossy().into_owned();
+            (self.api.free)(value.cast());
+            Some(string)
+        }
     }
 
     pub fn observe(&self, id: u64, name: &str, format: c_int) -> Result<(), String> {

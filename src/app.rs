@@ -13,6 +13,7 @@ use egui_phosphor::regular as icon;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    about::About,
     archive::{self, ArchiveTab},
     dnd::{self, DropTarget},
     dock_tab::{DockTab, Pane, PaneTab},
@@ -319,6 +320,7 @@ pub struct FilesApp {
     /// The main surface's node kinds and the dock's size last frame, to
     /// notice them changing.
     dock_shape: (Vec<u8>, Vec2),
+    about: About,
 }
 
 impl FilesApp {
@@ -431,6 +433,7 @@ impl FilesApp {
             dock_size: Vec2::ZERO,
             add_menu: None,
             dock_shape: (Vec::new(), Vec2::ZERO),
+            about: About::new(cc),
         }
     }
 
@@ -947,6 +950,15 @@ impl FilesApp {
                     ui.close();
                 }
             });
+            ui.menu_button("Help", |ui| {
+                if ui
+                    .button(format!("{} About egui-files", icon::INFO))
+                    .clicked()
+                {
+                    self.about.open = true;
+                    ui.close();
+                }
+            });
         });
     }
 }
@@ -1371,6 +1383,7 @@ impl eframe::App for FilesApp {
         self.shared.preview_shown = self.has_pane(Pane::Preview);
 
         Panel::top("menu_bar").show(ui, |ui| self.menu_bar(ui));
+        self.about.ui(&ctx);
         if !self.shared.jobs.is_empty() {
             Panel::bottom("jobs").show(ui, |ui| self.shared.jobs.ui(ui));
         }
