@@ -178,6 +178,14 @@ pub struct BrowserTab {
     #[serde(skip)]
     focus_path_edit: bool,
     #[serde(skip)]
+    focus_filter: bool,
+    /// The narrow toolbar's filter row is showing.
+    #[serde(skip)]
+    filter_open: bool,
+    /// Widths of a toolbar button and separator, with spacing, last frame.
+    #[serde(skip)]
+    toolbar_metrics: [f32; 2],
+    #[serde(skip)]
     rename: Option<Rename>,
     /// Listings of the extra folders shown by the columns view.
     #[serde(skip)]
@@ -211,6 +219,9 @@ impl BrowserTab {
             scroll_to: None,
             path_edit: None,
             focus_path_edit: false,
+            focus_filter: false,
+            filter_open: false,
+            toolbar_metrics: [0.0; 2],
             rename: None,
             column_cache: HashMap::new(),
             compress: None,
@@ -581,68 +592,179 @@ impl BrowserTab {
         });
     }
 
+    /// Lays the toolbar out on one row when it fits; otherwise the path gets
+    /// a row of its own, and when even the filter is squeezed it collapses to
+    /// a button that opens it on its own row too.
     fn toolbar(&mut self, ui: &mut Ui, shared: &Shared, actions: &mut Vec<Action>) {
-        ui.horizontal(|ui| {
-            let nav = |ui: &mut Ui, enabled, glyph, tip| {
-                ui.add_enabled(enabled, Button::new(RichText::new(glyph).size(16.0)))
-                    .on_hover_text(tip)
-                    .clicked()
-            };
-            if nav(
-                ui,
-                !self.back.is_empty(),
-                icon::ARROW_LEFT,
-                "Back (Alt+Left)",
-            ) {
-                actions.push(Action::Back);
-            }
-            if nav(
-                ui,
-                !self.forward.is_empty(),
-                icon::ARROW_RIGHT,
-                "Forward (Alt+Right)",
-            ) {
-                actions.push(Action::Forward);
-            }
-            if nav(
-                ui,
-                self.path.parent().is_some(),
-                icon::ARROW_UP,
-                "Up (Backspace)",
-            ) {
-                actions.push(Action::Up);
-            }
-            if nav(ui, true, icon::ARROW_CLOCKWISE, "Refresh (F5)") {
-                actions.push(Action::Refresh);
-            }
-            ui.separator();
+        const FILTER_WIDTH: f32 = 180.0;
+        const MIN_FILTER_WIDTH: f32 = 100.0;
+        const MIN_PATH_WIDTH: f32 = 200.0;
 
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let preview =
-                    Button::selectable(shared.preview_shown, RichText::new(icon::EYE).size(16.0));
-                if ui.add(preview).on_hover_text("Preview pane (F3)").clicked() {
-                    actions.push(Action::TogglePreview);
+        // Icon button and separator widths (with spacing), measured each
+        // frame and used the next, give each group's width in each form.
+        let [button, separator] = self.toolbar_metrics;
+        let gap = ui.spacing().item_spacing.x;
+        let available = ui.available_width();
+        let nav_width = 4.0 * button + separator;
+        let buttons_width = |views: f32, filter: bool| {
+            (1.0 + views + f32::from(u8::from(filter))) * button + separator
+        };
+        let spare = available - nav_width - buttons_width(3.0, false);
+        let one_row = spare >= FILTER_WIDTH + gap + MIN_PATH_WIDTH;
+        let filter_inline = spare >= MIN_FILTER_WIDTH;
+        // Next the view modes fold into a menu, then the groups stack.
+        let views_inline = filter_inline || available >= nav_width + buttons_width(3.0, true);
+        let stacked = available < nav_width + buttons_width(1.0, true);
+        if filter_inline {
+            self.filter_open = false;
+        } else if self.focus_filter {
+            self.filter_open = true;
+        }
+
+        if stacked {
+            ui.horizontal_wrapped(|ui| {
+                self.toolbar_metrics[0] = self.nav_buttons(ui, actions) + gap;
+            });
+            // A right-to-left layout fills the height it's given, so give it one row.
+            let row = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
+            ui.allocate_ui_with_layout(row, Layout::right_to_left(Align::Center), |ui| {
+                self.view_buttons(ui, shared, true, false, actions)
+            });
+        } else {
+            ui.horizontal(|ui| {
+                let button = self.nav_buttons(ui, actions) + gap;
+                let separator = ui.separator().rect.width() + gap;
+                if [button, separator] != self.toolbar_metrics {
+                    self.toolbar_metrics = [button, separator];
+                    ui.ctx().request_discard("toolbar layout");
                 }
-                ui.separator();
-                for (mode, glyph, tip) in ViewMode::ALL.iter().rev() {
-                    let button =
-                        Button::selectable(self.view == *mode, RichText::new(*glyph).size(16.0));
-                    if ui.add(button).on_hover_text(*tip).clicked() {
-                        actions.push(Action::SetView(*mode));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    self.view_buttons(ui, shared, !filter_inline, views_inline, actions);
+                    if one_row {
+                        self.filter_field(ui, FILTER_WIDTH);
+                        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                            self.path_bar(ui, actions)
+                        });
+                    } else if filter_inline {
+                        self.filter_field(ui, ui.available_width());
                     }
-                }
-                let filter_id = self.filter_id();
-                ui.add(
-                    TextEdit::singleline(&mut self.filter)
-                        .id(filter_id)
-                        .hint_text(format!("{} Filter (Ctrl+F)", icon::MAGNIFYING_GLASS))
-                        .desired_width(180.0),
-                );
-                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                    self.path_bar(ui, actions)
                 });
             });
-        });
+        }
+
+        if self.filter_open {
+            ui.horizontal(|ui| self.filter_field(ui, ui.available_width()));
+        }
+        if !one_row {
+            ui.horizontal(|ui| self.path_bar(ui, actions));
+        }
+    }
+
+    /// Returns the width of a button, which the toolbar's layout goes by.
+    fn nav_buttons(&self, ui: &mut Ui, actions: &mut Vec<Action>) -> f32 {
+        let mut width = 0.0_f32;
+        let mut nav = |ui: &mut Ui, enabled, glyph, tip| {
+            let response = ui
+                .add_enabled(enabled, Button::new(RichText::new(glyph).size(16.0)))
+                .on_hover_text(tip);
+            width = width.max(response.rect.width());
+            response.clicked()
+        };
+        if nav(
+            ui,
+            !self.back.is_empty(),
+            icon::ARROW_LEFT,
+            "Back (Alt+Left)",
+        ) {
+            actions.push(Action::Back);
+        }
+        if nav(
+            ui,
+            !self.forward.is_empty(),
+            icon::ARROW_RIGHT,
+            "Forward (Alt+Right)",
+        ) {
+            actions.push(Action::Forward);
+        }
+        if nav(
+            ui,
+            self.path.parent().is_some(),
+            icon::ARROW_UP,
+            "Up (Backspace)",
+        ) {
+            actions.push(Action::Up);
+        }
+        if nav(ui, true, icon::ARROW_CLOCKWISE, "Refresh (F5)") {
+            actions.push(Action::Refresh);
+        }
+        width
+    }
+
+    /// The right-hand buttons, laid out right to left.
+    fn view_buttons(
+        &mut self,
+        ui: &mut Ui,
+        shared: &Shared,
+        filter_toggle: bool,
+        views_inline: bool,
+        actions: &mut Vec<Action>,
+    ) {
+        let preview = Button::selectable(shared.preview_shown, RichText::new(icon::EYE).size(16.0));
+        if ui.add(preview).on_hover_text("Preview pane (F3)").clicked() {
+            actions.push(Action::TogglePreview);
+        }
+        ui.separator();
+        if views_inline {
+            for (mode, glyph, tip) in ViewMode::ALL.iter().rev() {
+                let button =
+                    Button::selectable(self.view == *mode, RichText::new(*glyph).size(16.0));
+                if ui.add(button).on_hover_text(*tip).clicked() {
+                    actions.push(Action::SetView(*mode));
+                }
+            }
+        } else {
+            let glyph = ViewMode::ALL
+                .iter()
+                .find(|(mode, ..)| *mode == self.view)
+                .map_or(icon::LIST, |(_, glyph, _)| *glyph);
+            ui.menu_button(RichText::new(glyph).size(16.0), |ui| {
+                self.view_menu(ui, actions)
+            })
+            .response
+            .on_hover_text("View");
+        }
+        if filter_toggle {
+            let active = self.filter_open || !self.filter.is_empty();
+            let button =
+                Button::selectable(active, RichText::new(icon::MAGNIFYING_GLASS).size(16.0));
+            if ui.add(button).on_hover_text("Filter (Ctrl+F)").clicked() {
+                if self.filter_open {
+                    self.filter_open = false;
+                } else {
+                    actions.push(Action::FocusFilter);
+                }
+            }
+        }
+    }
+
+    fn filter_field(&mut self, ui: &mut Ui, width: f32) {
+        let id = self.filter_id();
+        let response = ui.add(
+            TextEdit::singleline(&mut self.filter)
+                .id(id)
+                .hint_text(format!("{} Filter (Ctrl+F)", icon::MAGNIFYING_GLASS))
+                .desired_width(width),
+        );
+        if std::mem::take(&mut self.focus_filter) {
+            response.request_focus();
+        }
+        // Escape on an empty filter closes the collapsed filter's row.
+        if response.lost_focus()
+            && self.filter.is_empty()
+            && ui.input(|i| i.key_pressed(Key::Escape))
+        {
+            self.filter_open = false;
+        }
     }
 
     /// Context menu for empty space in the listing; acts on the folder itself.
@@ -737,15 +859,7 @@ impl BrowserTab {
         );
         ui.separator();
         ui.menu_button(format!("{} View", icon::EYE), |ui| {
-            for (mode, glyph, label) in ViewMode::ALL {
-                if ui
-                    .radio(self.view == mode, format!("{glyph} {label}"))
-                    .clicked()
-                {
-                    actions.push(Action::SetView(mode));
-                    ui.close();
-                }
-            }
+            self.view_menu(ui, actions)
         });
         ui.menu_button(format!("{} Sort by", icon::SORT_ASCENDING), |ui| {
             for (key, label) in [
@@ -780,15 +894,39 @@ impl BrowserTab {
         }
     }
 
+    fn view_menu(&self, ui: &mut Ui, actions: &mut Vec<Action>) {
+        for (mode, glyph, label) in ViewMode::ALL {
+            if ui
+                .radio(self.view == mode, format!("{glyph} {label}"))
+                .clicked()
+            {
+                actions.push(Action::SetView(mode));
+                ui.close();
+            }
+        }
+    }
+
     fn filter_id(&self) -> Id {
         Id::new(("filter", self.id))
     }
 
     fn path_bar(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
         if let Some(text) = &mut self.path_edit {
-            let response = ui.add(TextEdit::singleline(text).desired_width(f32::INFINITY));
+            let mut output = TextEdit::singleline(text)
+                .desired_width(f32::INFINITY)
+                .show(ui);
+            let response = output.response;
             if std::mem::take(&mut self.focus_path_edit) {
                 response.request_focus();
+                // Select it all, so typing replaces the path.
+                output
+                    .state
+                    .cursor
+                    .set_char_range(Some(egui::text::CCursorRange::two(
+                        egui::text::CCursor::new(0),
+                        egui::text::CCursor::new(text.chars().count()),
+                    )));
+                output.state.store(ui.ctx(), response.id);
             }
             if response.lost_focus() {
                 if ui.input(|i| i.key_pressed(Key::Enter)) {
@@ -802,6 +940,19 @@ impl BrowserTab {
         if ui
             .button(icon::PENCIL_SIMPLE)
             .on_hover_text("Edit path (Ctrl+L)")
+            .clicked()
+        {
+            actions.push(Action::EditPath);
+        }
+        // Clicking around the crumbs edits the path; the crumbs, added
+        // after, take clicks on themselves.
+        let row = egui::Rect::from_min_size(
+            ui.cursor().min,
+            egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
+        );
+        if ui
+            .interact(row, Id::new(("crumbs-edit", self.id)), egui::Sense::click())
+            .on_hover_cursor(egui::CursorIcon::Text)
             .clicked()
         {
             actions.push(Action::EditPath);
@@ -1083,7 +1234,7 @@ impl BrowserTab {
                 self.path_edit = Some(self.path.display().to_string());
                 self.focus_path_edit = true;
             }
-            Action::FocusFilter => ctx.memory_mut(|m| m.request_focus(self.filter_id())),
+            Action::FocusFilter => self.focus_filter = true,
             Action::StartRename => {
                 let target = self
                     .cursor
@@ -1332,6 +1483,76 @@ mod tests {
         run_events(ctx, tab, shared, vec![press(true)]);
         run_events(ctx, tab, shared, vec![press(false)]);
         run_events(ctx, tab, shared, vec![]);
+    }
+
+    /// Clicking around the crumbs opens the path editor with it all selected;
+    /// clicking a crumb still goes there.
+    #[test]
+    fn clicking_around_crumbs_edits_path() {
+        let root = fixture("crumbs");
+        let a = root.join("a");
+        let ctx = Context::default();
+        let mut tab = BrowserTab::new(1, a.clone());
+        let mut shared = shared(&ctx, &tab);
+        for _ in 0..3 {
+            run_frame(&ctx, &mut tab, &mut shared, &[]);
+        }
+        let (filter, crumbs) = ctx.viewport(|vp| {
+            let widgets = &vp.prev_pass.widgets;
+            let filter = widgets.get(tab.filter_id()).unwrap().interact_rect;
+            let mut crumbs: Vec<_> = widgets
+                .get_layer(egui::LayerId::background())
+                .filter(|w| {
+                    w.sense.senses_click()
+                        && w.id != Id::new(("crumbs-edit", tab.id))
+                        && w.interact_rect.center().y < filter.bottom()
+                        && w.interact_rect.right() < filter.left()
+                })
+                .map(|w| w.interact_rect)
+                .collect();
+            crumbs.sort_by(|a, b| a.left().total_cmp(&b.left()));
+            (filter, crumbs)
+        });
+
+        let parent = crumbs[crumbs.len() - 2];
+        click(
+            &ctx,
+            &mut tab,
+            &mut shared,
+            parent.center(),
+            egui::PointerButton::Primary,
+        );
+        assert_eq!(tab.path, root, "the crumb navigates");
+        assert!(tab.path_edit.is_none());
+
+        tab.navigate(a.clone());
+        run_frame(&ctx, &mut tab, &mut shared, &[]);
+        let empty = egui::pos2(filter.left() - 20.0, filter.center().y);
+        click(
+            &ctx,
+            &mut tab,
+            &mut shared,
+            empty,
+            egui::PointerButton::Primary,
+        );
+        assert_eq!(tab.path, a);
+        let text = tab.path_edit.clone().expect("path editor opened");
+        assert_eq!(text, a.display().to_string());
+        let focused = ctx.memory(|m| m.focused()).expect("path editor focused");
+        let state = egui::text_edit::TextEditState::load(&ctx, focused).unwrap();
+        let range = state.cursor.char_range().expect("selection");
+        assert_eq!(
+            (
+                range.primary.index.min(range.secondary.index),
+                range.primary.index.max(range.secondary.index)
+            ),
+            (
+                egui::text::CCursor::new(0).index,
+                egui::text::CCursor::new(text.chars().count()).index
+            ),
+            "the whole path is selected"
+        );
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]
@@ -1949,6 +2170,108 @@ mod tests {
                 }
                 _ => None,
             })
+    }
+
+    /// At any width the filter and path stay on screen and don't overlap.
+    #[test]
+    fn toolbar_fits_narrow_widths() {
+        let root = fixture("toolbar-widths");
+        let deep = root.join("a/b/some folder with a long name/and another one");
+        std::fs::create_dir_all(&deep).unwrap();
+        let ctx = Context::default();
+        let mut tab = BrowserTab::new(1, deep);
+        let mut shared = shared(&ctx, &tab);
+        let mut frame = |tab: &mut BrowserTab, width: f32, events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(width, 600.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            ctx.run_ui(input, |ui| tab.ui(ui, &mut shared))
+                .textures_delta
+                .clear();
+        };
+        let filter = tab.filter_id();
+        let rows = |ctx: &Context| {
+            ctx.viewport(|vp| {
+                let widgets = &vp.prev_pass.widgets;
+                let filter_rect = widgets.get(filter).map(|w| w.interact_rect);
+                let clickable = widgets
+                    .get_layer(egui::LayerId::background())
+                    .filter(|w| w.sense.senses_click() && w.id != filter)
+                    .map(|w| w.interact_rect)
+                    .collect::<Vec<_>>();
+                (filter_rect, clickable)
+            })
+        };
+        for width in [1000.0, 520.0, 330.0, 260.0, 200.0, 150.0, 90.0] {
+            for _ in 0..3 {
+                frame(&mut tab, width, Vec::new());
+            }
+            let (filter_rect, clickable) = rows(&ctx);
+            let toolbar = egui::containers::panel::PanelState::load(&ctx, Id::new(("toolbar", 1)))
+                .expect("toolbar drawn")
+                .outer_rect;
+            assert!(
+                toolbar.height() < 130.0,
+                "{width}: the toolbar takes only the rows it needs, not {toolbar:?}"
+            );
+            for (i, a) in clickable.iter().enumerate() {
+                for b in &clickable[i + 1..] {
+                    // The crumbs' scroll area spans its crumbs.
+                    let spans = |a: &egui::Rect, b: &egui::Rect| {
+                        a.left() <= b.left() && b.right() <= a.right()
+                    };
+                    let nested = spans(a, b) || spans(b, a);
+                    let overlap = a.intersect(*b);
+                    assert!(
+                        nested || overlap.width() <= 1.0 || overlap.height() <= 1.0,
+                        "{width}: {a:?} overlaps {b:?}"
+                    );
+                }
+            }
+            for rect in &clickable {
+                assert!(
+                    rect.left() >= -0.5 && rect.right() <= width + 0.5,
+                    "{width}: {rect:?} is on screen"
+                );
+                if let Some(f) = filter_rect {
+                    assert!(
+                        !rect.intersects(f.shrink(1.0)),
+                        "{width}: {rect:?} overlaps the filter {f:?}"
+                    );
+                }
+            }
+            match width {
+                1000.0 | 520.0 => assert!(filter_rect.is_some(), "{width}: filter shown"),
+                _ => assert!(filter_rect.is_none(), "{width}: filter collapsed"),
+            }
+        }
+
+        // Ctrl+F opens the collapsed filter on its own row; Escape closes it.
+        frame(&mut tab, 200.0, vec![]);
+        tab.focus_filter = true;
+        frame(&mut tab, 200.0, vec![]);
+        frame(&mut tab, 200.0, vec![]);
+        let (filter_rect, _) = rows(&ctx);
+        let filter_rect = filter_rect.expect("filter row opened");
+        assert!(filter_rect.width() > 150.0, "filter row is full width");
+        assert!(ctx.memory(|m| m.has_focus(filter)), "filter focused");
+        let escape = egui::Event::Key {
+            key: Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        };
+        frame(&mut tab, 200.0, vec![escape]);
+        frame(&mut tab, 200.0, vec![]);
+        frame(&mut tab, 200.0, vec![]);
+        assert!(rows(&ctx).0.is_none(), "Escape closes the filter row");
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]
