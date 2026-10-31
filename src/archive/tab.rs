@@ -58,6 +58,7 @@ static COLUMNS: list_columns::Table = list_columns::Table {
         },
     ],
     hide_order: &[PACKED, MODIFIED, SIZE],
+    hidden: &[],
 };
 
 const INDENT: f32 = 14.0;

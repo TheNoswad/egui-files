@@ -26,6 +26,8 @@ pub struct Table {
     /// Indices of the columns to hide, in order, when even their minimum
     /// widths don't fit. Should list every column but the name.
     pub hide_order: &'static [usize],
+    /// Columns hidden until the user shows them.
+    pub hidden: &'static [usize],
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -39,7 +41,9 @@ impl Prefs {
     fn new(table: &Table) -> Self {
         Self {
             widths: table.columns.iter().map(|c| c.width).collect(),
-            hidden: vec![false; table.columns.len()],
+            hidden: (0..table.columns.len())
+                .map(|i| table.hidden.contains(&i))
+                .collect(),
         }
     }
 }
@@ -257,6 +261,7 @@ mod tests {
             },
         ],
         hide_order: &[3, 2, 1],
+        hidden: &[],
     };
 
     fn total(widths: &[Option<f32>], spacing: f32) -> f32 {

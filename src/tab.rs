@@ -893,8 +893,12 @@ impl BrowserTab {
     fn sort_menu(&self, ui: &mut Ui, actions: &mut Vec<Action>) {
         let sort = self.sort;
         for (key, label) in SortKey::ALL {
-            if ui.radio(sort.key == key, label).clicked() {
-                actions.push(Action::SetSort(Sort { key, ..sort }));
+            if ui.radio(sort.key == key, label).clicked() && sort.key != key {
+                actions.push(Action::SetSort(Sort {
+                    key,
+                    ascending: key.starts_ascending(),
+                    ..sort
+                }));
             }
         }
         ui.separator();
@@ -1242,7 +1246,7 @@ impl BrowserTab {
                     self.sort.ascending = !self.sort.ascending;
                 } else {
                     self.sort.key = key;
-                    self.sort.ascending = true;
+                    self.sort.ascending = key.starts_ascending();
                 }
                 self.apply(Action::SetSort(self.sort), ctx, shared);
             }

@@ -59,6 +59,7 @@ static COLUMNS: list_columns::Table = list_columns::Table {
         },
     ],
     hide_order: &[SIZE, DELETED, LOCATION],
+    hidden: &[],
 };
 
 struct Item {
@@ -685,7 +686,8 @@ impl TrashTab {
                 self.sort = if self.sort.0 == key {
                     (key, !self.sort.1)
                 } else {
-                    (key, true)
+                    // Newest deletions first, like the default.
+                    (key, key != SortKey::Deleted)
                 };
                 if let Some(items) = &mut self.items {
                     sort_items(items, self.sort);

@@ -24,6 +24,8 @@ pub struct Entry {
     pub executable: bool,
     pub size: u64,
     pub modified: Option<SystemTime>,
+    /// Not every filesystem records it.
+    pub created: Option<SystemTime>,
 }
 
 impl Entry {
@@ -144,6 +146,7 @@ pub fn read_dir(dir: &Path) -> io::Result<Vec<Entry>> {
                 .filter(|m| m.is_file())
                 .map_or(0, fs::Metadata::len),
             modified: meta.as_ref().and_then(|m| m.modified().ok()),
+            created: meta.as_ref().and_then(|m| m.created().ok()),
             path,
             name,
             is_dir,
@@ -172,6 +175,7 @@ pub enum SortKey {
     Size,
     Modified,
     Kind,
+    Created,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -197,19 +201,25 @@ impl Default for Sort {
 }
 
 impl SortKey {
-    pub const ALL: [(Self, &'static str); 4] = [
+    pub const ALL: [(Self, &'static str); 5] = [
         (Self::Name, "Name"),
         (Self::Size, "Size"),
         (Self::Modified, "Modified"),
+        (Self::Created, "Created"),
         (Self::Kind, "Kind"),
     ];
+
+    /// The direction sorting by this key starts in: dates newest first.
+    pub fn starts_ascending(self) -> bool {
+        !matches!(self, Self::Modified | Self::Created)
+    }
 
     /// What ascending and descending mean for this key.
     pub fn directions(self) -> [&'static str; 2] {
         match self {
             Self::Name | Self::Kind => ["A to Z", "Z to A"],
             Self::Size => ["Smallest first", "Largest first"],
-            Self::Modified => ["Oldest first", "Newest first"],
+            Self::Modified | Self::Created => ["Oldest first", "Newest first"],
         }
     }
 }
@@ -230,6 +240,7 @@ pub fn sort_entries(entries: &mut [Entry], sort: Sort) {
                 SortKey::Name => by_name(a, b),
                 SortKey::Size => a.size.cmp(&b.size).then_with(|| by_name(a, b)),
                 SortKey::Modified => a.modified.cmp(&b.modified).then_with(|| by_name(a, b)),
+                SortKey::Created => a.created.cmp(&b.created).then_with(|| by_name(a, b)),
                 SortKey::Kind => a.kind().cmp(&b.kind()).then_with(|| by_name(a, b)),
             };
             if sort.ascending { ord } else { ord.reverse() }

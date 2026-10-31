@@ -1,4 +1,4 @@
-//! Sortable table with name, size, modified and kind columns.
+//! Sortable table with name, size, modified, created and kind columns.
 
 use egui::{Align, Button, Layout, RichText, Sense, TextStyle, Ui};
 use egui_extras::TableBuilder;
@@ -12,7 +12,8 @@ use crate::{
 
 const SIZE: usize = 1;
 const MODIFIED: usize = 2;
-const KIND: usize = 3;
+const CREATED: usize = 3;
+const KIND: usize = 4;
 
 static COLUMNS: list_columns::Table = list_columns::Table {
     key: "details",
@@ -33,12 +34,18 @@ static COLUMNS: list_columns::Table = list_columns::Table {
             min: 80.0,
         },
         Spec {
+            label: "Created",
+            width: 140.0,
+            min: 80.0,
+        },
+        Spec {
             label: "Kind",
             width: 100.0,
             min: 60.0,
         },
     ],
-    hide_order: &[KIND, MODIFIED, SIZE],
+    hide_order: &[KIND, CREATED, MODIFIED, SIZE],
+    hidden: &[CREATED],
 };
 
 pub fn show(
@@ -68,6 +75,7 @@ pub fn show(
                 SortKey::Name,
                 SortKey::Size,
                 SortKey::Modified,
+                SortKey::Created,
                 SortKey::Kind,
             ]
             .into_iter()
@@ -125,6 +133,11 @@ pub fn show(
                 if columns.shown(MODIFIED) {
                     row.col(|ui| {
                         crate::dates::label(ui, entry.modified, false);
+                    });
+                }
+                if columns.shown(CREATED) {
+                    row.col(|ui| {
+                        crate::dates::label(ui, entry.created, false);
                     });
                 }
                 if columns.shown(KIND) {
