@@ -65,6 +65,11 @@ pub enum AppAction {
     Edit(PathBuf),
     /// Close a tab, asking first if it has unsaved changes.
     CloseTab(u64),
+    /// Put files on the system clipboard (see `file_clipboard`).
+    CopyFiles {
+        paths: Vec<PathBuf>,
+        cut: bool,
+    },
 }
 
 /// Everything a view or toolbar can ask the tab to do.
@@ -1311,9 +1316,11 @@ impl BrowserTab {
                 if paths.is_empty() {
                     return;
                 }
-                // Also put the paths on the system clipboard as text. This keeps
-                // Ctrl+V working, since egui only emits paste events for non-empty text.
-                ctx.copy_text(join_paths(&paths));
+                // Also put the files on the system clipboard, for other apps.
+                shared.app_actions.push(AppAction::CopyFiles {
+                    paths: paths.clone(),
+                    cut: matches!(action, Action::Cut),
+                });
                 shared.clipboard = Some(FileClipboard {
                     paths,
                     cut: matches!(action, Action::Cut),
@@ -1409,7 +1416,7 @@ fn paste(shared: &mut Shared, dest: PathBuf) {
     }
 }
 
-fn join_paths(paths: &[PathBuf]) -> String {
+pub fn join_paths(paths: &[PathBuf]) -> String {
     paths
         .iter()
         .map(|p| p.display().to_string())

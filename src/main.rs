@@ -8,6 +8,8 @@ mod devices;
 mod dnd;
 mod dock_tab;
 mod editor;
+#[cfg(windows)]
+mod file_clipboard;
 mod fs;
 mod images;
 mod jobs;

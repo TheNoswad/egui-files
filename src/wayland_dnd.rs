@@ -9,6 +9,8 @@
 //! - **Drags out:** when an in-app drag leaves the window, the UI calls
 //!   [`WaylandDnd::start_drag`], which hands the drag to the compositor
 //!   with a data source serving the paths as a `text/uri-list`.
+//! - **Clipboard:** copied files are set as the selection here too, since
+//!   egui's clipboard only offers text (other apps would paste the path).
 
 use std::{
     io::{Read, Write},
@@ -26,7 +28,7 @@ use smithay_client_toolkit::{
         DataDeviceManagerState, WritePipe,
         data_device::{DataDevice, DataDeviceData, DataDeviceHandler},
         data_offer::{DataOfferHandler, DragOffer},
-        data_source::{DataSourceHandler, DragSource},
+        data_source::{CopyPasteSource, DataSourceHandler, DragSource},
     },
     delegate_data_device, delegate_pointer, delegate_registry, delegate_seat,
     registry::{ProvidesRegistryState, RegistryState},
@@ -38,11 +40,15 @@ use smithay_client_toolkit::{
 };
 use wayland_backend::client::{Backend, ObjectId};
 use wayland_client::{
-    Connection, EventQueue, Proxy, QueueHandle,
+    Connection, Dispatch, EventQueue, Proxy, QueueHandle,
     globals::registry_queue_init,
     protocol::{
-        wl_data_device::WlDataDevice, wl_data_device_manager::DndAction,
-        wl_data_source::WlDataSource, wl_pointer::WlPointer, wl_seat::WlSeat,
+        wl_data_device::WlDataDevice,
+        wl_data_device_manager::DndAction,
+        wl_data_source::WlDataSource,
+        wl_keyboard::{self, WlKeyboard},
+        wl_pointer::WlPointer,
+        wl_seat::WlSeat,
         wl_surface::WlSurface,
     },
 };
@@ -50,6 +56,17 @@ use wayland_client::{
 use crate::dnd::{ExternalEvent, parse_uri_list, uri_list};
 
 const URI_LIST: &str = "text/uri-list";
+/// GNOME and most GTK file managers: "copy" or "cut", then one URI per line.
+const GNOME_FILES: &str = "x-special/gnome-copied-files";
+/// KDE marks a cut with "1" in this extra format.
+const KDE_CUT: &str = "application/x-kde-cutselection";
+const TEXT: [&str; 5] = [
+    "text/plain;charset=utf-8",
+    "text/plain",
+    "UTF8_STRING",
+    "STRING",
+    "TEXT",
+];
 
 /// What the UI receives, in surface-local logical coordinates.
 pub enum DndEvent {
@@ -63,6 +80,10 @@ pub enum DndEvent {
 struct Shared {
     /// Serial of the last pointer button press, needed to start a drag.
     press_serial: AtomicU32,
+    /// Serial of the last key or button event, needed to set the selection.
+    input_serial: AtomicU32,
+    /// Files on the clipboard, while our source is the selection.
+    selection: Mutex<Option<Selection>>,
     /// Paths being dragged out, while a drag started here is in progress.
     outgoing: Mutex<Option<Vec<PathBuf>>>,
     source: Mutex<Option<DragSource>>,
@@ -107,6 +128,7 @@ impl WaylandDnd {
             registry: RegistryState::new(&globals),
             seats: SeatState::new(&globals, &qh),
             pointer: None,
+            keyboard: None,
             sender,
             shared: shared.clone(),
             ctx: cc.egui_ctx.clone(),
@@ -154,12 +176,63 @@ impl WaylandDnd {
         *self.shared.source.lock().expect("source poisoned") = Some(source);
         self.conn.flush().is_ok()
     }
+
+    /// Puts files on the clipboard. Returns false if there was no input event
+    /// yet to attribute it to.
+    pub fn set_selection(&self, paths: &[PathBuf], cut: bool) -> bool {
+        let serial = self.shared.input_serial.load(Ordering::Acquire);
+        if serial == 0 || paths.is_empty() {
+            return false;
+        }
+        let mut mimes = vec![URI_LIST, GNOME_FILES];
+        if cut {
+            mimes.push(KDE_CUT);
+        }
+        mimes.extend(TEXT);
+        let source = self.manager.create_copy_paste_source(&self.qh, mimes);
+        let mut selection = self.shared.selection.lock().expect("selection poisoned");
+        source.set_selection(&self.device, serial);
+        // Replaces (and destroys) the previous source, if any.
+        *selection = Some(Selection {
+            source,
+            paths: paths.to_vec(),
+            cut,
+        });
+        self.conn.flush().is_ok()
+    }
+}
+
+struct Selection {
+    source: CopyPasteSource,
+    paths: Vec<PathBuf>,
+    cut: bool,
+}
+
+/// What the clipboard serves for `mime`, if it offers that type.
+fn selection_data(paths: &[PathBuf], cut: bool, mime: &str) -> Option<String> {
+    match mime {
+        URI_LIST => Some(uri_list(paths)),
+        GNOME_FILES => {
+            let action = if cut { "cut" } else { "copy" };
+            let uris = uri_list(paths);
+            Some(
+                std::iter::once(action)
+                    .chain(uris.lines())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )
+        }
+        KDE_CUT => Some(if cut { "1" } else { "0" }.to_owned()),
+        _ if TEXT.contains(&mime) => Some(crate::tab::join_paths(paths)),
+        _ => None,
+    }
 }
 
 struct State {
     registry: RegistryState,
     seats: SeatState,
     pointer: Option<WlPointer>,
+    keyboard: Option<WlKeyboard>,
     sender: Sender<DndEvent>,
     shared: Arc<Shared>,
     ctx: egui::Context,
@@ -329,10 +402,21 @@ impl DataSourceHandler for State {
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _source: &WlDataSource,
+        source: &WlDataSource,
         mime: String,
         mut fd: WritePipe,
     ) {
+        let selection = self.shared.selection.lock().expect("selection poisoned");
+        if let Some(selection) = selection.as_ref().filter(|s| s.source.inner() == source) {
+            if let Some(data) = selection_data(&selection.paths, selection.cut, &mime) {
+                // A slow reader would stall the dispatch thread on a full pipe.
+                std::thread::spawn(move || {
+                    let _ = fd.write_all(data.as_bytes());
+                });
+            }
+            return;
+        }
+        drop(selection);
         if mime != URI_LIST {
             return;
         }
@@ -347,7 +431,17 @@ impl DataSourceHandler for State {
         }
     }
 
-    fn cancelled(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _source: &WlDataSource) {
+    fn cancelled(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, source: &WlDataSource) {
+        let mut selection = self.shared.selection.lock().expect("selection poisoned");
+        if selection
+            .as_ref()
+            .is_some_and(|s| s.source.inner() == source)
+        {
+            // Another selection replaced ours.
+            selection.take();
+            return;
+        }
+        drop(selection);
         self.end_drag_out();
     }
 
@@ -391,6 +485,10 @@ impl SeatHandler for State {
         if capability == Capability::Pointer && self.pointer.is_none() {
             self.pointer = self.seats.get_pointer(qh, &seat).ok();
         }
+        // And a keyboard, only to learn key serials for the selection.
+        if capability == Capability::Keyboard && self.keyboard.is_none() {
+            self.keyboard = Some(seat.get_keyboard(qh, ()));
+        }
     }
 
     fn remove_capability(
@@ -404,6 +502,11 @@ impl SeatHandler for State {
             && let Some(pointer) = self.pointer.take()
         {
             pointer.release();
+        }
+        if capability == Capability::Keyboard
+            && let Some(keyboard) = self.keyboard.take()
+        {
+            keyboard.release();
         }
     }
 
@@ -421,7 +524,25 @@ impl PointerHandler for State {
         for event in events {
             if let PointerEventKind::Press { serial, .. } = event.kind {
                 self.shared.press_serial.store(serial, Ordering::Release);
+                self.shared.input_serial.store(serial, Ordering::Release);
             }
+        }
+    }
+}
+
+impl Dispatch<WlKeyboard, ()> for State {
+    fn event(
+        state: &mut Self,
+        _keyboard: &WlKeyboard,
+        event: wl_keyboard::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        if let wl_keyboard::Event::Enter { serial, .. } | wl_keyboard::Event::Key { serial, .. } =
+            event
+        {
+            state.shared.input_serial.store(serial, Ordering::Release);
         }
     }
 }
@@ -438,3 +559,29 @@ delegate_registry!(State);
 delegate_seat!(State);
 delegate_pointer!(State);
 delegate_data_device!(State);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clipboard_formats() {
+        let paths = [PathBuf::from("/tmp/a b"), PathBuf::from("/tmp/c")];
+        let data = |cut, mime| selection_data(&paths, cut, mime);
+        assert_eq!(
+            data(false, URI_LIST).as_deref(),
+            Some("file:///tmp/a%20b\r\nfile:///tmp/c\r\n")
+        );
+        assert_eq!(
+            data(false, GNOME_FILES).as_deref(),
+            Some("copy\nfile:///tmp/a%20b\nfile:///tmp/c")
+        );
+        assert_eq!(data(true, GNOME_FILES).unwrap().lines().next(), Some("cut"));
+        assert_eq!(data(true, KDE_CUT).as_deref(), Some("1"));
+        assert_eq!(
+            data(false, "UTF8_STRING").as_deref(),
+            Some("/tmp/a b\n/tmp/c")
+        );
+        assert_eq!(data(false, "image/png"), None);
+    }
+}

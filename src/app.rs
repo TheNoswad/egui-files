@@ -615,6 +615,23 @@ impl FilesApp {
     }
 
     /// Shows an archive's contents, in the tab already showing it if there is one.
+    /// Puts files on the system clipboard so other apps paste the files
+    /// themselves, falling back to their paths as text (all egui offers).
+    fn copy_files(&self, ctx: &egui::Context, paths: &[PathBuf], cut: bool) {
+        #[cfg(target_os = "linux")]
+        if let Some(wayland) = &self.wayland
+            && wayland.set_selection(paths, cut)
+        {
+            return;
+        }
+        #[cfg(windows)]
+        if crate::file_clipboard::set(paths, cut).is_ok() {
+            return;
+        }
+        let _ = cut;
+        ctx.copy_text(tab::join_paths(paths));
+    }
+
     fn open_archive(&mut self, path: PathBuf) {
         let existing = self
             .dock
@@ -1682,6 +1699,7 @@ impl eframe::App for FilesApp {
                 AppAction::OpenWith(request, None) => self.shared.open_with.ask(request),
                 AppAction::Edit(path) => self.open_editor(path),
                 AppAction::CloseTab(id) => self.request_close(id),
+                AppAction::CopyFiles { paths, cut } => self.copy_files(&ctx, &paths, cut),
             }
         }
         self.confirm_close_ui(&ctx);
