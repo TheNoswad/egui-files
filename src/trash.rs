@@ -16,7 +16,7 @@ use egui::{
     Align, Button, CentralPanel, Context, Id, Key, Layout, Modal, Modifiers, Panel, RichText,
     Sense, TextEdit, TextStyle, Ui,
 };
-use egui_extras::{Column, TableBuilder};
+use egui_extras::TableBuilder;
 use egui_phosphor::regular as icon;
 use serde::{Deserialize, Serialize};
 use trash::{TrashItem, TrashItemSize, os_limited};
@@ -25,8 +25,40 @@ use crate::{
     dnd::{self, DropTarget},
     fs,
     jobs::JobKind,
+    list_columns::{self, Spec},
     open_with,
     tab::{AppAction, Shared},
+};
+
+const LOCATION: usize = 1;
+const DELETED: usize = 2;
+const SIZE: usize = 3;
+
+static COLUMNS: list_columns::Table = list_columns::Table {
+    key: "trash",
+    columns: &[
+        Spec {
+            label: "Name",
+            width: 0.0,
+            min: 160.0,
+        },
+        Spec {
+            label: "Original location",
+            width: 280.0,
+            min: 80.0,
+        },
+        Spec {
+            label: "Deleted",
+            width: 140.0,
+            min: 80.0,
+        },
+        Spec {
+            label: "Size",
+            width: 90.0,
+            min: 60.0,
+        },
+    ],
+    hide_order: &[SIZE, DELETED, LOCATION],
 };
 
 struct Item {
@@ -457,34 +489,41 @@ impl TrashTab {
         let row_height = ui.text_style_height(&TextStyle::Body) + 6.0;
         let colors = crate::theme::colors(ui.ctx());
         colors.apply_to_list(ui.visuals_mut());
-        TableBuilder::new(ui)
+        let columns = list_columns::Layout::new(ui, &COLUMNS);
+        let table = TableBuilder::new(ui)
             .id_salt(("trash", self.id))
             .striped(true)
-            .resizable(true)
             .sense(Sense::click())
-            .cell_layout(Layout::left_to_right(Align::Center))
-            .column(Column::remainder().at_least(160.0).clip(true))
-            .column(Column::initial(280.0).at_least(80.0).clip(true))
-            .column(Column::initial(140.0).at_least(80.0))
-            .column(Column::initial(90.0).at_least(60.0))
+            .cell_layout(Layout::left_to_right(Align::Center));
+        let output = columns
+            .columns(table)
             .header(row_height, |mut header| {
-                for (key, label) in [
-                    (SortKey::Name, "Name"),
-                    (SortKey::Location, "Original location"),
-                    (SortKey::Deleted, "Deleted"),
-                    (SortKey::Size, "Size"),
-                ] {
-                    header.col(|ui| {
+                let keys = [
+                    SortKey::Name,
+                    SortKey::Location,
+                    SortKey::Deleted,
+                    SortKey::Size,
+                ];
+                for (column, key) in keys.into_iter().enumerate() {
+                    if !columns.shown(column) {
+                        continue;
+                    }
+                    let mut button = None;
+                    let (_, cell) = header.col(|ui| {
                         let arrow = match (self.sort.0 == key, self.sort.1) {
                             (false, _) => "",
                             (true, true) => icon::CARET_UP,
                             (true, false) => icon::CARET_DOWN,
                         };
+                        let label = COLUMNS.columns[column].label;
                         let text = RichText::new(format!("{label} {arrow}")).strong();
-                        if ui.add(Button::new(text).frame(false)).clicked() {
-                            actions.push(Action::SortBy(key));
-                        }
+                        button = Some(ui.add(Button::new(text).frame(false)));
                     });
+                    let response = button.map_or(cell.clone(), |button| cell.union(button));
+                    if response.clicked() {
+                        actions.push(Action::SortBy(key));
+                    }
+                    columns.context_menu(&response);
                 }
             })
             .body(|body| {
@@ -501,21 +540,27 @@ impl TrashTab {
                             .flatten();
                         crate::widgets::icon_label(ui, glyph, color, &item.name);
                     });
-                    row.col(|ui| {
-                        ui.label(
-                            item.original
-                                .parent()
-                                .unwrap_or(&item.original)
-                                .display()
-                                .to_string(),
-                        );
-                    });
-                    row.col(|ui| {
-                        ui.label(fs::format_time(item.deleted));
-                    });
-                    row.col(|ui| {
-                        ui.label(item.size_text());
-                    });
+                    if columns.shown(LOCATION) {
+                        row.col(|ui| {
+                            ui.label(
+                                item.original
+                                    .parent()
+                                    .unwrap_or(&item.original)
+                                    .display()
+                                    .to_string(),
+                            );
+                        });
+                    }
+                    if columns.shown(DELETED) {
+                        row.col(|ui| {
+                            ui.label(fs::format_time(item.deleted));
+                        });
+                    }
+                    if columns.shown(SIZE) {
+                        row.col(|ui| {
+                            ui.label(item.size_text());
+                        });
+                    }
 
                     let response = row.response();
                     if response.clicked() {
@@ -569,6 +614,7 @@ impl TrashTab {
                     });
                 });
             });
+        columns.resize_handles(ui, output.inner_rect.bottom());
     }
 
     fn confirm_modal(&mut self, ctx: &Context, shared: &mut Shared) {

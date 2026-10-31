@@ -9,6 +9,7 @@ mod editor;
 mod fs;
 mod images;
 mod jobs;
+mod list_columns;
 mod open_with;
 mod places;
 mod preview;

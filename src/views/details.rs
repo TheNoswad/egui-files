@@ -1,12 +1,44 @@
 //! Sortable table with name, size, modified and kind columns.
 
 use egui::{Align, Button, Layout, RichText, Sense, TextStyle, Ui};
-use egui_extras::{Column, TableBuilder};
+use egui_extras::TableBuilder;
 use egui_phosphor::regular as icon;
 
 use crate::{
     fs::{self, SortKey},
+    list_columns::{self, Spec},
     tab::{Action, BrowserTab},
+};
+
+const SIZE: usize = 1;
+const MODIFIED: usize = 2;
+const KIND: usize = 3;
+
+static COLUMNS: list_columns::Table = list_columns::Table {
+    key: "details",
+    columns: &[
+        Spec {
+            label: "Name",
+            width: 0.0,
+            min: 160.0,
+        },
+        Spec {
+            label: "Size",
+            width: 90.0,
+            min: 60.0,
+        },
+        Spec {
+            label: "Modified",
+            width: 140.0,
+            min: 80.0,
+        },
+        Spec {
+            label: "Kind",
+            width: 100.0,
+            min: 60.0,
+        },
+    ],
+    hide_order: &[KIND, MODIFIED, SIZE],
 };
 
 pub fn show(
@@ -19,39 +51,47 @@ pub fn show(
     let row_height = ui.text_style_height(&TextStyle::Body) + 6.0;
     let colors = crate::theme::colors(ui.ctx());
     colors.apply_to_list(ui.visuals_mut());
+    let columns = list_columns::Layout::new(ui, &COLUMNS);
     let mut table = TableBuilder::new(ui)
         .id_salt(("details", tab.id))
         .striped(true)
-        .resizable(true)
         .sense(Sense::click_and_drag())
-        .cell_layout(Layout::left_to_right(Align::Center))
-        .column(Column::remainder().at_least(160.0).clip(true))
-        .column(Column::initial(90.0).at_least(60.0))
-        .column(Column::initial(140.0).at_least(80.0))
-        .column(Column::initial(100.0).at_least(60.0).clip(true));
+        .cell_layout(Layout::left_to_right(Align::Center));
+    table = columns.columns(table);
     if let Some(row) = tab.scroll_to {
         table = table.scroll_to_row(row, None);
     }
 
-    table
+    let output = table
         .header(row_height, |mut header| {
-            for (key, label) in [
-                (SortKey::Name, "Name"),
-                (SortKey::Size, "Size"),
-                (SortKey::Modified, "Modified"),
-                (SortKey::Kind, "Kind"),
-            ] {
-                header.col(|ui| {
+            for (column, key) in [
+                SortKey::Name,
+                SortKey::Size,
+                SortKey::Modified,
+                SortKey::Kind,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                if !columns.shown(column) {
+                    continue;
+                }
+                let mut button = None;
+                let (_, cell) = header.col(|ui| {
                     let arrow = match (tab.sort.key == key, tab.sort.ascending) {
                         (false, _) => "",
                         (true, true) => icon::CARET_UP,
                         (true, false) => icon::CARET_DOWN,
                     };
+                    let label = COLUMNS.columns[column].label;
                     let text = RichText::new(format!("{label} {arrow}")).strong();
-                    if ui.add(Button::new(text).frame(false)).clicked() {
-                        actions.push(Action::SortBy(key));
-                    }
+                    button = Some(ui.add(Button::new(text).frame(false)));
                 });
+                let response = button.map_or(cell.clone(), |button| cell.union(button));
+                if response.clicked() {
+                    actions.push(Action::SortBy(key));
+                }
+                columns.context_menu(&response);
             }
         })
         .body(|body| {
@@ -75,18 +115,25 @@ pub fn show(
                     ui.label(icon);
                     ui.label(name);
                 });
-                row.col(|ui| {
-                    if !entry.is_dir {
-                        ui.label(fs::human_size(entry.size));
-                    }
-                });
-                row.col(|ui| {
-                    ui.label(fs::format_time(entry.modified));
-                });
-                row.col(|ui| {
-                    ui.label(entry.kind());
-                });
+                if columns.shown(SIZE) {
+                    row.col(|ui| {
+                        if !entry.is_dir {
+                            ui.label(fs::human_size(entry.size));
+                        }
+                    });
+                }
+                if columns.shown(MODIFIED) {
+                    row.col(|ui| {
+                        ui.label(fs::format_time(entry.modified));
+                    });
+                }
+                if columns.shown(KIND) {
+                    row.col(|ui| {
+                        ui.label(entry.kind());
+                    });
+                }
                 super::item_interaction(&row.response(), index, entry, tab, menu, actions);
             });
         });
+    columns.resize_handles(ui, output.inner_rect.bottom());
 }

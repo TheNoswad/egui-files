@@ -12,7 +12,7 @@ use egui::{
     Align, Button, CentralPanel, Context, Id, Key, Layout, Modifiers, Panel, RichText, Sense,
     TextEdit, TextStyle, Ui,
 };
-use egui_extras::{Column, TableBuilder};
+use egui_extras::TableBuilder;
 use egui_phosphor::regular as icon;
 use serde::{Deserialize, Serialize};
 
@@ -24,8 +24,40 @@ use crate::{
     dnd::{self, ArchiveDrag},
     fs::{self, display_name, human_size},
     jobs::JobKind,
+    list_columns::{self, Spec},
     open_with,
     tab::{AppAction, Shared},
+};
+
+const SIZE: usize = 1;
+const PACKED: usize = 2;
+const MODIFIED: usize = 3;
+
+static COLUMNS: list_columns::Table = list_columns::Table {
+    key: "archive",
+    columns: &[
+        Spec {
+            label: "Name",
+            width: 0.0,
+            min: 200.0,
+        },
+        Spec {
+            label: "Size",
+            width: 90.0,
+            min: 60.0,
+        },
+        Spec {
+            label: "Packed",
+            width: 90.0,
+            min: 60.0,
+        },
+        Spec {
+            label: "Modified",
+            width: 140.0,
+            min: 80.0,
+        },
+    ],
+    hide_order: &[PACKED, MODIFIED, SIZE],
 };
 
 const INDENT: f32 = 14.0;
@@ -543,25 +575,25 @@ impl ArchiveTab {
         };
         let row_height = ui.text_style_height(&TextStyle::Body) + 6.0;
         let password = shared.archives.password(&self.archive);
+        let columns = list_columns::Layout::new(ui, &COLUMNS);
         let mut table = TableBuilder::new(ui)
             .id_salt(("archive", self.id))
             .striped(true)
-            .resizable(true)
             .sense(Sense::click_and_drag())
-            .cell_layout(Layout::left_to_right(Align::Center))
-            .column(Column::remainder().at_least(200.0).clip(true))
-            .column(Column::initial(90.0).at_least(60.0))
-            .column(Column::initial(90.0).at_least(60.0))
-            .column(Column::initial(140.0).at_least(80.0));
+            .cell_layout(Layout::left_to_right(Align::Center));
+        table = columns.columns(table);
         if let Some(index) = self.scroll_to {
             table = table.scroll_to_row(index, None);
         }
-        table
+        let output = table
             .header(row_height, |mut header| {
-                for label in ["Name", "Size", "Packed", "Modified"] {
-                    header.col(|ui| {
-                        ui.strong(label);
-                    });
+                for (column, spec) in COLUMNS.columns.iter().enumerate() {
+                    if columns.shown(column) {
+                        let (_, cell) = header.col(|ui| {
+                            ui.strong(spec.label);
+                        });
+                        columns.context_menu(&cell);
+                    }
                 }
             })
             .body(|body| {
@@ -608,15 +640,21 @@ impl ArchiveTab {
                             ui.weak(icon::LOCK).on_hover_text("Encrypted");
                         }
                     });
-                    row.col(|ui| {
-                        ui.label(human_size(n.size));
-                    });
-                    row.col(|ui| {
-                        ui.label(n.packed.map(human_size).unwrap_or_default());
-                    });
-                    row.col(|ui| {
-                        ui.label(fs::format_time(n.modified));
-                    });
+                    if columns.shown(SIZE) {
+                        row.col(|ui| {
+                            ui.label(human_size(n.size));
+                        });
+                    }
+                    if columns.shown(PACKED) {
+                        row.col(|ui| {
+                            ui.label(n.packed.map(human_size).unwrap_or_default());
+                        });
+                    }
+                    if columns.shown(MODIFIED) {
+                        row.col(|ui| {
+                            ui.label(fs::format_time(n.modified));
+                        });
+                    }
 
                     let response = row.response();
                     // Dragging a selected row drags the whole selection.
@@ -701,6 +739,7 @@ impl ArchiveTab {
                     });
                 });
             });
+        columns.resize_handles(ui, output.inner_rect.bottom());
     }
 
     fn dialog_ui(&mut self, ctx: &Context, shared: &mut Shared) {
