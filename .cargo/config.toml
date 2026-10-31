@@ -1,0 +1,5 @@
+# Cross-compiling for Windows with MinGW on Linux: unrar's C++ source includes
+# Windows headers with MSVC capitalization (PowrProf.h, Wbemidl.h), but MinGW's
+# are lowercase. The shims just forward to them; nothing else includes them.
+[env]
+CPLUS_INCLUDE_PATH = { value = "build-support/mingw-include", relative = true }

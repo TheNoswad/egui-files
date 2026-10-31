@@ -74,3 +74,8 @@ windows = { version = "0.62", features = [
     "Win32_UI_Shell_Common",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+# unrar_sys 0.5.8's build script checks the host OS instead of the target, which
+# breaks cross-compiling to Windows; patches/unrar_sys fixes only build.rs.
+[patch.crates-io]
+unrar_sys = { path = "patches/unrar_sys" }
