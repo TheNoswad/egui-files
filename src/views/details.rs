@@ -124,7 +124,7 @@ pub fn show(
                 }
                 if columns.shown(MODIFIED) {
                     row.col(|ui| {
-                        ui.label(fs::format_time(entry.modified));
+                        crate::dates::label(ui, entry.modified, false);
                     });
                 }
                 if columns.shown(KIND) {

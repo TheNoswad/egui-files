@@ -236,7 +236,7 @@ fn details(
     if let Some(duration) = duration {
         ui.weak(video::format_time(duration));
     }
-    ui.weak(fs::format_time(entry.modified));
+    crate::dates::label(ui, entry.modified, true);
     ui.add_space(8.0);
     ui.horizontal(|ui| {
         let buttons = if editable { 2.0 } else { 1.0 };

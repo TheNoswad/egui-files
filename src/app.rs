@@ -914,6 +914,7 @@ impl FilesApp {
             ui.menu_button("View", |ui| {
                 ui.checkbox(&mut self.shared.show_hidden, "Show hidden files (Ctrl+H)");
                 ui.checkbox(&mut self.shared.show_thumbnails, "Show thumbnails");
+                crate::dates::checkbox(ui);
                 ui.add(
                     egui::Slider::new(&mut self.shared.icon_size, 32.0..=192.0).text("Icon size"),
                 );

@@ -3,6 +3,7 @@
 mod about;
 mod app;
 mod archive;
+mod dates;
 mod dnd;
 mod dock_tab;
 mod editor;

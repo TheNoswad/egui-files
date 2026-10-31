@@ -652,7 +652,7 @@ impl ArchiveTab {
                     }
                     if columns.shown(MODIFIED) {
                         row.col(|ui| {
-                            ui.label(fs::format_time(n.modified));
+                            crate::dates::label(ui, n.modified, false);
                         });
                     }
 

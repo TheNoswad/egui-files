@@ -118,6 +118,7 @@ impl Layout {
                 }
             }
             ui.separator();
+            crate::dates::checkbox(ui);
             if ui.button("Reset columns").clicked() {
                 prefs = Prefs::new(self.table);
                 ui.close();

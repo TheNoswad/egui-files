@@ -220,12 +220,8 @@ pub fn human_size(bytes: u64) -> String {
 }
 
 pub fn format_time(time: Option<SystemTime>) -> String {
-    time.map(|t| {
-        chrono::DateTime::<chrono::Local>::from(t)
-            .format("%Y-%m-%d %H:%M")
-            .to_string()
-    })
-    .unwrap_or_default()
+    time.map(|t| crate::dates::format_exact(t.into(), crate::dates::clock_format()))
+        .unwrap_or_default()
 }
 
 /// Returns the display name for a path, falling back to the full path for roots.

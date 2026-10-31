@@ -553,7 +553,7 @@ impl TrashTab {
                     }
                     if columns.shown(DELETED) {
                         row.col(|ui| {
-                            ui.label(fs::format_time(item.deleted));
+                            crate::dates::label(ui, item.deleted, false);
                         });
                     }
                     if columns.shown(SIZE) {
