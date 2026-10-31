@@ -6,6 +6,7 @@ use egui::{Button, RichText, ScrollArea, Ui};
 use egui_phosphor::regular as icon;
 
 use crate::{
+    devices::Drives,
     dnd::{self, DropTarget},
     jobs::Jobs,
     places::{self, Place},
@@ -19,22 +20,24 @@ pub struct SidebarResponse {
     /// A folder to show, and whether in a new tab.
     pub target: Option<(PathBuf, bool)>,
     pub open_trash: bool,
+    /// A drive to eject, and its label.
+    pub eject: Option<(PathBuf, String)>,
 }
 
 pub struct Sidebar {
     pub bookmarks: Vec<PathBuf>,
     pub tree: FolderTree,
     pub places: Vec<Place>,
-    pub drives: Vec<Place>,
+    pub drives: Drives,
 }
 
 impl Sidebar {
-    pub fn new(bookmarks: Vec<PathBuf>, tree: FolderTree) -> Self {
+    pub fn new(ctx: &egui::Context, bookmarks: Vec<PathBuf>, tree: FolderTree) -> Self {
         Self {
             bookmarks,
             tree,
             places: places::standard_places(),
-            drives: places::drives(),
+            drives: Drives::new(ctx),
         }
     }
 
@@ -46,7 +49,8 @@ impl Sidebar {
         jobs: &mut Jobs,
         response: &mut SidebarResponse,
     ) {
-        let roots: Vec<&Place> = self.places.iter().take(1).chain(&self.drives).collect();
+        let drives = self.drives.shown();
+        let roots: Vec<&Place> = self.places.iter().take(1).chain(&drives).collect();
         match self.tree.ui(ui, &roots, current, show_hidden) {
             Some(TreeAction::Navigate(path)) => response.target = Some((path, false)),
             Some(TreeAction::OpenInNewTab(path)) => response.target = Some((path, true)),
@@ -69,19 +73,37 @@ impl Sidebar {
         let mut trash_dropped = None;
         let target = &mut response.target;
 
-        let mut place_button = |ui: &mut Ui, glyph: &str, label: &str, path: &PathBuf| {
+        // Places open in a new tab on a middle click, from the right-click
+        // menu, or dragged onto a tab bar. `more` adds to that menu.
+        let mut place_button = |ui: &mut Ui,
+                                glyph: &str,
+                                label: &str,
+                                path: &PathBuf,
+                                more: &mut dyn FnMut(&mut Ui)| {
             let selected = current == Some(path);
             let response = ui
                 .add(Button::selectable(selected, format!("{glyph}  {label}")))
+                .interact(egui::Sense::click_and_drag())
                 .on_hover_text(path.display().to_string());
             if response.clicked() {
                 *target = Some((path.clone(), false));
             } else if response.middle_clicked() {
                 *target = Some((path.clone(), true));
             }
+            dnd::place_source(&response, path);
             if let Some(job) = dnd::target(&response, DropTarget::Folder(path.clone())) {
                 dropped = Some(job);
             }
+            response.context_menu(|ui| {
+                if ui
+                    .button(format!("{}  Open in new tab", icon::PLUS))
+                    .clicked()
+                {
+                    *target = Some((path.clone(), true));
+                    ui.close();
+                }
+                more(ui);
+            });
             response
         };
 
@@ -89,7 +111,7 @@ impl Sidebar {
             ui.with_layout(egui::Layout::top_down_justified(egui::Align::Min), |ui| {
                 ui.add_space(4.0);
                 for place in &self.places {
-                    place_button(ui, place.icon, &place.label, &place.path);
+                    place_button(ui, place.icon, &place.label, &place.path, &mut |_| {});
                 }
                 let count = trash_count
                     .get()
@@ -107,8 +129,8 @@ impl Sidebar {
                 ui.label(RichText::new("Bookmarks").small().weak());
                 for (i, path) in self.bookmarks.iter().enumerate() {
                     let label = crate::fs::display_name(path);
-                    place_button(ui, icon::BOOKMARK_SIMPLE, &label, path).context_menu(|ui| {
-                        if ui.button("Remove bookmark").clicked() {
+                    place_button(ui, icon::BOOKMARK_SIMPLE, &label, path, &mut |ui| {
+                        if ui.button(format!("{}  Remove bookmark", icon::X)).clicked() {
                             remove_bookmark = Some(i);
                             ui.close();
                         }
@@ -125,9 +147,35 @@ impl Sidebar {
 
                 ui.add_space(8.0);
                 ui.label(RichText::new("Drives").small().weak());
-                for drive in &self.drives {
-                    place_button(ui, drive.icon, &drive.label, &drive.path);
+                let mut eject = None;
+                for drive in self.drives.shown() {
+                    let mut menu = |ui: &mut Ui| {
+                        if drive.ejectable
+                            && ui
+                                .button(format!("{}  Eject", icon::EJECT_SIMPLE))
+                                .clicked()
+                        {
+                            eject = Some((drive.path.clone(), drive.label.clone()));
+                            ui.close();
+                        }
+                    };
+                    let row = place_button(ui, drive.icon, &drive.label, &drive.path, &mut menu);
+                    if drive.ejectable {
+                        let size = row.rect.height();
+                        let rect = egui::Rect::from_min_size(
+                            egui::pos2(row.rect.right() - size, row.rect.top()),
+                            egui::vec2(size, size),
+                        );
+                        if ui
+                            .put(rect, Button::new(icon::EJECT_SIMPLE).frame(false))
+                            .on_hover_text("Eject")
+                            .clicked()
+                        {
+                            eject = Some((drive.path.clone(), drive.label.clone()));
+                        }
+                    }
                 }
+                response.eject = eject;
             });
         });
 

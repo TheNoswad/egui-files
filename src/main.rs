@@ -4,6 +4,7 @@ mod about;
 mod app;
 mod archive;
 mod dates;
+mod devices;
 mod dnd;
 mod dock_tab;
 mod editor;

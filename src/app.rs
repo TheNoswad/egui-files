@@ -1,6 +1,6 @@
 //! Top-level application: menu bar and the dock of tabs and panes.
 
-use std::path::PathBuf;
+use std::{collections::HashMap, path::PathBuf};
 
 use egui::{
     Button, CentralPanel, Id, Key, Modifiers, Panel, Pos2, Rect, RichText, Ui, Vec2, WidgetText,
@@ -270,7 +270,7 @@ fn add_button_hints(ui: &mut Ui, dock: &DockState<DockTab>) {
             let rect = add_button_rect(leaf.rect, &style);
             // Hover only, so the button underneath still gets the clicks.
             ui.interact(rect, Id::new(("add-tab-hint", path)), egui::Sense::hover())
-                .on_hover_text("New file browser tab\nRight-click for panes and more");
+                .on_hover_text("New file browser tab\nRight-click the tab bar for panes and more");
         }
     }
 }
@@ -299,6 +299,8 @@ pub struct FilesApp {
     /// last while a pane has focus.
     active_browser: Option<u64>,
     watcher: DirWatcher,
+    /// The media last seen in each drive, to notice cards being swapped.
+    drive_media: HashMap<PathBuf, Option<u32>>,
     trash_count: TrashCount,
     /// Showing the "operations still running" or "unsaved changes" dialog.
     confirm_quit: bool,
@@ -424,10 +426,11 @@ impl FilesApp {
                 preview_shown: false,
                 app_actions: Vec::new(),
             },
-            sidebar: Sidebar::new(bookmarks, tree),
+            sidebar: Sidebar::new(&cc.egui_ctx, bookmarks, tree),
             next_tab_id,
             active_browser: None,
             watcher: DirWatcher::new(&cc.egui_ctx),
+            drive_media: HashMap::new(),
             trash_count: TrashCount::new(&cc.egui_ctx),
             confirm_quit: false,
             confirm_close: Vec::new(),
@@ -528,6 +531,53 @@ impl FilesApp {
             self.dock.set_focused_node_and_surface(path.node_path());
         }
         self.dock.push_to_focused_leaf(tab);
+    }
+
+    /// Notices memory cards and discs being swapped: folders on a drive whose
+    /// media changed are watched afresh and shown again. Returns the drives
+    /// without media, whose folders mustn't be watched: the watch would keep
+    /// the old card in use and the next one from mounting.
+    fn follow_media(&mut self) -> Vec<PathBuf> {
+        let drives = self.sidebar.drives.get();
+        let mut changed = false;
+        for drive in &drives {
+            if self
+                .drive_media
+                .get(&drive.path)
+                .is_some_and(|&media| media != drive.media)
+            {
+                self.watcher.forget(&drive.path);
+                changed = true;
+            }
+        }
+        if changed {
+            self.sidebar.tree.invalidate();
+            for (_, tab) in self.dock.iter_all_tabs_mut() {
+                tab.mark_stale();
+            }
+        }
+        self.drive_media = drives.iter().map(|d| (d.path.clone(), d.media)).collect();
+        drives
+            .into_iter()
+            .filter(|d| d.media.is_none())
+            .map(|d| d.path)
+            .collect()
+    }
+
+    /// Moves tabs showing the drive to the home folder, since an open folder
+    /// keeps a drive busy, then ejects it.
+    fn eject(&mut self, drive: PathBuf, label: String) {
+        let home = places::home_dir();
+        for (_, tab) in self.dock.iter_all_tabs_mut() {
+            if let Some(browser) = tab.browser_mut()
+                && browser.path.starts_with(&drive)
+            {
+                browser.navigate(home.clone());
+            }
+        }
+        self.shared
+            .jobs
+            .start(crate::jobs::JobKind::Eject { drive, label });
     }
 
     fn open_trash(&mut self) {
@@ -786,7 +836,48 @@ impl FilesApp {
         }
     }
 
-    /// Shows the add button's menu, and opens it on a right click of one.
+    /// The empty part of each tab bar: right-clicking it opens the add
+    /// button's menu, and folders dropped on it open in new tabs there.
+    fn tab_bars_ui(&mut self, ctx: &egui::Context, tab_buttons: &[Rect]) {
+        let style = Style::from_egui(&ctx.global_style());
+        let bars: Vec<(NodePath, Rect)> = self
+            .dock
+            .iter_leaves()
+            .map(|(path, leaf)| {
+                let bar = Rect::from_min_size(
+                    leaf.rect.min,
+                    egui::vec2(leaf.rect.width(), style.tab_bar.height),
+                );
+                (path, bar)
+            })
+            .collect();
+        let Some(pos) = ctx.pointer_latest_pos() else {
+            return;
+        };
+        let Some(&(leaf, bar)) = bars.iter().find(|(_, bar)| bar.contains(pos)) else {
+            return;
+        };
+        if tab_buttons.iter().any(|rect| rect.contains(pos)) {
+            return;
+        }
+
+        if ctx.input(|i| i.pointer.button_clicked(egui::PointerButton::Secondary)) {
+            self.add_menu = Some(AddMenu { leaf, pos });
+        }
+        let folders = dnd::new_tab_target(ctx, bar).unwrap_or_default();
+        let mut last = None;
+        for folder in folders {
+            let tab = self.make_tab(folder);
+            last = Some(tab.id());
+            self.dock.set_focused_node_and_surface(leaf);
+            self.dock.push_to_focused_leaf(tab);
+        }
+        if let Some(id) = last {
+            self.focus_tab(id);
+        }
+    }
+
+    /// Shows the add button's menu.
     fn add_menu_ui(&mut self, ctx: &egui::Context) {
         if let Some(menu) = self.add_menu {
             let mut choice = None;
@@ -836,24 +927,6 @@ impl FilesApp {
             }
             if choice.is_some() || clicked_outside || ctx.input(|i| i.key_pressed(Key::Escape)) {
                 self.add_menu = None;
-            }
-        }
-
-        let right_click = ctx.input(|i| {
-            i.pointer
-                .button_clicked(egui::PointerButton::Secondary)
-                .then(|| i.pointer.interact_pos())
-                .flatten()
-        });
-        if let Some(pos) = right_click {
-            let style = Style::from_egui(&ctx.global_style());
-            let leaf = self
-                .dock
-                .iter_leaves()
-                .find(|(_, leaf)| add_button_rect(leaf.rect, &style).contains(pos))
-                .map(|(path, _)| path);
-            if let Some(leaf) = leaf {
-                self.add_menu = Some(AddMenu { leaf, pos });
             }
         }
     }
@@ -1015,6 +1088,9 @@ struct Viewer<'a> {
     shared: &'a mut Shared,
     panes: Panes<'a>,
     add_requests: &'a mut Vec<NodePath>,
+    /// Where the tab buttons were drawn, to tell them from the empty part
+    /// of their tab bar.
+    tab_buttons: &'a mut Vec<Rect>,
     /// The last browser tab can't be closed, so the panes always have one
     /// to follow and never spread into the space it leaves.
     browser_count: usize,
@@ -1086,6 +1162,7 @@ impl TabViewer for Viewer<'_> {
 
     /// Tab titles are drop targets for their folder (or the trash).
     fn on_tab_button(&mut self, tab: &mut DockTab, response: &egui::Response) {
+        self.tab_buttons.push(response.rect);
         let target = match tab {
             DockTab::Browser(browser) => Some(DropTarget::Folder(browser.path.clone())),
             DockTab::Trash(_) => Some(DropTarget::Trash),
@@ -1146,6 +1223,7 @@ impl FilesApp {
             && !payload.external
             // Archive entries only exist once extracted.
             && payload.archive.is_none()
+            && !payload.link_only
             && ctx.input(|i| i.pointer.primary_down())
             && let Some(pos) = ctx.input(|i| i.pointer.latest_pos())
             && !ctx.content_rect().contains(pos)
@@ -1429,6 +1507,7 @@ impl eframe::App for FilesApp {
             .active_browser_mut()
             .and_then(|b| b.preview_entry().cloned());
         let mut add_requests = Vec::new();
+        let mut tab_buttons = Vec::new();
         let browser_count = self.browser_count();
         let mut viewer = Viewer {
             shared: &mut self.shared,
@@ -1444,6 +1523,7 @@ impl eframe::App for FilesApp {
                 terminal_response: PanelResponse::default(),
             },
             add_requests: &mut add_requests,
+            tab_buttons: &mut tab_buttons,
             browser_count,
         };
         CentralPanel::default()
@@ -1478,6 +1558,9 @@ impl eframe::App for FilesApp {
         if sidebar_response.open_trash {
             self.open_trash();
         }
+        if let Some((drive, label)) = sidebar_response.eject {
+            self.eject(drive, label);
+        }
         let mut app_actions = Vec::new();
         for action in preview_actions {
             match action {
@@ -1496,6 +1579,7 @@ impl eframe::App for FilesApp {
             self.add_to_leaf(leaf, NewTab::Browser);
         }
         self.add_menu_ui(&ctx);
+        self.tab_bars_ui(&ctx, &tab_buttons);
         for action in std::mem::take(&mut self.shared.app_actions) {
             match action {
                 AppAction::NewTab(path) => self.open_tab(path),
@@ -1514,10 +1598,12 @@ impl eframe::App for FilesApp {
         if let Some((request, target)) = self.shared.open_with.ui(&ctx) {
             self.open_with(&ctx, request, target);
         }
+        let empty_drives = self.follow_media();
         let shown = self
             .dock
             .iter_all_tabs()
             .flat_map(|(_, tab)| tab.shown_dirs())
+            .filter(|dir| !empty_drives.iter().any(|root| dir.starts_with(root)))
             // Always watched, to keep the sidebar's trash count current.
             .chain(trash::watched_dir())
             .collect();

@@ -175,6 +175,12 @@ pub enum SortKey {
 pub struct Sort {
     pub key: SortKey,
     pub ascending: bool,
+    #[serde(default = "folders_first")]
+    pub folders_first: bool,
+}
+
+fn folders_first() -> bool {
+    true
 }
 
 impl Default for Sort {
@@ -182,17 +188,41 @@ impl Default for Sort {
         Self {
             key: SortKey::Name,
             ascending: true,
+            folders_first: true,
         }
     }
 }
 
-/// Sorts entries with folders always first.
+impl SortKey {
+    pub const ALL: [(Self, &'static str); 4] = [
+        (Self::Name, "Name"),
+        (Self::Size, "Size"),
+        (Self::Modified, "Modified"),
+        (Self::Kind, "Kind"),
+    ];
+
+    /// What ascending and descending mean for this key.
+    pub fn directions(self) -> [&'static str; 2] {
+        match self {
+            Self::Name | Self::Kind => ["A to Z", "Z to A"],
+            Self::Size => ["Smallest first", "Largest first"],
+            Self::Modified => ["Oldest first", "Newest first"],
+        }
+    }
+}
+
+/// Sorts entries, folders first unless the sort says otherwise.
 pub fn sort_entries(entries: &mut [Entry], sort: Sort) {
     fn by_name(a: &Entry, b: &Entry) -> Ordering {
         a.name.to_lowercase().cmp(&b.name.to_lowercase())
     }
     entries.sort_by(|a, b| {
-        b.is_dir.cmp(&a.is_dir).then_with(|| {
+        let folders = if sort.folders_first {
+            b.is_dir.cmp(&a.is_dir)
+        } else {
+            Ordering::Equal
+        };
+        folders.then_with(|| {
             let ord = match sort.key {
                 SortKey::Name => by_name(a, b),
                 SortKey::Size => a.size.cmp(&b.size).then_with(|| by_name(a, b)),

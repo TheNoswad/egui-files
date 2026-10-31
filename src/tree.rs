@@ -55,9 +55,19 @@ pub struct FolderTree {
     synced_to: Option<PathBuf>,
     #[serde(skip)]
     scroll_to_current: bool,
+    /// Picking a folder in a dialog: no tabs to open, so no right-click menu.
+    #[serde(skip)]
+    pub picker: bool,
 }
 
 impl FolderTree {
+    pub fn picker() -> Self {
+        Self {
+            picker: true,
+            ..Self::default()
+        }
+    }
+
     pub fn invalidate(&mut self) {
         self.children.clear();
     }
@@ -198,6 +208,7 @@ impl FolderTree {
         }
         let rows = self.flatten(roots, show_hidden, current);
         let row_height = widgets::row_height(ui);
+        let picker = self.picker;
         let mut action = None;
         let mut toggle = None;
 
@@ -244,6 +255,17 @@ impl FolderTree {
                     } else if response.middle_clicked() {
                         action = Some(TreeAction::OpenInNewTab(row.path.clone()));
                     }
+                    if !picker {
+                        response.context_menu(|ui| {
+                            if ui
+                                .button(format!("{}  Open in new tab", icon::PLUS))
+                                .clicked()
+                            {
+                                action = Some(TreeAction::OpenInNewTab(row.path.clone()));
+                                ui.close();
+                            }
+                        });
+                    }
                 }
             });
 
@@ -274,6 +296,8 @@ mod tests {
             label: "Root".to_owned(),
             icon: icon::HARD_DRIVE,
             path: root.clone(),
+            ejectable: false,
+            media: Some(0),
         };
         let current = root.join("x/y/z");
 

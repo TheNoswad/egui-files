@@ -64,13 +64,19 @@ freedesktop-icons = "0.4"
 resvg = "0.49"
 zbus = "6"
 
-# "Open with": the shell's file associations and app icons.
+# "Open with" (file associations, app icons), drives and ejecting them.
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
+    "Win32_Devices_DeviceAndDriverInstallation",
     "Win32_Foundation",
     "Win32_Globalization",
     "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
     "Win32_System_Com",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+    "Win32_System_WindowsProgramming",
     "Win32_UI_Shell",
     "Win32_UI_Shell_Common",
     "Win32_UI_WindowsAndMessaging",

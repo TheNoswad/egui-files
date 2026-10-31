@@ -2,7 +2,7 @@
 
 use std::{
     collections::HashSet,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::mpsc::{self, Receiver},
     time::{Duration, Instant},
 };
@@ -60,6 +60,22 @@ impl DirWatcher {
             let _ = watcher.watch(dir, RecursiveMode::NonRecursive);
         }
         self.watched = dirs;
+    }
+
+    /// Stops watching folders under `root`; the next `set_watched` watches
+    /// them afresh. Open watches keep a drive's old media in use, which on
+    /// Windows stops a newly inserted memory card from mounting.
+    pub fn forget(&mut self, root: &Path) {
+        let Some(watcher) = &mut self.watcher else {
+            return;
+        };
+        self.watched.retain(|dir| {
+            let under = dir.starts_with(root);
+            if under {
+                let _ = watcher.unwatch(dir);
+            }
+            !under
+        });
     }
 
     /// Folders whose contents changed since the last call, once events have settled.
@@ -133,5 +149,24 @@ mod tests {
 
         watcher.set_watched(HashSet::new());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn forgetting_a_drive_drops_its_watches() {
+        let root = std::env::temp_dir().join(format!("egui-files-forget-{}", std::process::id()));
+        let (a, b) = (root.join("a"), root.join("b"));
+        let other = std::env::temp_dir();
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let mut watcher = DirWatcher::new(&egui::Context::default());
+        let dirs = HashSet::from([a.clone(), b.clone(), other.clone()]);
+        watcher.set_watched(dirs.clone());
+        watcher.forget(&root);
+        assert_eq!(watcher.watched, HashSet::from([other]));
+        // Watched again once the drive is back.
+        watcher.set_watched(dirs.clone());
+        assert_eq!(watcher.watched, dirs);
+        watcher.set_watched(HashSet::new());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

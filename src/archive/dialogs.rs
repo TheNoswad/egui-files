@@ -33,7 +33,7 @@ impl FolderPicker {
         let mut roots: Vec<Place> = places::standard_places().into_iter().take(1).collect();
         roots.extend(places::drives());
         Self {
-            tree: FolderTree::default(),
+            tree: FolderTree::picker(),
             roots,
             text: current.display().to_string(),
             current,

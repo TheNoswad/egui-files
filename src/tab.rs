@@ -95,6 +95,7 @@ pub enum Action {
     Up,
     Refresh,
     SortBy(SortKey),
+    SetSort(Sort),
     SetView(ViewMode),
     EditPath,
     FocusFilter,
@@ -606,8 +607,9 @@ impl BrowserTab {
         let gap = ui.spacing().item_spacing.x;
         let available = ui.available_width();
         let nav_width = 4.0 * button + separator;
+        // Preview and sort, the view modes, and maybe the filter toggle.
         let buttons_width = |views: f32, filter: bool| {
-            (1.0 + views + f32::from(u8::from(filter))) * button + separator
+            (2.0 + views + f32::from(u8::from(filter))) * button + separator
         };
         let spare = available - nav_width - buttons_width(3.0, false);
         let one_row = spare >= FILTER_WIDTH + gap + MIN_PATH_WIDTH;
@@ -733,6 +735,16 @@ impl BrowserTab {
             .response
             .on_hover_text("View");
         }
+        let glyph = if self.sort.ascending {
+            icon::SORT_ASCENDING
+        } else {
+            icon::SORT_DESCENDING
+        };
+        ui.menu_button(RichText::new(glyph).size(16.0), |ui| {
+            self.sort_menu(ui, actions)
+        })
+        .response
+        .on_hover_text("Sort");
         if filter_toggle {
             let active = self.filter_open || !self.filter.is_empty();
             let button =
@@ -862,25 +874,7 @@ impl BrowserTab {
             self.view_menu(ui, actions)
         });
         ui.menu_button(format!("{} Sort by", icon::SORT_ASCENDING), |ui| {
-            for (key, label) in [
-                (SortKey::Name, "Name"),
-                (SortKey::Size, "Size"),
-                (SortKey::Modified, "Modified"),
-                (SortKey::Kind, "Kind"),
-            ] {
-                let arrow = match (self.sort.key == key, self.sort.ascending) {
-                    (false, _) => "",
-                    (true, true) => icon::CARET_UP,
-                    (true, false) => icon::CARET_DOWN,
-                };
-                if ui
-                    .radio(self.sort.key == key, format!("{label} {arrow}"))
-                    .clicked()
-                {
-                    actions.push(Action::SortBy(key));
-                    ui.close();
-                }
-            }
+            self.sort_menu(ui, actions)
         });
         let mut show_hidden = shared.show_hidden;
         if ui.checkbox(&mut show_hidden, "Show hidden files").clicked() {
@@ -891,6 +885,35 @@ impl BrowserTab {
         if ui.checkbox(&mut show_preview, "Preview pane").clicked() {
             actions.push(Action::TogglePreview);
             ui.close();
+        }
+    }
+
+    /// Sort key, direction and folders first, for the toolbar's sort button
+    /// and the folder's right-click menu.
+    fn sort_menu(&self, ui: &mut Ui, actions: &mut Vec<Action>) {
+        let sort = self.sort;
+        for (key, label) in SortKey::ALL {
+            if ui.radio(sort.key == key, label).clicked() {
+                actions.push(Action::SetSort(Sort { key, ..sort }));
+            }
+        }
+        ui.separator();
+        let [ascending, descending] = sort.key.directions();
+        for (up, label) in [(true, ascending), (false, descending)] {
+            if ui.radio(sort.ascending == up, label).clicked() {
+                actions.push(Action::SetSort(Sort {
+                    ascending: up,
+                    ..sort
+                }));
+            }
+        }
+        ui.separator();
+        let mut folders_first = sort.folders_first;
+        if ui.checkbox(&mut folders_first, "Folders first").clicked() {
+            actions.push(Action::SetSort(Sort {
+                folders_first,
+                ..sort
+            }));
         }
     }
 
@@ -1218,11 +1241,13 @@ impl BrowserTab {
                 if self.sort.key == key {
                     self.sort.ascending = !self.sort.ascending;
                 } else {
-                    self.sort = Sort {
-                        key,
-                        ascending: true,
-                    };
+                    self.sort.key = key;
+                    self.sort.ascending = true;
                 }
+                self.apply(Action::SetSort(self.sort), ctx, shared);
+            }
+            Action::SetSort(sort) => {
+                self.sort = sort;
                 if let Some(entries) = &mut self.entries {
                     fs::sort_entries(entries, self.sort);
                 }

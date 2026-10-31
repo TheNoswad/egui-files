@@ -314,6 +314,11 @@ pub struct Themes {
     pub prefs: Prefs,
     /// The prefs and generation last installed into egui.
     installed: Option<(Prefs, u64)>,
+    /// A theme hovered in a theme menu, shown in place of the current mode's
+    /// theme until the pointer leaves it.
+    preview: Option<String>,
+    /// What the menus found hovered this frame; becomes `preview` next frame.
+    hovered: Option<String>,
     generation: u64,
     fonts: fonts::SystemFonts,
     /// Font choices for the dark and light themes.
@@ -337,6 +342,8 @@ impl Themes {
             changed: Arc::default(),
             prefs,
             installed: None,
+            preview: None,
+            hovered: None,
             generation: 0,
             fonts: fonts::SystemFonts::default(),
             theme_fonts: Default::default(),
@@ -501,14 +508,21 @@ impl Themes {
         if self.watcher.is_none() && self.dir.as_ref().is_some_and(|d| d.is_dir()) {
             self.watch(ctx);
         }
-        let current = (
-            self.prefs.clone(),
-            self.generation + self.editor.generation(),
-        );
+        self.preview = self.hovered.take();
+        if self.preview.is_some() {
+            // Another frame to see if it's still hovered, since a menu
+            // closing doesn't say so.
+            ctx.request_repaint();
+        }
+        let mut prefs = self.prefs.clone();
+        if let Some(name) = &self.preview {
+            *prefs.name_mut(ctx.theme()) = name.clone();
+        }
+        let current = (prefs, self.generation + self.editor.generation());
         if self.installed.as_ref() != Some(&current) {
             let mut colors = Vec::new();
             for theme in [Theme::Dark, Theme::Light] {
-                let name = self.prefs.name(theme).to_owned();
+                let name = current.0.name(theme).to_owned();
                 let resolved = self.resolve(&name, self.editor.edited(&name));
                 ctx.set_style_of(theme, resolved.style);
                 colors.push(Arc::new(resolved.app));
@@ -531,26 +545,40 @@ impl Themes {
             .iter()
             .map(|e| (e.name.clone(), e.dark(self) == dark))
             .collect();
+        let mut hovered = None;
         egui::ScrollArea::vertical()
             .max_height(420.0)
             .show(ui, |ui| {
                 let current = self.prefs.name_mut(theme);
-                for (name, _) in names.iter().filter(|(_, matches)| *matches) {
-                    if ui.radio(current == name, name).clicked() {
+                let mut item = |ui: &mut egui::Ui, name: &String| {
+                    let response = ui.radio(current == name, name);
+                    if response.clicked() {
                         *current = name.clone();
                     }
+                    if response.hovered() {
+                        hovered = Some(name.clone());
+                    }
+                };
+                for (name, _) in names.iter().filter(|(_, matches)| *matches) {
+                    item(ui, name);
                 }
                 let others: Vec<_> = names.iter().filter(|(_, matches)| !matches).collect();
                 if !others.is_empty() {
                     ui.menu_button(if dark { "Light themes" } else { "Dark themes" }, |ui| {
                         for (name, _) in others {
-                            if ui.radio(current == name, name).clicked() {
-                                *current = name.clone();
-                            }
+                            item(ui, name);
                         }
                     });
                 }
             });
+        // Shown from the next frame; a light theme hovered while dark mode
+        // shows is previewed in dark mode's place.
+        if let Some(name) = hovered {
+            if self.preview.as_ref() != Some(&name) {
+                ui.ctx().request_repaint();
+            }
+            self.hovered = Some(name);
+        }
     }
 
     /// Writes a theme file and reads the themes again.
@@ -912,5 +940,60 @@ mod tests {
         themes.save(&path, &file).unwrap();
         assert_eq!(themes.get("My Theme!").unwrap().file, file);
         assert_eq!(themes.unique_name("My Theme!"), "My Theme! 2");
+    }
+
+    #[test]
+    fn hovering_a_theme_previews_it_until_the_pointer_leaves() {
+        let mut themes = themes_in(&scratch("preview"));
+        let ctx = egui::Context::default();
+        ctx.set_theme(egui::ThemePreference::Dark);
+        let mut frame = |pointer: egui::Event| {
+            let input = egui::RawInput {
+                events: vec![pointer],
+                ..Default::default()
+            };
+            for _ in 0..2 {
+                ctx.run_ui(input.clone(), |ui| {
+                    themes.update(ui.ctx());
+                    themes.menu_ui(ui, Theme::Dark);
+                })
+                .textures_delta
+                .clear();
+            }
+            ctx.style_of(Theme::Dark).visuals.panel_fill
+        };
+        let default = frame(egui::Event::PointerGone);
+        assert_eq!(default, Visuals::dark().panel_fill);
+        let previewed = (0..80)
+            .map(|step| {
+                frame(egui::Event::PointerMoved(egui::pos2(
+                    20.0,
+                    step as f32 * 5.0,
+                )))
+            })
+            .find(|&fill| fill != default);
+        assert!(previewed.is_some(), "hovering some theme changes the style");
+        // Hover lags a frame behind the pointer.
+        frame(egui::Event::PointerGone);
+        assert_eq!(frame(egui::Event::PointerGone), default);
+        assert_eq!(themes.prefs.dark, presets::EGUI_DARK);
+    }
+
+    #[test]
+    fn oled_theme_is_black() {
+        let themes = themes_in(&scratch("oled"));
+        let oled = themes.resolve("OLED Black", None);
+        let visuals = &oled.style.visuals;
+        for (what, color) in [
+            ("panels", visuals.panel_fill),
+            ("windows", visuals.window_fill),
+            ("text fields", visuals.extreme_bg_color),
+            (
+                "the editor",
+                crate::editor::highlight::ThemeColors::of(&oled.app.syntax, visuals).background,
+            ),
+        ] {
+            assert_eq!(color, egui::Color32::BLACK, "{what}");
+        }
     }
 }

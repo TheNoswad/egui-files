@@ -601,6 +601,38 @@ const PALETTES: &[Palette] = &[
         ],
         term_bg: Some(0xffffff),
     },
+    // True black behind everything, so an OLED screen leaves those pixels
+    // off; borders and slightly lifted widgets keep things apart.
+    Palette {
+        name: "OLED Black",
+        dark: true,
+        // The one bundled syntax theme on pure black.
+        syntax: "DarkNeon",
+        bg: 0x000000,
+        surface: 0x000000,
+        input: 0x000000,
+        border: 0x2a2a2a,
+        widget: 0x161616,
+        hover: 0x242424,
+        active: 0x303030,
+        text: 0xdadada,
+        strong: 0xffffff,
+        weak: 0x858585,
+        accent: 0x5aa9ff,
+        selection: Some(0x15304f),
+        red: 0xff5c57,
+        orange: 0xff9f43,
+        yellow: 0xf3f99d,
+        green: 0x5af78e,
+        cyan: 0x9aedfe,
+        blue: 0x57c7ff,
+        magenta: 0xff6ac1,
+        ansi: [
+            0x262626, 0xff5c57, 0x5af78e, 0xf3f99d, 0x57c7ff, 0xff6ac1, 0x9aedfe, 0xdadada, //
+            0x5c5c5c, 0xff7a75, 0x7bfaa8, 0xf7fbb8, 0x7dd4ff, 0xff8fd0, 0xb5f2fe, 0xffffff,
+        ],
+        term_bg: Some(0x000000),
+    },
 ];
 
 #[cfg(test)]

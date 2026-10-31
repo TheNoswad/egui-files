@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use egui::{Context, DragAndDrop, Id, Modifiers, Response, Stroke, StrokeKind};
+use egui::{Context, DragAndDrop, Id, Modifiers, Rect, Response, Stroke, StrokeKind};
 
 use crate::{
     archive::{ExtractJob, ExtractMode, Selection},
@@ -22,6 +22,9 @@ pub struct FileDrag {
     /// Entries dragged out of an archive tab; `paths` is empty. Dropping
     /// them on a folder extracts them there.
     pub archive: Option<ArchiveDrag>,
+    /// A place from the sidebar: it can only be dropped on a tab bar to open
+    /// it, never moved or copied (dragging Home onto a folder would move it).
+    pub link_only: bool,
 }
 
 pub struct ArchiveDrag {
@@ -41,6 +44,22 @@ pub fn archive_source(response: &Response, drag: impl FnOnce() -> Option<Archive
                 paths: Vec::new(),
                 external: false,
                 archive: Some(drag),
+                link_only: false,
+            },
+        );
+    }
+}
+
+/// Starts dragging a sidebar place if the user began dragging `response`.
+pub fn place_source(response: &Response, path: &Path) {
+    if response.drag_started() {
+        DragAndDrop::set_payload(
+            &response.ctx,
+            FileDrag {
+                paths: vec![path.to_owned()],
+                external: false,
+                archive: None,
+                link_only: true,
             },
         );
     }
@@ -62,6 +81,7 @@ pub fn source(response: &Response, paths: impl FnOnce() -> Vec<PathBuf>) {
                     paths,
                     external: false,
                     archive: None,
+                    link_only: false,
                 },
             );
         }
@@ -142,8 +162,48 @@ fn claim(ctx: &Context) {
     ctx.data_mut(|d| d.insert_temp(claim_id(), pass));
 }
 
+/// Makes the empty part of a tab bar at `rect` a drop target: folders
+/// dropped there open in new tabs, and are returned on the drop.
+pub fn new_tab_target(ctx: &Context, rect: Rect) -> Option<Vec<PathBuf>> {
+    let payload = DragAndDrop::payload::<FileDrag>(ctx)?;
+    let over = ctx
+        .pointer_latest_pos()
+        .is_some_and(|pos| rect.contains(pos));
+    // Other apps may only say what they're dragging on the drop.
+    let unknown = payload.external && payload.paths.is_empty();
+    if !over
+        || claimed(ctx)
+        || payload.archive.is_some()
+        || !unknown && !payload.paths.iter().any(|p| p.is_dir())
+    {
+        return None;
+    }
+    claim(ctx);
+
+    let stroke = Stroke::new(2.0, crate::theme::colors(ctx).files.drop_target);
+    let layer = egui::LayerId::new(egui::Order::Foreground, Id::new("new-tab-target"));
+    ctx.layer_painter(layer)
+        .rect_stroke(rect, 3.0, stroke, StrokeKind::Inside);
+
+    if !ctx.input(|i| i.pointer.any_released()) {
+        return None;
+    }
+    let payload = DragAndDrop::take_payload::<FileDrag>(ctx)?;
+    Some(
+        payload
+            .paths
+            .iter()
+            .filter(|p| p.is_dir())
+            .cloned()
+            .collect(),
+    )
+}
+
 fn accepts(payload: &FileDrag, target: &DropTarget, modifiers: Modifiers) -> bool {
     let paths = &payload.paths;
+    if payload.link_only {
+        return false;
+    }
     if payload.archive.is_some() {
         return matches!(target, DropTarget::Folder(_));
     }
@@ -270,6 +330,7 @@ pub fn inject_external(ctx: &Context, raw: &mut egui::RawInput, event: ExternalE
                         paths: Vec::new(),
                         external: true,
                         archive: None,
+                        link_only: false,
                     },
                 );
             }
@@ -292,6 +353,7 @@ pub fn inject_external(ctx: &Context, raw: &mut egui::RawInput, event: ExternalE
                     paths,
                     external: !internal,
                     archive: None,
+                    link_only: false,
                 },
             );
             raw.events.push(egui::Event::PointerMoved(pos));

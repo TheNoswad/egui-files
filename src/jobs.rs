@@ -48,6 +48,10 @@ pub enum JobKind {
     },
     Compress(CompressJob),
     Extract(ExtractJob),
+    Eject {
+        drive: PathBuf,
+        label: String,
+    },
 }
 
 impl JobKind {
@@ -77,6 +81,7 @@ impl JobKind {
                 display_name(&job.dest)
             ),
             Self::Extract(job) => job.title(),
+            Self::Eject { label, .. } => format!("Ejecting {label}"),
         }
     }
 }
@@ -683,6 +688,15 @@ fn run(kind: JobKind, p: &Progress) {
                     p.error(&original, err);
                 }
                 p.done_items.fetch_add(1, Relaxed);
+            }
+        }
+        JobKind::Eject { drive, .. } => {
+            // Lets the tabs that were moved off the drive drop their file
+            // watches first.
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            p.set_current(&drive);
+            if let Err(err) = crate::devices::eject(&drive) {
+                p.error(&drive, err);
             }
         }
         JobKind::Compress(job) => archive::compress(job, p),
