@@ -131,10 +131,13 @@ pub fn read_dir(dir: &Path) -> io::Result<Vec<Entry>> {
         let name = dir_entry.file_name().to_string_lossy().into_owned();
         let is_symlink = dir_entry.file_type().is_ok_and(|t| t.is_symlink());
         // Follow symlinks, but fall back to the link itself when it is broken.
-        let meta = fs::metadata(&path).or_else(|_| dir_entry.metadata()).ok();
+        let link_meta = dir_entry.metadata().ok();
+        let meta = fs::metadata(&path).ok().or_else(|| link_meta.clone());
         let is_dir = meta.as_ref().is_some_and(fs::Metadata::is_dir);
         entries.push(Entry {
-            hidden: is_hidden(&name, meta.as_ref()),
+            // Whether the link itself is hidden, not its target: Windows
+            // hides junctions like Documents\My Music (to Music).
+            hidden: is_hidden(&name, link_meta.as_ref()),
             executable: is_executable(meta.as_ref()),
             size: meta
                 .as_ref()

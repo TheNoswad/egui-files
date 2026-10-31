@@ -78,6 +78,8 @@ struct Persisted {
     editor: editor::Prefs,
     #[serde(default)]
     theme: theme::Prefs,
+    #[serde(default = "default_true")]
+    hide_empty_drives: bool,
 }
 
 fn default_true() -> bool {
@@ -108,6 +110,7 @@ struct PersistedRef<'a> {
     open_with: &'a open_with::Prefs,
     editor: &'a editor::Prefs,
     theme: &'a theme::Prefs,
+    hide_empty_drives: bool,
 }
 
 /// The panes a fresh layout starts with.
@@ -275,6 +278,21 @@ fn add_button_hints(ui: &mut Ui, dock: &DockState<DockTab>) {
     }
 }
 
+/// Where a drop at `rel` (0 to 1 across a tab's content) splits it off: the
+/// nearest edge, if within a quarter of the way across.
+fn split_zone(rel: Vec2) -> Option<Split> {
+    [
+        (rel.x, Split::Left),
+        (1.0 - rel.x, Split::Right),
+        (rel.y, Split::Above),
+        (1.0 - rel.y, Split::Below),
+    ]
+    .into_iter()
+    .min_by(|a, b| a.0.total_cmp(&b.0))
+    .filter(|(distance, _)| *distance < 0.25)
+    .map(|(_, split)| split)
+}
+
 /// What the add button's menu can open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum NewTab {
@@ -363,6 +381,7 @@ impl FilesApp {
                 open_with: open_with::Prefs::default(),
                 editor: editor::Prefs::default(),
                 theme: theme::Prefs::default(),
+                hide_empty_drives: true,
             });
         let Persisted {
             dock,
@@ -381,6 +400,7 @@ impl FilesApp {
             open_with,
             editor,
             theme,
+            hide_empty_drives,
         } = persisted;
         editor::highlight::preload();
         let pending_panes = if panes_docked {
@@ -426,7 +446,7 @@ impl FilesApp {
                 preview_shown: false,
                 app_actions: Vec::new(),
             },
-            sidebar: Sidebar::new(&cc.egui_ctx, bookmarks, tree),
+            sidebar: Sidebar::new(&cc.egui_ctx, bookmarks, tree, hide_empty_drives),
             next_tab_id,
             active_browser: None,
             watcher: DirWatcher::new(&cc.egui_ctx),
@@ -877,6 +897,73 @@ impl FilesApp {
         }
     }
 
+    /// Sidebar places dropped on a tab's content: near an edge they open
+    /// in a new pane split off on that side, elsewhere in a new tab there.
+    fn place_split_ui(&mut self, ctx: &egui::Context) {
+        let style = Style::from_egui(&ctx.global_style());
+        let Some(pos) = ctx.pointer_latest_pos() else {
+            return;
+        };
+        // Not over the panes: the place came from one of them.
+        let Some((leaf, body)) = self
+            .dock
+            .iter_leaves()
+            .filter(|(path, leaf)| {
+                path.surface.is_main()
+                    && leaf
+                        .tabs
+                        .get(leaf.active.0)
+                        .is_some_and(|t| t.pane().is_none())
+            })
+            .map(|(path, leaf)| {
+                let mut body = leaf.rect;
+                body.min.y += style.tab_bar.height;
+                (path, body)
+            })
+            .find(|(_, body)| body.contains(pos))
+        else {
+            return;
+        };
+        let Some((folder, dropped)) = dnd::place_over(ctx, body) else {
+            return;
+        };
+
+        let split = split_zone((pos - body.min) / body.size());
+
+        let highlight = match split {
+            Some(Split::Left) => body.split_left_right_at_fraction(0.5).0,
+            Some(Split::Right) => body.split_left_right_at_fraction(0.5).1,
+            Some(Split::Above) => body.split_top_bottom_at_fraction(0.5).0,
+            Some(Split::Below) => body.split_top_bottom_at_fraction(0.5).1,
+            None => body,
+        };
+        let color = crate::theme::colors(ctx).files.drop_target;
+        let layer = egui::LayerId::new(egui::Order::Foreground, Id::new("place-split-target"));
+        let painter = ctx.layer_painter(layer);
+        painter.rect_filled(highlight, 3.0, color.gamma_multiply(0.15));
+        painter.rect_stroke(
+            highlight,
+            3.0,
+            egui::Stroke::new(2.0, color),
+            egui::StrokeKind::Inside,
+        );
+
+        if dropped {
+            let tab = self.make_tab(folder);
+            let id = tab.id();
+            match split {
+                Some(split) => {
+                    self.dock.split(leaf, split, 0.5, Node::leaf(tab));
+                }
+                None => {
+                    self.dock.set_focused_node_and_surface(leaf);
+                    self.dock.push_to_focused_leaf(tab);
+                }
+            }
+            self.focus_tab(id);
+        }
+    }
+
     /// Shows the add button's menu.
     fn add_menu_ui(&mut self, ctx: &egui::Context) {
         if let Some(menu) = self.add_menu {
@@ -988,6 +1075,8 @@ impl FilesApp {
                 ui.checkbox(&mut self.shared.show_hidden, "Show hidden files (Ctrl+H)");
                 ui.checkbox(&mut self.shared.show_thumbnails, "Show thumbnails");
                 crate::dates::checkbox(ui);
+                ui.checkbox(&mut self.sidebar.hide_empty_drives, "Hide empty drives")
+                    .on_hover_text("Card readers without a card and drives with no disc");
                 ui.add(
                     egui::Slider::new(&mut self.shared.icon_size, 32.0..=192.0).text("Icon size"),
                 );
@@ -1580,6 +1669,7 @@ impl eframe::App for FilesApp {
         }
         self.add_menu_ui(&ctx);
         self.tab_bars_ui(&ctx, &tab_buttons);
+        self.place_split_ui(&ctx);
         for action in std::mem::take(&mut self.shared.app_actions) {
             match action {
                 AppAction::NewTab(path) => self.open_tab(path),
@@ -1677,6 +1767,7 @@ impl eframe::App for FilesApp {
             dock: &self.dock,
             show_hidden: self.shared.show_hidden,
             bookmarks: &self.sidebar.bookmarks,
+            hide_empty_drives: self.sidebar.hide_empty_drives,
             panes_docked: true,
             tree: &self.sidebar.tree,
             show_thumbnails: self.shared.show_thumbnails,
@@ -1696,6 +1787,19 @@ impl eframe::App for FilesApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn places_split_near_edges() {
+        let zone = |x, y| split_zone(egui::vec2(x, y));
+        assert_eq!(zone(0.1, 0.5), Some(Split::Left));
+        assert_eq!(zone(0.9, 0.5), Some(Split::Right));
+        assert_eq!(zone(0.5, 0.05), Some(Split::Above));
+        assert_eq!(zone(0.4, 0.95), Some(Split::Below));
+        // The nearer edge wins in a corner.
+        assert_eq!(zone(0.2, 0.05), Some(Split::Above));
+        assert_eq!(zone(0.5, 0.5), None);
+        assert_eq!(zone(0.3, 0.7), None);
+    }
 
     fn browser(id: u64) -> DockTab {
         DockTab::Browser(BrowserTab::new(id, PathBuf::from("/")))

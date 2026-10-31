@@ -29,15 +29,24 @@ pub struct Sidebar {
     pub tree: FolderTree,
     pub places: Vec<Place>,
     pub drives: Drives,
+    /// Like Explorer's option: a card reader without a card (or an ejected
+    /// one) isn't listed.
+    pub hide_empty_drives: bool,
 }
 
 impl Sidebar {
-    pub fn new(ctx: &egui::Context, bookmarks: Vec<PathBuf>, tree: FolderTree) -> Self {
+    pub fn new(
+        ctx: &egui::Context,
+        bookmarks: Vec<PathBuf>,
+        tree: FolderTree,
+        hide_empty_drives: bool,
+    ) -> Self {
         Self {
             bookmarks,
             tree,
             places: places::standard_places(),
             drives: Drives::new(ctx),
+            hide_empty_drives,
         }
     }
 
@@ -49,7 +58,7 @@ impl Sidebar {
         jobs: &mut Jobs,
         response: &mut SidebarResponse,
     ) {
-        let drives = self.drives.shown();
+        let drives = self.drives.shown(self.hide_empty_drives);
         let roots: Vec<&Place> = self.places.iter().take(1).chain(&drives).collect();
         match self.tree.ui(ui, &roots, current, show_hidden) {
             Some(TreeAction::Navigate(path)) => response.target = Some((path, false)),
@@ -74,7 +83,8 @@ impl Sidebar {
         let target = &mut response.target;
 
         // Places open in a new tab on a middle click, from the right-click
-        // menu, or dragged onto a tab bar. `more` adds to that menu.
+        // menu, or dragged onto a tab bar; dragged near the edge of a tab's
+        // content they open in a new pane. `more` adds to that menu.
         let mut place_button = |ui: &mut Ui,
                                 glyph: &str,
                                 label: &str,
@@ -148,7 +158,7 @@ impl Sidebar {
                 ui.add_space(8.0);
                 ui.label(RichText::new("Drives").small().weak());
                 let mut eject = None;
-                for drive in self.drives.shown() {
+                for drive in self.drives.shown(self.hide_empty_drives) {
                     let mut menu = |ui: &mut Ui| {
                         if drive.ejectable
                             && ui

@@ -45,11 +45,11 @@ impl Drives {
         self.list.lock().unwrap().clone()
     }
 
-    /// The drives to list: like Explorer's "Hide empty drives", a card
-    /// reader without a card (or an ejected one) isn't.
-    pub fn shown(&self) -> Vec<Place> {
+    /// The drives to list, leaving out the ones without media if
+    /// `hide_empty`.
+    pub fn shown(&self, hide_empty: bool) -> Vec<Place> {
         let mut drives = self.get();
-        drives.retain(|d| d.media.is_some());
+        drives.retain(|d| !hide_empty || d.media.is_some());
         drives
     }
 }

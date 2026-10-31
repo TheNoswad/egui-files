@@ -22,8 +22,9 @@ pub struct FileDrag {
     /// Entries dragged out of an archive tab; `paths` is empty. Dropping
     /// them on a folder extracts them there.
     pub archive: Option<ArchiveDrag>,
-    /// A place from the sidebar: it can only be dropped on a tab bar to open
-    /// it, never moved or copied (dragging Home onto a folder would move it).
+    /// A place from the sidebar: it can only be dropped on a tab bar or a
+    /// tab's content to open it, never moved or copied (dragging Home onto a
+    /// folder would move it).
     pub link_only: bool,
 }
 
@@ -197,6 +198,25 @@ pub fn new_tab_target(ctx: &Context, rect: Rect) -> Option<Vec<PathBuf>> {
             .cloned()
             .collect(),
     )
+}
+
+/// The sidebar place being dragged over `rect`, unless something else took
+/// it, and whether it was dropped this frame (which ends the drag).
+pub fn place_over(ctx: &Context, rect: Rect) -> Option<(PathBuf, bool)> {
+    let payload = DragAndDrop::payload::<FileDrag>(ctx)?;
+    let over = ctx
+        .pointer_latest_pos()
+        .is_some_and(|pos| rect.contains(pos));
+    if !over || claimed(ctx) || !payload.link_only {
+        return None;
+    }
+    claim(ctx);
+    let path = payload.paths.first()?.clone();
+    let dropped = ctx.input(|i| i.pointer.any_released());
+    if dropped {
+        DragAndDrop::clear_payload(ctx);
+    }
+    Some((path, dropped))
 }
 
 fn accepts(payload: &FileDrag, target: &DropTarget, modifiers: Modifiers) -> bool {
