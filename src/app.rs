@@ -90,6 +90,8 @@ struct Persisted {
     /// Ids of the pinned tabs.
     #[serde(default)]
     pinned: HashSet<u64>,
+    #[serde(default = "default_true")]
+    folder_sizes: bool,
 }
 
 fn default_true() -> bool {
@@ -123,6 +125,7 @@ struct PersistedRef<'a> {
     hide_empty_drives: bool,
     properties: &'a properties::Prefs,
     pinned: &'a HashSet<u64>,
+    folder_sizes: bool,
 }
 
 /// The panes a fresh layout starts with.
@@ -429,6 +432,7 @@ impl FilesApp {
                 hide_empty_drives: true,
                 properties: properties::Prefs::default(),
                 pinned: HashSet::new(),
+                folder_sizes: true,
             });
         let Persisted {
             dock,
@@ -450,6 +454,7 @@ impl FilesApp {
             hide_empty_drives,
             properties,
             pinned,
+            folder_sizes,
         } = persisted;
         editor::highlight::preload();
         let pending_panes = if panes_docked {
@@ -494,7 +499,11 @@ impl FilesApp {
                 focused_tab: None,
                 preview_shown: false,
                 app_actions: Vec::new(),
-                usage: Default::default(),
+                usage: {
+                    let mut usage = crate::usage::Scans::default();
+                    usage.enabled = folder_sizes;
+                    usage
+                },
                 properties: properties::Properties::new(properties),
             },
             sidebar: Sidebar::new(&cc.egui_ctx, bookmarks, tree, hide_empty_drives),
@@ -1264,6 +1273,8 @@ impl FilesApp {
             ui.menu_button("View", |ui| {
                 ui.checkbox(&mut self.shared.show_hidden, "Show hidden files (Ctrl+H)");
                 ui.checkbox(&mut self.shared.show_thumbnails, "Show thumbnails");
+                ui.checkbox(&mut self.shared.usage.enabled, "Show folder sizes")
+                    .on_hover_text("Measure the folders in the Details view, in the background");
                 crate::dates::checkbox(ui);
                 ui.checkbox(&mut self.sidebar.hide_empty_drives, "Hide empty drives")
                     .on_hover_text("Card readers without a card and drives with no disc");
@@ -1581,12 +1592,14 @@ impl FilesApp {
             self.trash_count.request();
         }
         if !changed.is_empty() {
+            self.shared.usage.dirs_changed(&changed);
             self.sidebar.tree.dirs_changed(&changed);
             for (_, tab) in self.dock.iter_all_tabs_mut() {
                 tab.dirs_changed(&changed);
             }
         }
         if self.shared.jobs.poll() {
+            self.shared.usage.invalidate();
             self.trash_count.request();
             self.sidebar.tree.invalidate();
             for (_, tab) in self.dock.iter_all_tabs_mut() {
@@ -1815,6 +1828,7 @@ impl eframe::App for FilesApp {
         self.shared.images.begin_frame();
         self.shared.videos.begin_frame();
         self.sync_with_disk(&ctx);
+        self.shared.usage.tick();
         // Files copied or cut in another app (or by us) paste here too.
         #[cfg(windows)]
         if let Some((paths, cut)) = crate::file_clipboard::files_if_changed(&mut self.clipboard_seq)
@@ -2066,6 +2080,7 @@ impl eframe::App for FilesApp {
             theme: &self.themes.prefs,
             properties: &self.shared.properties.prefs,
             pinned: &self.pinned,
+            folder_sizes: self.shared.usage.enabled,
         };
         eframe::set_value(storage, eframe::APP_KEY, &state);
     }

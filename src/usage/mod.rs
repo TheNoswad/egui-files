@@ -1037,11 +1037,51 @@ fn volume_bar(ui: &mut Ui, space: crate::places::Space, scanned: u64) {
     ));
 }
 
-/// Scans open in tabs, for folder sizes in the browser's Details view.
-#[derive(Default)]
+/// Scans for folder sizes in the browser's Details view: those open in disk
+/// usage tabs, and ones started for folders the browser shows.
 pub struct Scans {
     scans: Vec<Weak<Scan>>,
-    cache: Option<(PathBuf, usize, u64, Arc<FolderSizes>)>,
+    /// Started for the browser; dropped (and stopped) once nothing shows them.
+    own: Vec<Owned>,
+    /// The last sizes worked out for each folder shown.
+    cache: Vec<Cached>,
+    /// Scan folders the browser shows; off, only disk usage tabs give sizes.
+    pub enabled: bool,
+}
+
+struct Owned {
+    handle: ScanHandle,
+    used: Instant,
+    /// Folders that changed while it was scanning, looked at once it's done.
+    changed: HashSet<PathBuf>,
+}
+
+struct Cached {
+    dir: PathBuf,
+    scan: usize,
+    generation: u64,
+    sizes: Arc<FolderSizes>,
+    used: Instant,
+}
+
+/// How long a browser scan nothing shows keeps going, so switching tabs and
+/// back doesn't start over.
+const UNUSED_RUNNING: Duration = Duration::from_secs(5);
+/// How long a finished browser scan nothing shows is kept, so going back to
+/// a folder shows its sizes right away.
+const UNUSED_FINISHED: Duration = Duration::from_secs(120);
+/// Finished browser scans kept at most, besides those in use.
+const KEPT_FINISHED: usize = 4;
+
+impl Default for Scans {
+    fn default() -> Self {
+        Self {
+            scans: Vec::new(),
+            own: Vec::new(),
+            cache: Vec::new(),
+            enabled: true,
+        }
+    }
 }
 
 /// The sizes of a folder's subfolders, from a disk usage scan.
@@ -1064,22 +1104,62 @@ impl Scans {
     }
 
     /// Sizes for the folders inside `dir`, from the innermost scan that
-    /// covers it.
-    pub fn folder_sizes(&mut self, dir: &Path) -> Option<Arc<FolderSizes>> {
-        let scans: Vec<Arc<Scan>> = self.scans.iter().filter_map(Weak::upgrade).collect();
-        let (scan, tree) = scans
+    /// covers it; with none, starts one when [`Self::enabled`].
+    pub fn folder_sizes(&mut self, ctx: &egui::Context, dir: &Path) -> Option<Arc<FolderSizes>> {
+        let now = Instant::now();
+        let tabs: Vec<Arc<Scan>> = self.scans.iter().filter_map(Weak::upgrade).collect();
+        let covering = |scan: &Scan| {
+            let tree = scan.tree();
+            dir.starts_with(&tree.root_path)
+                .then(|| tree.root_path.components().count())
+        };
+        let from_tab = tabs
             .iter()
-            .map(|s| (s, s.tree()))
-            .filter(|(_, tree)| dir.starts_with(&tree.root_path))
-            .max_by_key(|(_, tree)| tree.root_path.components().count())?;
-        let identity = Arc::as_ptr(scan) as usize;
-        if let Some((cached_dir, cached_scan, generation, sizes)) = &self.cache
-            && cached_dir == dir
-            && *cached_scan == identity
-            && *generation == tree.generation
-            && sizes.partial == scan.running()
-        {
-            return Some(sizes.clone());
+            .filter_map(|s| Some((covering(s)?, s.clone())))
+            .max_by_key(|(depth, _)| *depth);
+        let own = self
+            .own
+            .iter_mut()
+            .filter_map(|o| Some((covering(&o.handle)?, o)))
+            .max_by_key(|(depth, _)| *depth);
+        let scan = match (from_tab, own) {
+            (Some((tab_depth, tab)), Some((own_depth, own))) => {
+                own.used = now;
+                if own_depth > tab_depth {
+                    own.handle.0.clone()
+                } else {
+                    tab
+                }
+            }
+            (Some((_, tab)), None) => tab,
+            (None, Some((_, own))) => {
+                own.used = now;
+                own.handle.0.clone()
+            }
+            (None, None) => {
+                if !self.enabled {
+                    return None;
+                }
+                let scan = Scan::start(ctx, dir.to_path_buf());
+                self.own.push(Owned {
+                    handle: ScanHandle(scan.clone()),
+                    used: now,
+                    changed: HashSet::new(),
+                });
+                scan
+            }
+        };
+        let identity = Arc::as_ptr(&scan) as usize;
+        let tree = scan.tree();
+        let running = scan.running();
+        if let Some(cached) = self.cache.iter_mut().find(|c| c.dir == dir) {
+            cached.used = now;
+            if cached.scan == identity
+                && cached.generation == tree.generation
+                && cached.sizes.partial == running
+            {
+                return Some(cached.sizes.clone());
+            }
         }
         let id = tree.find(dir)?;
         let sizes = tree
@@ -1092,10 +1172,81 @@ impl Scans {
             .collect();
         let sizes = Arc::new(FolderSizes {
             sizes,
-            partial: scan.running(),
+            partial: running,
         });
-        self.cache = Some((dir.to_path_buf(), identity, tree.generation, sizes.clone()));
+        let cached = Cached {
+            dir: dir.to_path_buf(),
+            scan: identity,
+            generation: tree.generation,
+            sizes: sizes.clone(),
+            used: now,
+        };
+        match self.cache.iter_mut().find(|c| c.dir == dir) {
+            Some(old) => *old = cached,
+            None => self.cache.push(cached),
+        }
         Some(sizes)
+    }
+
+    /// Once a frame: stops browser scans nothing shows any more, and looks
+    /// at folders that changed once their scan is done.
+    pub fn tick(&mut self) {
+        self.cache
+            .retain(|c| c.used.elapsed() < Duration::from_secs(1));
+        if !self.enabled {
+            self.own.clear();
+            return;
+        }
+        self.own.retain(|o| {
+            let limit = if o.handle.running() {
+                UNUSED_RUNNING
+            } else {
+                UNUSED_FINISHED
+            };
+            o.used.elapsed() < limit
+        });
+        // Most recently shown first; the oldest finished ones go.
+        self.own.sort_by_key(|o| std::cmp::Reverse(o.used));
+        let mut finished = 0;
+        self.own.retain(|o| {
+            let in_use = o.used.elapsed() < Duration::from_secs(1);
+            if in_use || o.handle.running() {
+                return true;
+            }
+            finished += 1;
+            finished <= KEPT_FINISHED
+        });
+        for own in &mut self.own {
+            if own.changed.is_empty() || own.handle.running() {
+                continue;
+            }
+            let ids: Vec<u32> = {
+                let tree = own.handle.tree();
+                own.changed
+                    .drain()
+                    .filter_map(|dir| tree.find(&dir))
+                    .filter(|&id| tree.node(id).is_dir())
+                    .collect()
+            };
+            for id in ids {
+                own.handle.refresh(id);
+            }
+        }
+    }
+
+    /// Folders the file watcher saw change: browser scans list them again.
+    pub fn dirs_changed(&mut self, dirs: &HashSet<PathBuf>) {
+        for own in &mut self.own {
+            let root = own.handle.tree().root_path.clone();
+            own.changed
+                .extend(dirs.iter().filter(|d| d.starts_with(&root)).cloned());
+        }
+    }
+
+    /// Something finished that may have changed folders anywhere (a copy,
+    /// a move, emptying the trash): browser scans start over when next shown.
+    pub fn invalidate(&mut self) {
+        self.own.clear();
     }
 }
 
@@ -1235,7 +1386,7 @@ mod tests {
         let sizes = h
             .shared
             .usage
-            .folder_sizes(&root)
+            .folder_sizes(&h.ctx, &root)
             .expect("sizes for the scanned folder");
         assert_eq!(sizes.get(&root.join("big")), Some(1_500_000));
         assert!(!sizes.partial);

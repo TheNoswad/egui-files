@@ -222,6 +222,9 @@ pub struct BrowserTab {
     /// Select this once the listing has it, e.g. a just-made archive.
     #[serde(skip)]
     reveal: Option<PathBuf>,
+    /// The finished folder sizes last put into the entries, for sorting.
+    #[serde(skip)]
+    folder_sizes: Option<std::sync::Arc<crate::usage::FolderSizes>>,
 }
 
 impl BrowserTab {
@@ -252,6 +255,7 @@ impl BrowserTab {
             compress: None,
             extract: None,
             reveal: None,
+            folder_sizes: None,
         }
     }
 
@@ -311,6 +315,8 @@ impl BrowserTab {
         }
         match fs::read_dir(&self.path) {
             Ok(mut entries) => {
+                // New entries have no folder sizes; they're put in again.
+                self.folder_sizes = None;
                 fs::sort_entries(&mut entries, self.sort);
                 self.selection
                     .retain(|p| entries.iter().any(|e| &e.path == p));
@@ -331,6 +337,15 @@ impl BrowserTab {
     fn refresh(&mut self, show_hidden: bool) {
         self.stale = false;
         let path = self.path.clone();
+        self.keeping_cursor(show_hidden, |tab| {
+            tab.reload();
+            tab.path == path
+        });
+    }
+
+    /// Runs `change` on the entries, keeping the cursor and anchor on the
+    /// same items when it returns true.
+    fn keeping_cursor(&mut self, show_hidden: bool, change: impl FnOnce(&mut Self) -> bool) {
         let old_visible = self.visible(show_hidden);
         let path_at = |tab: &Self, index: Option<usize>| {
             index
@@ -338,8 +353,7 @@ impl BrowserTab {
                 .map(|&i| tab.entries()[i].path.clone())
         };
         let (cursor, anchor) = (path_at(self, self.cursor), path_at(self, self.anchor));
-        self.reload();
-        if self.path != path {
+        if !change(self) {
             return;
         }
         let visible = self.visible(show_hidden);
@@ -348,6 +362,40 @@ impl BrowserTab {
         };
         self.cursor = index_of(self, cursor);
         self.anchor = index_of(self, anchor);
+    }
+
+    /// Puts a finished scan's folder sizes into the entries, sorting them
+    /// again when sorted by size. Sizes still growing are only shown, so
+    /// rows don't move about while a scan runs.
+    fn apply_folder_sizes(&mut self, ctx: &egui::Context, shared: &mut Shared) {
+        let wanted = self.view == ViewMode::Details || self.sort.key == SortKey::Size;
+        let sizes = wanted
+            .then(|| shared.usage.folder_sizes(ctx, &self.path))
+            .flatten()
+            .filter(|s| !s.partial);
+        let same = match (&sizes, &self.folder_sizes) {
+            (Some(new), Some(old)) => std::sync::Arc::ptr_eq(new, old),
+            (None, _) => true,
+            (Some(_), None) => false,
+        };
+        if same {
+            return;
+        }
+        self.folder_sizes = sizes.clone();
+        let Some(sizes) = sizes else { return };
+        self.keeping_cursor(shared.show_hidden, |tab| {
+            let sort = tab.sort;
+            let Some(entries) = &mut tab.entries else {
+                return false;
+            };
+            for entry in entries.iter_mut().filter(|e| e.is_dir) {
+                entry.folder_size = sizes.get(&entry.path);
+            }
+            if sort.key == SortKey::Size {
+                fs::sort_entries(entries, sort);
+            }
+            true
+        });
     }
 
     pub fn navigate(&mut self, path: PathBuf) {
@@ -438,6 +486,7 @@ impl BrowserTab {
         } else if self.stale {
             self.refresh(shared.show_hidden);
         }
+        self.apply_folder_sizes(ui.ctx(), shared);
         if let Some(path) = self.reveal.take() {
             self.select_path(&path, shared.show_hidden);
         }
@@ -1710,6 +1759,52 @@ mod tests {
                 "{view:?}: clicking empty space clears selection"
             );
         }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The Details view measures the folders it shows, and sorting by size
+    /// puts the biggest folder first once the scan is done.
+    #[test]
+    fn details_view_shows_and_sorts_by_folder_sizes() {
+        let root = fixture("folder-sizes");
+        let a = root.join("a");
+        std::fs::write(a.join("c/big.bin"), vec![0; 50_000]).unwrap();
+        let ctx = Context::default();
+        let mut tab = BrowserTab::new(1, a.clone());
+        let mut shared = shared(&ctx, &tab);
+        tab.apply(
+            Action::SetSort(Sort {
+                key: SortKey::Size,
+                ascending: false,
+                ..tab.sort
+            }),
+            &ctx,
+            &mut shared,
+        );
+        let start = std::time::Instant::now();
+        loop {
+            run_frame(&ctx, &mut tab, &mut shared, &[]);
+            shared.usage.tick();
+            if tab.entries().iter().any(|e| e.folder_size.is_some()) {
+                break;
+            }
+            assert!(start.elapsed() < std::time::Duration::from_secs(10));
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let sizes: Vec<_> = tab
+            .entries()
+            .iter()
+            .map(|e| (e.name.as_str(), e.folder_size))
+            .collect();
+        assert_eq!(sizes[0], ("c", Some(50_000)), "{sizes:?}");
+        assert!(sizes.contains(&("b", Some(2))), "{sizes:?}");
+
+        // Turned off, nothing is measured.
+        shared.usage.enabled = false;
+        shared.usage.tick();
+        let mut other = BrowserTab::new(2, root.clone());
+        run_frame(&ctx, &mut other, &mut shared, &[]);
+        assert!(shared.usage.folder_sizes(&ctx, &root).is_none());
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -44,7 +44,7 @@ pub fn show(
 ) {
     match tab.view {
         ViewMode::Details => {
-            let sizes = shared.usage.folder_sizes(&tab.path);
+            let sizes = shared.usage.folder_sizes(ui.ctx(), &tab.path);
             let menu = MenuContext::new(shared);
             details::show(
                 ui,

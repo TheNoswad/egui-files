@@ -101,6 +101,7 @@ impl Item {
             hidden: false,
             executable: false,
             size: self.size,
+            folder_size: None,
             modified: None,
             created: None,
         };

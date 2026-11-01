@@ -23,12 +23,23 @@ pub struct Entry {
     pub hidden: bool,
     pub executable: bool,
     pub size: u64,
+    /// A folder's size with everything in it, once a scan has measured it.
+    pub folder_size: Option<u64>,
     pub modified: Option<SystemTime>,
     /// Not every filesystem records it.
     pub created: Option<SystemTime>,
 }
 
 impl Entry {
+    /// Folders count what's in them when that's known, else nothing.
+    fn sort_size(&self) -> u64 {
+        if self.is_dir {
+            self.folder_size.unwrap_or(0)
+        } else {
+            self.size
+        }
+    }
+
     fn extension(&self) -> String {
         self.path
             .extension()
@@ -145,6 +156,7 @@ pub fn read_dir(dir: &Path) -> io::Result<Vec<Entry>> {
                 .as_ref()
                 .filter(|m| m.is_file())
                 .map_or(0, fs::Metadata::len),
+            folder_size: None,
             modified: meta.as_ref().and_then(|m| m.modified().ok()),
             created: meta.as_ref().and_then(|m| m.created().ok()),
             path,
@@ -238,7 +250,10 @@ pub fn sort_entries(entries: &mut [Entry], sort: Sort) {
         folders.then_with(|| {
             let ord = match sort.key {
                 SortKey::Name => by_name(a, b),
-                SortKey::Size => a.size.cmp(&b.size).then_with(|| by_name(a, b)),
+                SortKey::Size => a
+                    .sort_size()
+                    .cmp(&b.sort_size())
+                    .then_with(|| by_name(a, b)),
                 SortKey::Modified => a.modified.cmp(&b.modified).then_with(|| by_name(a, b)),
                 SortKey::Created => a.created.cmp(&b.created).then_with(|| by_name(a, b)),
                 SortKey::Kind => a.kind().cmp(&b.kind()).then_with(|| by_name(a, b)),
