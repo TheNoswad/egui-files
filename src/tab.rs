@@ -89,6 +89,8 @@ pub enum Action {
         modifiers: Modifiers,
     },
     SelectAll,
+    /// Replace the selection (drag-to-select).
+    SetSelection(HashSet<PathBuf>),
     MoveCursor {
         delta: isize,
         extend: bool,
@@ -458,8 +460,9 @@ impl BrowserTab {
                 let background = ui.interact(
                     ui.max_rect(),
                     Id::new(("background", self.id)),
-                    egui::Sense::click(),
+                    egui::Sense::click_and_drag(),
                 );
+                let drag_select = background.drag_started_by(egui::PointerButton::Primary);
                 if visible.is_empty() && self.view != ViewMode::Columns {
                     ui.centered_and_justified(|ui| {
                         ui.weak(if self.filter.is_empty() {
@@ -469,7 +472,7 @@ impl BrowserTab {
                         });
                     });
                 } else {
-                    views::show(ui, self, &visible, shared, &mut actions);
+                    views::show(ui, self, &visible, shared, drag_select, &mut actions);
                 }
                 if background.clicked() && !ui.input(|i| i.modifiers.command || i.modifiers.shift) {
                     actions.push(Action::ClearSelection);
@@ -1383,6 +1386,10 @@ impl BrowserTab {
             Action::PasteInto(dest) => paste(shared, dest),
             Action::CopyFolderPath => ctx.copy_text(self.path.display().to_string()),
             Action::StartJob(job) => shared.jobs.start(job),
+            Action::SetSelection(selection) => {
+                self.selection = selection;
+                self.anchor = None;
+            }
             Action::ClearSelection => {
                 self.selection.clear();
                 self.anchor = None;

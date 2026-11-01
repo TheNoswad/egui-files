@@ -4,6 +4,7 @@
 mod columns;
 mod details;
 mod grid;
+mod marquee;
 
 use egui::{Modifiers, Response, Ui};
 use egui_phosphor::regular as icon;
@@ -38,16 +39,25 @@ pub fn show(
     tab: &BrowserTab,
     visible: &[usize],
     shared: &mut Shared,
+    drag_select: bool,
     actions: &mut Vec<Action>,
 ) {
     match tab.view {
         ViewMode::Details => {
             let sizes = shared.usage.folder_sizes(&tab.path);
             let menu = MenuContext::new(shared);
-            details::show(ui, tab, visible, menu, sizes.as_deref(), actions);
+            details::show(
+                ui,
+                tab,
+                visible,
+                menu,
+                sizes.as_deref(),
+                drag_select,
+                actions,
+            );
         }
-        ViewMode::Grid => grid::show(ui, tab, visible, shared, actions),
-        ViewMode::Columns => columns::show(ui, tab, visible, shared, actions),
+        ViewMode::Grid => grid::show(ui, tab, visible, shared, drag_select, actions),
+        ViewMode::Columns => columns::show(ui, tab, visible, shared, drag_select, actions),
     }
 }
 
@@ -65,18 +75,24 @@ impl MenuContext {
     }
 }
 
-/// Click, double-click, middle-click and context-menu handling shared by all views.
+/// Click, double-click, middle-click and context-menu handling shared by all
+/// views. `drag_out` is whether dragging the item drags it (rather than
+/// starting a drag selection).
 pub(crate) fn item_interaction(
     response: &Response,
     index: usize,
     entry: &Entry,
     tab: &BrowserTab,
     menu: MenuContext,
+    drag_out: bool,
     actions: &mut Vec<Action>,
 ) {
     let selected = tab.selection.contains(&entry.path);
     // Dragging a selected item drags the whole selection.
     dnd::source(response, || {
+        if !drag_out {
+            return Vec::new();
+        }
         if selected {
             tab.selected_paths()
         } else {

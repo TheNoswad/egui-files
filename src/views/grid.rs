@@ -13,12 +13,15 @@ pub fn show(
     tab: &BrowserTab,
     visible: &[usize],
     shared: &mut Shared,
+    drag_select: bool,
     actions: &mut Vec<Action>,
 ) {
     let icon_size = shared.icon_size;
     let cell = vec2(icon_size + 32.0, icon_size + 40.0);
     let colors = crate::theme::colors(ui.ctx());
-    ScrollArea::vertical()
+    // Every cell's rectangle on screen, for drag selection.
+    let mut cells = Vec::with_capacity(visible.len());
+    let output = ScrollArea::vertical()
         .id_salt(("grid", tab.id))
         .auto_shrink(false)
         .show(ui, |ui| {
@@ -28,6 +31,7 @@ pub fn show(
                     let entry = &tab.entries()[entry_index];
                     let selected = tab.selection.contains(&entry.path);
                     let (rect, response) = ui.allocate_exact_size(cell, Sense::click_and_drag());
+                    cells.push((index, rect));
                     if tab.scroll_to == Some(index) {
                         response.scroll_to_me(None);
                     }
@@ -126,9 +130,23 @@ pub fn show(
                         entry,
                         tab,
                         super::MenuContext::new(shared),
+                        true,
                         actions,
                     );
                 }
             });
         });
+
+    let origin = cells.first().map(|(_, rect)| rect.min);
+    if let Some(origin) = origin {
+        for (_, cell) in &mut cells {
+            *cell = cell.translate(-origin.to_vec2());
+        }
+    }
+    let hits = |rect| super::marquee::rects_hit(rect, &cells);
+    let layout = origin.map(|origin| super::marquee::Layout {
+        content_origin: origin,
+        hits: &hits,
+    });
+    super::marquee::update(ui, tab, visible, drag_select, &output, layout, actions);
 }

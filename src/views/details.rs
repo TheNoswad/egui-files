@@ -1,6 +1,6 @@
 //! Sortable table with name, size, modified, created and kind columns.
 
-use egui::{Align, Button, Layout, RichText, Sense, TextStyle, Ui};
+use egui::{Align, Button, Layout, PointerButton, Pos2, Rect, RichText, Sense, TextStyle, Ui};
 use egui_extras::TableBuilder;
 use egui_phosphor::regular as icon;
 
@@ -55,9 +55,16 @@ pub fn show(
     visible: &[usize],
     menu: super::MenuContext,
     folder_sizes: Option<&FolderSizes>,
+    drag_select: bool,
     actions: &mut Vec<Action>,
 ) {
     let row_height = ui.text_style_height(&TextStyle::Body) + 6.0;
+    let stride = row_height + ui.spacing().item_spacing.y;
+    // Dragging a row from outside its name selects, like dragging empty space.
+    let mut drag_select = drag_select;
+    // The first row laid out, to find the top of the (scrolled) content.
+    let mut first_row: Option<(usize, Rect)> = None;
+    let press = ui.input(|i| i.pointer.press_origin());
     let colors = crate::theme::colors(ui.ctx());
     colors.apply_to_list(ui.visuals_mut());
     let columns = list_columns::Layout::new(ui, &COLUMNS);
@@ -105,11 +112,13 @@ pub fn show(
             }
         })
         .body(|body| {
+            let (first_row, drag_select) = (&mut first_row, &mut drag_select);
             body.rows(row_height, visible.len(), |mut row| {
                 let index = row.index();
                 let entry = &tab.entries()[visible[index]];
                 let selected = tab.selection.contains(&entry.path);
                 row.set_selected(selected);
+                let mut name_rect = Rect::NOTHING;
                 row.col(|ui| {
                     let mut name = RichText::new(&entry.name);
                     let mut icon = RichText::new(entry.icon());
@@ -122,8 +131,7 @@ pub fn show(
                         }
                     }
                     ui.spacing_mut().item_spacing.x = 4.0;
-                    ui.label(icon);
-                    ui.label(name);
+                    name_rect = ui.label(icon).rect.union(ui.label(name).rect);
                 });
                 if columns.shown(SIZE) {
                     row.col(|ui| {
@@ -154,8 +162,21 @@ pub fn show(
                         ui.label(entry.kind());
                     });
                 }
-                super::item_interaction(&row.response(), index, entry, tab, menu, actions);
+                let response = row.response();
+                first_row.get_or_insert((index, response.rect));
+                let drag_out = !press.is_some_and(|press| !name_rect.contains(press));
+                if !drag_out && response.drag_started_by(PointerButton::Primary) {
+                    *drag_select = true;
+                }
+                super::item_interaction(&response, index, entry, tab, menu, drag_out, actions);
             });
         });
     columns.resize_handles(ui, output.inner_rect.bottom());
+
+    let hits = |rect| super::marquee::rows_hit(rect, stride, row_height, visible.len());
+    let layout = first_row.map(|(index, rect)| super::marquee::Layout {
+        content_origin: Pos2::new(rect.left(), rect.top() - index as f32 * stride),
+        hits: &hits,
+    });
+    super::marquee::update(ui, tab, visible, drag_select, &output, layout, actions);
 }

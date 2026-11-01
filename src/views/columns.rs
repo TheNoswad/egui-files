@@ -3,7 +3,7 @@
 
 use std::{hash::Hash, path::Path};
 
-use egui::{Align, Layout, ScrollArea, Ui, vec2};
+use egui::{Align, Layout, ScrollArea, Ui, scroll_area::ScrollAreaOutput, vec2};
 use egui_phosphor::regular as icon;
 
 use crate::{
@@ -29,6 +29,7 @@ pub fn show(
     tab: &BrowserTab,
     visible: &[usize],
     shared: &mut Shared,
+    drag_select: bool,
     actions: &mut Vec<Action>,
 ) {
     let show_hidden = shared.show_hidden;
@@ -48,7 +49,7 @@ pub fn show(
                 }
                 let menu = super::MenuContext::new(shared);
                 column(ui, height, |ui| {
-                    current_column(ui, tab, visible, menu, actions)
+                    current_column(ui, tab, visible, menu, drag_select, actions)
                 });
                 if let Some(entry) = tab.preview_entry() {
                     column(ui, height, |ui| {
@@ -82,11 +83,11 @@ fn entry_list(
     count: usize,
     scroll_to: ScrollTo,
     mut add_row: impl FnMut(&mut Ui, usize),
-) {
+) -> Option<ScrollAreaOutput<()>> {
     if count == 0 {
         ui.add_space(8.0);
         ui.vertical_centered(|ui| ui.weak("Empty folder"));
-        return;
+        return None;
     }
     let row_height = widgets::row_height(ui);
     ui.spacing_mut().item_spacing.y = 0.0;
@@ -103,6 +104,7 @@ fn entry_list(
         ScrollTo::Always(row) => widgets::ensure_row_visible(ui, &output, row, row_height),
         ScrollTo::Once(row) => widgets::ensure_row_visible_once(ui, &output, row, row_height),
     }
+    Some(output)
 }
 
 fn entry_row(ui: &mut Ui, entry: &Entry, selected: bool) -> egui::Response {
@@ -188,14 +190,17 @@ fn current_column(
     tab: &BrowserTab,
     visible: &[usize],
     menu: super::MenuContext,
+    drag_select: bool,
     actions: &mut Vec<Action>,
 ) {
+    // The first row laid out, to find the top of the (scrolled) content.
+    let mut first_row = None;
     let scroll_to = match (tab.scroll_to, tab.cursor) {
         (Some(row), _) => ScrollTo::Always(row),
         (None, Some(row)) => ScrollTo::Once(row),
         (None, None) => ScrollTo::None,
     };
-    entry_list(
+    let output = entry_list(
         ui,
         ("column", tab.id, &tab.path),
         visible.len(),
@@ -204,9 +209,21 @@ fn current_column(
             let entry = &tab.entries()[visible[i]];
             let selected = tab.selection.contains(&entry.path);
             let response = entry_row(ui, entry, selected);
-            super::item_interaction(&response, i, entry, tab, menu, actions);
+            first_row.get_or_insert((i, response.rect));
+            super::item_interaction(&response, i, entry, tab, menu, true, actions);
         },
     );
+    if let Some(output) = output {
+        let row_height = widgets::row_height(ui);
+        let hits = |rect| super::marquee::rows_hit(rect, row_height, row_height, visible.len());
+        let layout = first_row.map(
+            |(index, rect): (usize, egui::Rect)| super::marquee::Layout {
+                content_origin: egui::pos2(rect.left(), rect.top() - index as f32 * row_height),
+                hits: &hits,
+            },
+        );
+        super::marquee::update(ui, tab, visible, drag_select, &output, layout, actions);
+    }
 }
 
 fn preview_folder(
