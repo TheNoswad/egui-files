@@ -32,6 +32,8 @@ mod watcher;
 #[cfg(target_os = "linux")]
 mod wayland_dnd;
 mod widgets;
+#[cfg(windows)]
+mod windows_drag;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {

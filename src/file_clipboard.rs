@@ -1,7 +1,10 @@
 //! Copied and cut files on the Windows clipboard, the way Explorer puts them
 //! there: `CF_HDROP` (what Explorer and chat apps paste files from) plus
-//! "Preferred DropEffect" (copy or move). The paths also go on as text, since
-//! egui only reports Ctrl+V when the clipboard holds non-empty text.
+//! "Preferred DropEffect" (copy or move). No text, like Explorer: chat apps such
+//! as Discord paste text in preference to files whenever there is any.
+//!
+//! egui-winit (0.36 and 0.37) drops Ctrl+V entirely when the clipboard has no
+//! text (or image), so [`PasteKey`] notices the key press itself.
 
 use std::{mem::size_of, os::windows::ffi::OsStrExt, path::PathBuf};
 
@@ -14,9 +17,12 @@ use windows::{
                 SetClipboardData,
             },
             Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock},
-            Ole::{CF_HDROP, CF_UNICODETEXT, DROPEFFECT_COPY, DROPEFFECT_MOVE},
+            Ole::{CF_HDROP, DROPEFFECT_COPY, DROPEFFECT_MOVE},
         },
-        UI::Shell::{CFSTR_PREFERREDDROPEFFECT, DROPFILES},
+        UI::{
+            Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL, VK_MENU, VK_V},
+            Shell::{CFSTR_PREFERREDDROPEFFECT, DROPFILES},
+        },
     },
     core::Result,
 };
@@ -42,11 +48,6 @@ pub fn set(paths: &[PathBuf], cut: bool) -> Result<()> {
     } else {
         DROPEFFECT_COPY
     };
-    let text: Vec<u16> = crate::tab::join_paths(paths)
-        .replace('\n', "\r\n")
-        .encode_utf16()
-        .chain([0])
-        .collect();
 
     // Another app may hold the clipboard open for a moment.
     let mut tries = 0;
@@ -63,13 +64,6 @@ pub fn set(paths: &[PathBuf], cut: bool) -> Result<()> {
         put(
             RegisterClipboardFormatW(CFSTR_PREFERREDDROPEFFECT),
             &effect.0.to_le_bytes(),
-        )?;
-        put(
-            CF_UNICODETEXT.0.into(),
-            &text
-                .iter()
-                .flat_map(|c| c.to_le_bytes())
-                .collect::<Vec<_>>(),
         )
     })();
     let _ = unsafe { CloseClipboard() };
@@ -100,5 +94,51 @@ fn bytes_of(header: &DROPFILES) -> &[u8] {
     // SAFETY: DROPFILES is plain old data with no padding.
     unsafe {
         std::slice::from_raw_parts((header as *const DROPFILES).cast(), size_of::<DROPFILES>())
+    }
+}
+
+/// Reports Ctrl+V as [`egui::Event::Paste`] when egui-winit didn't, because the
+/// clipboard had no text (our own copied files, or Explorer's).
+///
+/// Workaround for egui-winit swallowing the key press; see TODO.md.
+#[derive(Default)]
+pub struct PasteKey {
+    v_down: bool,
+}
+
+impl PasteKey {
+    pub fn poll(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        let down = |key: i32| unsafe { GetKeyState(key) } < 0;
+        let v_down = down(VK_V.0.into());
+        // A press and release can both land between two frames; egui still
+        // gets the release (only the press is swallowed).
+        let released = raw_input.events.iter().any(|e| {
+            matches!(
+                e,
+                egui::Event::Key {
+                    key: egui::Key::V,
+                    pressed: false,
+                    ..
+                }
+            )
+        });
+        let pressed = (v_down || released) && !self.v_down;
+        self.v_down = v_down;
+        if !pressed
+            || !raw_input.focused
+            || !down(VK_CONTROL.0.into())
+            // Ctrl+Alt is AltGr on many layouts.
+            || down(VK_MENU.0.into())
+            || raw_input
+                .events
+                .iter()
+                .any(|e| matches!(e, egui::Event::Paste(_)))
+            // A text field or terminal would treat an empty paste as input
+            // (replacing a selection, sending bracketed-paste markers).
+            || ctx.memory(|m| m.focused()).is_some()
+        {
+            return;
+        }
+        raw_input.events.push(egui::Event::Paste(String::new()));
     }
 }
