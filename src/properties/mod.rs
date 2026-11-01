@@ -22,7 +22,7 @@ use egui_phosphor::regular as icon;
 use serde::{Deserialize, Serialize};
 
 pub use elevate::run_helper;
-use view::View;
+use view::{Host, View};
 
 use crate::tab::Shared;
 
@@ -150,7 +150,7 @@ impl PropertiesTab {
         let view = self
             .view
             .get_or_insert_with(|| View::new(self.properties.clone(), false));
-        view.ui(ui, shared, None);
+        view.ui(ui, shared, Host::Tab);
         // A rename changes the paths; keep them for the next restart.
         self.properties.clone_from(&view.source);
     }
@@ -209,8 +209,14 @@ impl Properties {
         shared.properties.windows = windows;
     }
 
-    /// The preview pane's editable properties for `path`.
-    pub fn preview_ui(ui: &mut Ui, path: &Path, shared: &mut Shared) {
+    /// The preview pane's properties for `path`, the same as elsewhere but
+    /// with the bulkier sections closed. `buttons` go under the name.
+    pub fn preview_ui(
+        ui: &mut Ui,
+        path: &Path,
+        shared: &mut Shared,
+        buttons: &mut dyn FnMut(&mut Ui),
+    ) {
         let source = Source::Files(vec![path.to_path_buf()]);
         let mut view = shared
             .properties
@@ -218,21 +224,8 @@ impl Properties {
             .take()
             .filter(|v| v.source == source)
             .unwrap_or_else(|| View::new(source.clone(), true));
-        let mut open_full = false;
-        egui::CollapsingHeader::new(format!("{} Properties", icon::INFO))
-            .id_salt("preview-properties")
-            .default_open(true)
-            .show(ui, |ui| {
-                view.ui(ui, shared, None);
-                if ui
-                    .small_button(format!("{} More…", icon::ARROW_SQUARE_OUT))
-                    .on_hover_text("All properties (Alt+Enter)")
-                    .clicked()
-                {
-                    open_full = true;
-                }
-            });
-        if open_full {
+        view.ui(ui, shared, Host::Preview { buttons });
+        if std::mem::take(&mut view.open_full) {
             shared
                 .app_actions
                 .push(crate::tab::AppAction::Properties(view.source.clone()));
@@ -259,7 +252,13 @@ fn window_ui(ctx: &egui::Context, window: &mut Window, shared: &mut Shared) -> b
             let close = ui.input(|i| i.viewport().close_requested());
             let mut closed = false;
             egui::CentralPanel::default().show(ui, |ui| {
-                window.view.ui(ui, shared, Some(&mut closed));
+                window.view.ui(
+                    ui,
+                    shared,
+                    Host::Window {
+                        closed: &mut closed,
+                    },
+                );
             });
             !(close || closed)
         })
@@ -277,7 +276,15 @@ fn window_ui(ctx: &egui::Context, window: &mut Window, shared: &mut Shared) -> b
             .resizable(true)
             .default_size([440.0, 560.0])
             .min_size([300.0, 200.0])
-            .show(ctx, |ui| window.view.ui(ui, shared, Some(&mut closed)));
+            .show(ctx, |ui| {
+                window.view.ui(
+                    ui,
+                    shared,
+                    Host::Window {
+                        closed: &mut closed,
+                    },
+                )
+            });
         open && !closed
     }
 }

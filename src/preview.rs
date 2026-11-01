@@ -135,9 +135,13 @@ pub fn pane(ui: &mut Ui, entry: Option<&Entry>, shared: &mut Shared, actions: &m
         .auto_shrink(false)
         .show(ui, |ui| match entry {
             Some(entry) => {
-                show(ui, entry, shared, images::PREVIEW_SIZE, actions);
-                ui.add_space(8.0);
-                crate::properties::Properties::preview_ui(ui, &entry.path, shared);
+                // The properties below name and describe the item, so the
+                // preview leaves that to them and only adds its buttons.
+                let editable = show(ui, entry, shared, images::PREVIEW_SIZE, actions, false);
+                ui.add_space(4.0);
+                crate::properties::Properties::preview_ui(ui, &entry.path, shared, &mut |ui| {
+                    buttons(ui, entry, editable, actions);
+                });
             }
             None => {
                 ui.add_space(16.0);
@@ -147,13 +151,16 @@ pub fn pane(ui: &mut Ui, entry: Option<&Entry>, shared: &mut Shared, actions: &m
 }
 
 /// Shows a preview of `entry`. Images are decoded at most `max_side` pixels.
+/// With `with_details`, also its name, metadata and Open/Edit buttons.
+/// Returns whether it can be edited as text.
 pub fn show(
     ui: &mut Ui,
     entry: &Entry,
     shared: &mut Shared,
     max_side: u32,
     actions: &mut Vec<Action>,
-) {
+    with_details: bool,
+) -> bool {
     let Shared {
         images,
         videos,
@@ -164,6 +171,7 @@ pub fn show(
     } = shared;
     let mut dimensions = None;
     let mut duration = None;
+    let mut editable = false;
     let is_archive = !entry.is_dir && archive::is_archive(&entry.path);
     ui.vertical_centered(|ui| {
         ui.add_space(8.0);
@@ -177,10 +185,12 @@ pub fn show(
             // Text can be arbitrarily long, so its details and buttons go first
             // where they stay reachable.
             let preview = texts.get(entry);
-            let editable = preview.text.is_some() && editor::can_edit(&entry.path, false);
+            editable = preview.text.is_some() && editor::can_edit(&entry.path, false);
             if preview.text.as_ref().is_some_and(|t| !t.trim().is_empty()) {
-                details(ui, entry, None, None, editable, actions);
-                ui.add_space(8.0);
+                if with_details {
+                    details(ui, entry, None, None, editable, actions);
+                    ui.add_space(8.0);
+                }
                 let theme = editor_prefs.theme(ui);
                 let colors = ThemeColors::of(theme, ui.visuals());
                 preview.update_colors(ui.ctx(), theme);
@@ -205,18 +215,23 @@ pub fn show(
                     });
             } else {
                 big_icon(ui, entry);
-                ui.add_space(8.0);
-                details(ui, entry, None, None, editable, actions);
+                if with_details {
+                    ui.add_space(8.0);
+                    details(ui, entry, None, None, editable, actions);
+                }
             }
             return;
         }
-        ui.add_space(8.0);
-        details(ui, entry, dimensions, duration, false, actions);
+        if with_details {
+            ui.add_space(8.0);
+            details(ui, entry, dimensions, duration, false, actions);
+        }
     });
     if is_archive {
         ui.add_space(8.0);
         archive_contents(ui, &entry.path, archives);
     }
+    editable
 }
 
 /// The name, metadata and Open/Edit buttons under (or above) a preview.
@@ -242,6 +257,11 @@ fn details(
     }
     crate::dates::label(ui, entry.modified, true);
     ui.add_space(8.0);
+    buttons(ui, entry, editable, actions);
+}
+
+/// Open, and Edit for text, centered.
+pub fn buttons(ui: &mut Ui, entry: &Entry, editable: bool, actions: &mut Vec<Action>) {
     ui.horizontal(|ui| {
         let buttons = if editable { 2.0 } else { 1.0 };
         let width = 70.0 * buttons;
@@ -600,7 +620,7 @@ mod tests {
         for _ in 0..3 {
             shared.videos.begin_frame();
             let mut output = ctx.run_ui(input(), |ui| {
-                show(ui, &entry, &mut shared, 256, &mut Vec::new());
+                show(ui, &entry, &mut shared, 256, &mut Vec::new(), true);
             });
             output.textures_delta.clear();
         }

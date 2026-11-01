@@ -241,6 +241,6 @@ fn preview_file(
         .id_salt(("column-preview", tab.id))
         .auto_shrink(false)
         .show(ui, |ui| {
-            preview::show(ui, entry, shared, images::THUMBNAIL_SIZE, actions);
+            preview::show(ui, entry, shared, images::THUMBNAIL_SIZE, actions, true);
         });
 }

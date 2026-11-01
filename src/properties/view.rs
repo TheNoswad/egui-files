@@ -1,4 +1,6 @@
-//! The properties UI, the same in a tab, a window and the preview pane.
+//! The properties UI. The same in a tab, a window and the preview pane:
+//! a header naming the items, then the same sections in the same order,
+//! with one label column width throughout so values line up.
 
 use std::{
     path::{Path, PathBuf},
@@ -8,8 +10,8 @@ use std::{
 
 use chrono::{DateTime, Local, NaiveDateTime, TimeZone};
 use egui::{
-    Align, Button, Checkbox, CollapsingHeader, Color32, Grid, Layout, ProgressBar, RichText,
-    ScrollArea, TextEdit, Ui,
+    Align, Button, Checkbox, CollapsingHeader, Color32, CornerRadius, Grid, Id, Key, Layout,
+    ProgressBar, RichText, ScrollArea, Sense, TextEdit, Ui, vec2,
 };
 use egui_phosphor::regular as icon;
 
@@ -34,6 +36,9 @@ use crate::{
 const REFRESH: Duration = Duration::from_secs(2);
 /// Failures listed before "and N more".
 const SHOWN_FAILURES: usize = 20;
+/// Width of the label column in every section, so values line up.
+const LABEL_WIDTH: f32 = 96.0;
+const ROW_SPACING: [f32; 2] = [8.0, 6.0];
 
 /// Unix permission bits, by row (owner, group, others) and column.
 const PERMISSIONS: [(&str, [u32; 3]); 3] = [
@@ -73,6 +78,20 @@ const OTHER_ATTRIBUTES: [(&str, u32); 6] = [
 
 const DATE_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
 
+/// Where the view is shown, and what that adds.
+pub enum Host<'a> {
+    Tab,
+    /// With OK/Close buttons; `closed` is set when one closes it.
+    Window {
+        closed: &'a mut bool,
+    },
+    /// The preview pane: the bulkier sections start closed, and the
+    /// preview's own buttons go under the name.
+    Preview {
+        buttons: &'a mut dyn FnMut(&mut Ui),
+    },
+}
+
 /// Changes not applied yet.
 #[derive(Clone, Default, PartialEq)]
 struct Edits {
@@ -94,6 +113,25 @@ impl Edits {
     fn is_empty(&self) -> bool {
         *self == Edits::default()
     }
+
+    /// How many things are changed, for "3 changes not applied".
+    fn count(&self) -> usize {
+        [
+            self.name.is_some(),
+            self.mode.iter().any(|b| !b.is_empty()),
+            self.attributes.iter().any(|b| !b.is_empty()),
+            self.uid.is_some(),
+            self.gid.is_some(),
+            self.account.is_some(),
+            self.modified.is_some(),
+            self.accessed.is_some(),
+            self.link_target.is_some(),
+            self.default_app.is_some(),
+        ]
+        .into_iter()
+        .filter(|&b| b)
+        .count()
+    }
 }
 
 /// Text being typed into a field, kept until it's committed.
@@ -110,8 +148,10 @@ struct Drafts {
 
 pub struct View {
     pub source: Source,
-    /// In the preview pane: fewer sections, no scroll area of its own.
+    /// In the preview pane.
     compact: bool,
+    /// The preview's header button asked for the full view.
+    pub open_full: bool,
     items: Vec<Item>,
     loaded: Option<Instant>,
     /// The items when editing started, to tell what changed on disk since.
@@ -144,6 +184,7 @@ impl View {
         Self {
             source,
             compact,
+            open_full: false,
             items: Vec::new(),
             loaded: None,
             base: None,
@@ -213,8 +254,7 @@ impl View {
             self.walk = (!roots.is_empty()).then(|| (roots.clone(), Walk::start(ctx, roots)));
         }
         if let [item] = self.items.as_slice() {
-            if !self.compact
-                && !item.is_dir
+            if !item.is_dir
                 && media::applies(&item.path)
                 && self.media.as_ref().is_none_or(|m| m.path != item.path)
             {
@@ -225,8 +265,6 @@ impl View {
             }
         }
         if let Some(first) = self.items.first() {
-            // Of the folder an item's in for files, so it works for the
-            // items that are mount points too.
             let path = first.path.clone();
             if self.volume.as_ref().is_none_or(|(p, ..)| *p != path) {
                 self.volume = Some((path.clone(), platform::volume(&path), places::space(&path)));
@@ -278,27 +316,45 @@ impl View {
         self.base = None;
     }
 
-    pub fn ui(&mut self, ui: &mut Ui, shared: &mut Shared, close: Option<&mut bool>) {
+    pub fn ui(&mut self, ui: &mut Ui, shared: &mut Shared, host: Host) {
         let ctx = ui.ctx().clone();
         self.poll(&ctx);
         self.refresh(&ctx);
         ctx.request_repaint_after(REFRESH);
         let immediate = shared.properties.prefs.apply_immediately;
-        if self.compact {
-            self.body(ui, shared);
-            self.footer(ui, &ctx, immediate, None);
-        } else {
-            ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
+        match host {
+            Host::Preview { buttons } => {
+                self.header_ui(ui);
                 ui.add_space(4.0);
-                self.footer(ui, &ctx, immediate, close);
-                ui.separator();
-                ui.with_layout(Layout::top_down(Align::Min), |ui| {
-                    ScrollArea::vertical()
-                        .id_salt("properties-body")
-                        .auto_shrink(false)
-                        .show(ui, |ui| self.body(ui, shared));
+                buttons(ui);
+                ui.add_space(6.0);
+                self.body(ui, shared);
+                self.footer(ui, &ctx, immediate, None);
+            }
+            Host::Tab | Host::Window { .. } => {
+                let closed = match host {
+                    Host::Window { closed } => Some(closed),
+                    _ => None,
+                };
+                ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
+                    if self.footer_needed(closed.is_some()) {
+                        ui.add_space(4.0);
+                        self.footer(ui, &ctx, immediate, closed);
+                        ui.separator();
+                    }
+                    ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                        ScrollArea::vertical()
+                            .id_salt("properties-body")
+                            .auto_shrink(false)
+                            .show(ui, |ui| {
+                                ui.add_space(4.0);
+                                self.header_ui(ui);
+                                ui.add_space(8.0);
+                                self.body(ui, shared);
+                            });
+                    });
                 });
-            });
+            }
         }
         if std::mem::take(&mut self.commit) && immediate && !self.edits.is_empty() {
             self.apply(&ctx);
@@ -314,6 +370,135 @@ impl View {
     }
 
     // -----------------------------------------------------------------------
+    // Header
+
+    /// An icon, the name (editable for one item) and a line about it.
+    fn header_ui(&mut self, ui: &mut Ui) {
+        let (glyph, summary) = self.summary();
+        let editable = self.editable();
+        let compact = self.compact;
+        ui.horizontal(|ui| {
+            if !compact {
+                ui.label(RichText::new(glyph).size(30.0));
+            }
+            ui.vertical(|ui| {
+                match self.items.as_slice() {
+                    [item] if matches!(self.source, Source::Files(_)) => {
+                        let (name, path) = (item.name.clone(), item.path.clone());
+                        let shown = self.edits.name.clone().unwrap_or_else(|| name.clone());
+                        let can_rename = path.parent().is_some_and(|p| p != path);
+                        let width = ui.available_width() - if compact { 28.0 } else { 0.0 };
+                        let row = ui.horizontal(|ui| {
+                            let draft = self.drafts.name.get_or_insert(shown.clone());
+                            let response = ui
+                                .add_enabled(
+                                    editable && can_rename,
+                                    TextEdit::singleline(draft)
+                                        .font(egui::TextStyle::Heading)
+                                        .frame(egui::Frame::NONE)
+                                        .desired_width(width.max(60.0)),
+                                )
+                                .on_hover_text("Click to rename");
+                            // While typing the text is only a draft; it
+                            // becomes an edit once the field is left.
+                            if !response.has_focus() {
+                                let typed = self.drafts.name.take().unwrap_or_default();
+                                let typed = typed.trim().to_owned();
+                                if typed != shown {
+                                    let changed = !typed.is_empty() && typed != name;
+                                    self.set_edit(|e| e.name = changed.then_some(typed));
+                                }
+                                if response.lost_focus() {
+                                    self.commit = true;
+                                }
+                            }
+                            if compact && open_full_button(ui) {
+                                self.open_full = true;
+                            }
+                        });
+                        // An underline, so it reads as editable without a box.
+                        let rect = row.response.rect;
+                        let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
+                        ui.painter()
+                            .hline(rect.x_range(), rect.bottom() + 1.0, stroke);
+                    }
+                    _ => {
+                        ui.horizontal(|ui| {
+                            ui.heading(self.source.title());
+                            if compact && open_full_button(ui) {
+                                self.open_full = true;
+                            }
+                        });
+                    }
+                }
+                ui.add_space(2.0);
+                ui.weak(summary);
+            });
+        });
+        if self.edits.name.is_some() && self.changed_on_disk(|i| i.name.clone()) {
+            changed_marker(ui);
+        }
+        if self.items.iter().any(|i| !i.exists) && matches!(self.source, Source::Files(_)) {
+            let missing = self.items.iter().filter(|i| !i.exists).count();
+            let text = if self.items.len() == 1 {
+                "This item no longer exists".to_owned()
+            } else {
+                format!("{missing} of these items no longer exist")
+            };
+            ui.colored_label(
+                ui.visuals().warn_fg_color,
+                format!("{} {text}", icon::WARNING),
+            );
+        }
+    }
+
+    /// The header's icon and one-line description.
+    fn summary(&self) -> (&'static str, String) {
+        let walked = self.walk.as_ref().map(|(_, w)| w.counts());
+        match &self.source {
+            Source::Files(_) => match self.items.as_slice() {
+                [] => (icon::FILE, String::new()),
+                [item] => {
+                    let glyph = crate::fs::icon_for(&item.path, item.is_dir, item.is_symlink);
+                    let mut parts = vec![item.kind()];
+                    if let Some(counts) = walked {
+                        parts.push(plural(counts.files + counts.dirs, "item", "items"));
+                        parts.push(human_size(counts.bytes));
+                    } else if !item.is_dir {
+                        parts.push(human_size(item.size));
+                    }
+                    (glyph, parts.join(" · "))
+                }
+                items => {
+                    let dirs = items.iter().filter(|i| i.is_dir).count() as u64;
+                    let files = items.len() as u64 - dirs;
+                    let bytes =
+                        items.iter().map(|i| i.size).sum::<u64>() + walked.map_or(0, |c| c.bytes);
+                    (
+                        icon::COPY,
+                        format!("{} · {}", count_words(files, dirs), human_size(bytes)),
+                    )
+                }
+            },
+            Source::Trash(items) => (
+                icon::TRASH,
+                format!(
+                    "In the trash · {}",
+                    plural(items.len() as u64, "item", "items")
+                ),
+            ),
+            Source::Archive { archive, entries } => (
+                icon::FILE_ZIP,
+                format!(
+                    "In {} · {}",
+                    display_name(archive),
+                    plural(entries.len() as u64, "item", "items")
+                ),
+            ),
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Files on disk
 
     fn files_ui(&mut self, ui: &mut Ui, shared: &mut Shared) {
@@ -321,153 +506,89 @@ impl View {
             ui.spinner();
             return;
         }
-        if self.items.iter().any(|i| !i.exists) {
-            let missing = self.items.iter().filter(|i| !i.exists).count();
-            let text = if self.items.len() == 1 {
-                "This item no longer exists.".to_owned()
-            } else {
-                format!("{missing} of these items no longer exist.")
-            };
-            ui.colored_label(
-                ui.visuals().warn_fg_color,
-                format!("{} {text}", icon::WARNING),
-            );
-        }
-        if !self.compact {
-            self.header_ui(ui);
-            ui.add_space(4.0);
-        }
+        // The same sections everywhere; the preview opens fewer at first.
+        let full = !self.compact;
         self.general_ui(ui, shared);
+        self.media_ui(ui, full);
         self.dates_ui(ui);
-        self.permissions_ui(ui);
-        self.owner_ui(ui);
-        if !self.compact {
-            self.media_ui(ui);
-            self.checksums_ui(ui);
-            self.filesystem_ui(ui);
-        }
-    }
-
-    fn header_ui(&mut self, ui: &mut Ui) {
-        let editable = self.editable();
-        ui.horizontal(|ui| {
-            let glyph = match self.items.as_slice() {
-                [item] => crate::fs::icon_for(&item.path, item.is_dir, item.is_symlink),
-                _ => icon::COPY,
-            };
-            ui.label(RichText::new(glyph).size(32.0));
-            match self.items.as_slice() {
-                [item] => {
-                    let (name, path) = (item.name.clone(), item.path.clone());
-                    let shown = self.edits.name.clone().unwrap_or_else(|| name.clone());
-                    let draft = self.drafts.name.get_or_insert(shown.clone());
-                    let has_parent = path.parent().is_some_and(|p| p != path);
-                    let response = ui
-                        .add_enabled(
-                            editable && has_parent,
-                            TextEdit::singleline(draft)
-                                .font(egui::TextStyle::Heading)
-                                .desired_width(f32::INFINITY),
-                        )
-                        .on_hover_text(path.display().to_string());
-                    // While typing the text is only a draft; it becomes an
-                    // edit once the field is left.
-                    if !response.has_focus() {
-                        let typed = self.drafts.name.take().unwrap_or_default();
-                        let typed = typed.trim().to_owned();
-                        if typed != shown {
-                            let changed = !typed.is_empty() && typed != name;
-                            self.set_edit(|e| e.name = changed.then_some(typed));
-                        }
-                        if response.lost_focus() {
-                            self.commit = true;
-                        }
-                    }
-                }
-                items => {
-                    let (dirs, files) = (
-                        items.iter().filter(|i| i.is_dir).count(),
-                        items.iter().filter(|i| !i.is_dir).count(),
-                    );
-                    ui.vertical(|ui| {
-                        ui.heading(format!("{} items", items.len()));
-                        ui.weak(count_words(files as u64, dirs as u64));
-                    });
-                }
-            }
-        });
-        if self.edits.name.is_some() && self.changed_on_disk(|i| i.name.clone()) {
-            changed_marker(ui);
-        }
+        self.permissions_ui(ui, full);
+        self.owner_ui(ui, full);
+        self.checksums_ui(ui);
+        self.filesystem_ui(ui);
     }
 
     fn general_ui(&mut self, ui: &mut Ui, shared: &mut Shared) {
         let ctx = ui.ctx().clone();
         let walked = self.walk.as_ref().map(|(_, w)| w.counts());
         let editable = self.editable();
+        let handlers = self.handlers(&ctx);
         section(ui, "General", "properties-general", true, false, |ui| {
-            Grid::new("properties-general-grid")
-                .num_columns(2)
-                .spacing([12.0, 6.0])
-                .show(ui, |ui| {
-                    let items = &self.items;
-                    row(ui, "Type", |ui| {
-                        ui.label(common(items, Item::kind).unwrap_or_else(|| "Various".to_owned()));
-                    });
-                    let parents: Vec<Option<&Path>> =
-                        items.iter().map(|i| i.path.parent()).collect();
-                    if let Some(Some(parent)) = parents.first()
-                        && parents.iter().all(|p| p == &Some(*parent))
+            grid(ui, "properties-general-grid", |ui| {
+                let items = &self.items;
+                row(ui, "Type", |ui| {
+                    ui.label(common(items, Item::kind).unwrap_or_else(|| "Various".to_owned()));
+                    if cfg!(target_os = "linux")
+                        && let Some(handlers) = &handlers
+                        && let [mime] = handlers.types.as_slice()
                     {
-                        row(ui, "Location", |ui| {
-                            let response = ui
-                                .add(egui::Link::new(parent.display().to_string()))
-                                .on_hover_text("Show in a new tab");
-                            if response.clicked()
-                                && let Some(item) = items.first()
-                            {
-                                shared
-                                    .app_actions
-                                    .push(AppAction::Reveal(item.path.clone()));
-                            }
-                        });
+                        ui.weak(mime);
                     }
-                    let file_bytes: u64 = items.iter().map(|i| i.size).sum();
-                    let bytes = file_bytes + walked.map_or(0, |c| c.bytes);
-                    row(ui, "Size", |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label(format!(
-                                "{} ({} bytes)",
-                                human_size(bytes),
-                                group_digits(bytes)
-                            ));
-                            if walked.is_some_and(|c| !c.done) {
-                                ui.spinner();
-                            }
-                        });
+                });
+                let parents: Vec<Option<&Path>> = items.iter().map(|i| i.path.parent()).collect();
+                if let Some(Some(parent)) = parents.first()
+                    && parents.iter().all(|p| p == &Some(*parent))
+                {
+                    row(ui, "Location", |ui| {
+                        let response = ui
+                            .add(egui::Link::new(parent.display().to_string()))
+                            .on_hover_text("Show in a new tab");
+                        if response.clicked()
+                            && let Some(item) = items.first()
+                        {
+                            shared
+                                .app_actions
+                                .push(AppAction::Reveal(item.path.clone()));
+                        }
                     });
-                    let allocated: Option<u64> = items
-                        .iter()
-                        .map(|i| i.allocated)
-                        .sum::<Option<u64>>()
-                        .map(|a| a + walked.map_or(0, |c| c.allocated));
-                    if let Some(allocated) = allocated {
-                        row(ui, "On disk", |ui| {
-                            ui.label(human_size(allocated));
-                        });
+                }
+                let bytes =
+                    items.iter().map(|i| i.size).sum::<u64>() + walked.map_or(0, |c| c.bytes);
+                row(ui, "Size", |ui| {
+                    ui.label(human_size(bytes));
+                    if bytes >= 1024 {
+                        ui.weak(format!("{} bytes", group_digits(bytes)));
                     }
-                    if let Some(counts) = walked {
-                        row(ui, "Contains", |ui| contains_label(ui, counts));
+                    if walked.is_some_and(|c| !c.done) {
+                        ui.spinner();
                     }
-                    if let [item] = items.as_slice()
-                        && item.is_symlink
-                    {
-                        let target = item
-                            .link_target
-                            .as_ref()
-                            .map(|t| t.display().to_string())
-                            .unwrap_or_default();
-                        row(ui, "Points to", |ui| {
+                });
+                let allocated: Option<u64> = items
+                    .iter()
+                    .map(|i| i.allocated)
+                    .sum::<Option<u64>>()
+                    .map(|a| a + walked.map_or(0, |c| c.allocated));
+                // Only worth a row when it says something Size doesn't.
+                if let Some(allocated) = allocated
+                    && human_size(allocated) != human_size(bytes)
+                {
+                    row(ui, "On disk", |ui| {
+                        ui.label(human_size(allocated));
+                    });
+                }
+                if let Some(counts) = walked {
+                    row(ui, "Contains", |ui| contains_label(ui, counts));
+                }
+                if let [item] = items.as_slice()
+                    && item.is_symlink
+                {
+                    let target = item
+                        .link_target
+                        .as_ref()
+                        .map(|t| t.display().to_string())
+                        .unwrap_or_default();
+                    let broken = item.broken;
+                    row(ui, "Points to", |ui| {
+                        ui.vertical(|ui| {
                             let draft = self.drafts.link.get_or_insert_with(|| {
                                 self.edits.link_target.clone().unwrap_or(target.clone())
                             });
@@ -475,38 +596,38 @@ impl View {
                                 editable,
                                 TextEdit::singleline(draft).desired_width(f32::INFINITY),
                             );
-                            if item.broken {
-                                ui.end_row();
-                                ui.label("");
+                            if broken {
                                 ui.colored_label(
                                     ui.visuals().warn_fg_color,
-                                    "The target doesn't exist",
+                                    format!("{} The target doesn't exist", icon::WARNING),
                                 );
                             }
                             if !response.has_focus() {
                                 let typed = self.drafts.link.take().unwrap_or_default();
                                 let changed = !typed.is_empty() && typed != target;
-                                if changed != self.edits.link_target.is_some()
-                                    || (changed
-                                        && self.edits.link_target.as_deref() != Some(&typed))
-                                {
-                                    self.edits.link_target = changed.then_some(typed);
-                                    self.base.get_or_insert_with(|| self.items.clone());
+                                let wanted = changed.then_some(typed);
+                                if wanted != self.edits.link_target {
+                                    self.set_edit(|e| e.link_target = wanted);
                                 }
                                 if response.lost_focus() {
                                     self.commit = true;
                                 }
                             }
                         });
-                    }
-                    self.default_app_ui(ui, &ctx, editable);
-                });
+                    });
+                }
+                if let Some(handlers) = &handlers {
+                    self.default_app_ui(ui, &ctx, handlers, editable);
+                }
+            });
         });
     }
 
-    fn default_app_ui(&mut self, ui: &mut Ui, ctx: &egui::Context, editable: bool) {
-        if self.items.iter().any(|i| i.is_dir || !i.exists) || self.items.is_empty() {
-            return;
+    /// The apps for the selected files; `None` for folders, or while the
+    /// list of apps loads.
+    fn handlers(&self, ctx: &egui::Context) -> Option<Arc<open_with::Handlers>> {
+        if self.items.is_empty() || self.items.iter().any(|i| i.is_dir || !i.exists) {
+            return None;
         }
         let subjects: Vec<open_with::Subject> = self
             .items
@@ -516,17 +637,16 @@ impl View {
                 on_disk: true,
             })
             .collect();
-        let Some(handlers) = open_with::handlers(ctx, &subjects) else {
-            row(ui, "Opens with", |ui| {
-                ui.spinner();
-            });
-            return;
-        };
-        if cfg!(target_os = "linux") && !handlers.types.is_empty() {
-            row(ui, "File type", |ui| {
-                ui.label(handlers.types.join(", "));
-            });
-        }
+        open_with::handlers(ctx, &subjects)
+    }
+
+    fn default_app_ui(
+        &mut self,
+        ui: &mut Ui,
+        ctx: &egui::Context,
+        handlers: &open_with::Handlers,
+        editable: bool,
+    ) {
         row(ui, "Opens with", |ui| {
             let current = self
                 .edits
@@ -538,11 +658,12 @@ impl View {
                 .map_or("No app".to_owned(), |a| a.name.clone());
             #[cfg(target_os = "linux")]
             {
+                let _ = ctx;
                 let one_type = handlers.types.len() == 1;
                 ui.add_enabled_ui(editable && one_type, |ui| {
                     egui::ComboBox::from_id_salt("properties-default-app")
                         .selected_text(name)
-                        .width(220.0)
+                        .width(ui.available_width().min(220.0))
                         .show_ui(ui, |ui| {
                             for app in handlers.default.iter().chain(&handlers.others) {
                                 let selected = current.as_ref().is_some_and(|c| c.id == app.id);
@@ -557,7 +678,7 @@ impl View {
                         .response
                         .on_disabled_hover_text("The items are of different types")
                         .on_hover_text(format!(
-                            "The default app for every “{}” file",
+                            "The default app for every {} file",
                             handlers.types.first().map_or("", String::as_str)
                         ));
                 });
@@ -568,7 +689,7 @@ impl View {
                 let busy = self.choosing_default.is_some();
                 if let [item] = self.items.as_slice()
                     && ui
-                        .add_enabled(editable && !busy, Button::new("Change…"))
+                        .add_enabled(editable && !busy, Button::new("Change…").small())
                         .on_hover_text("Choose the default app for this type of file")
                         .clicked()
                 {
@@ -587,8 +708,100 @@ impl View {
             }
             #[cfg(not(any(target_os = "linux", windows)))]
             {
-                let _ = editable;
+                let _ = (ctx, editable);
                 ui.label(name);
+            }
+        });
+    }
+
+    fn media_ui(&mut self, ui: &mut Ui, open: bool) {
+        let Some(probe) = &self.media else { return };
+        if self.items.len() != 1 {
+            return;
+        }
+        let title = if probe.get().is_some_and(|m| m.av.is_none()) {
+            "Image"
+        } else {
+            "Media"
+        };
+        section(ui, title, "properties-media", open, false, |ui| {
+            let Some(media) = probe.get() else {
+                ui.spinner();
+                return;
+            };
+            grid(ui, "properties-media-grid", |ui| {
+                if let Some([w, h]) = media.dimensions {
+                    row(ui, "Dimensions", |ui| {
+                        ui.label(format!("{w} × {h}"));
+                        let megapixels = f64::from(w) * f64::from(h) / 1e6;
+                        if megapixels >= 0.1 {
+                            ui.weak(format!("{megapixels:.1} MP"));
+                        }
+                    });
+                }
+                if let Some(av) = &media.av {
+                    if let Some(format) = &av.format {
+                        row(ui, "Format", |ui| {
+                            ui.label(format);
+                        });
+                    }
+                    if let Some(duration) = av.duration {
+                        row(ui, "Duration", |ui| {
+                            ui.label(crate::video::format_time(duration));
+                            if let Some(item) = self.items.first()
+                                && duration > 0.0
+                            {
+                                let kbps = item.size as f64 * 8.0 / duration / 1000.0;
+                                ui.weak(format!("{kbps:.0} kb/s"));
+                            }
+                        });
+                    }
+                    for (i, track) in av.tracks.iter().enumerate() {
+                        row(ui, if i == 0 { "Streams" } else { "" }, |ui| {
+                            ui.label(track);
+                        });
+                    }
+                }
+                for (label, value) in &media.camera {
+                    row(ui, label, |ui| {
+                        ui.label(value);
+                    });
+                }
+                if let Some((lat, lon)) = media.location {
+                    row(ui, "Location", |ui| {
+                        let text = format!("{lat:.5}, {lon:.5}");
+                        if ui
+                            .add(egui::Link::new(text))
+                            .on_hover_text("Show on OpenStreetMap")
+                            .clicked()
+                        {
+                            let url = format!(
+                                "https://www.openstreetmap.org/?mlat={lat}&mlon={lon}#map=16/{lat}/{lon}"
+                            );
+                            let _ = open::that_detached(url);
+                        }
+                    });
+                }
+                if let Some(error) = &media.error {
+                    row(ui, "", |ui| {
+                        ui.weak(error);
+                    });
+                }
+            });
+            if !media.exif_rest.is_empty() {
+                CollapsingHeader::new(
+                    RichText::new(format!("All tags ({})", media.exif_rest.len())).weak(),
+                )
+                .id_salt("properties-exif")
+                .show(ui, |ui| {
+                    grid(ui, "properties-exif-grid", |ui| {
+                        for (tag, value) in &media.exif_rest {
+                            row(ui, tag, |ui| {
+                                ui.label(value);
+                            });
+                        }
+                    });
+                });
             }
         });
     }
@@ -597,67 +810,54 @@ impl View {
         let editable = self.editable();
         let changed = (self.edits.modified.is_some() || self.edits.accessed.is_some())
             && self.changed_on_disk(|i| (i.modified, i.accessed));
-        section(
-            ui,
-            "Dates",
-            "properties-dates",
-            !self.compact,
-            changed,
-            |ui| {
-                Grid::new("properties-dates-grid")
-                    .num_columns(2)
-                    .spacing([12.0, 6.0])
-                    .show(ui, |ui| {
-                        if let Some(created) = common(&self.items, |i| i.created) {
-                            row(ui, "Created", |ui| {
-                                ui.label(format_date(created));
-                            });
-                        }
-                        let modified = common(&self.items, |i| i.modified);
-                        row(ui, "Modified", |ui| {
-                            if date_field(
-                                ui,
-                                "properties-modified",
-                                modified.flatten(),
-                                &mut self.edits.modified,
-                                &mut self.drafts.modified,
-                                editable,
-                            ) {
-                                self.base.get_or_insert_with(|| self.items.clone());
-                                self.commit = true;
-                            }
-                        });
-                        let accessed = common(&self.items, |i| i.accessed);
-                        row(ui, "Accessed", |ui| {
-                            if date_field(
-                                ui,
-                                "properties-accessed",
-                                accessed.flatten(),
-                                &mut self.edits.accessed,
-                                &mut self.drafts.accessed,
-                                editable,
-                            ) {
-                                self.base.get_or_insert_with(|| self.items.clone());
-                                self.commit = true;
-                            }
-                        });
-                        if let Some(Some(changed)) = common(&self.items, |i| i.changed) {
-                            row(ui, "Changed", |ui| {
-                                ui.label(format_date(Some(changed))).on_hover_text(
-                                    "When the name, permissions or owner last changed",
-                                );
-                            });
-                        }
+        section(ui, "Dates", "properties-dates", true, changed, |ui| {
+            grid(ui, "properties-dates-grid", |ui| {
+                if let Some(Some(created)) = common(&self.items, |i| i.created) {
+                    row(ui, "Created", |ui| {
+                        ui.label(format_date(Some(created)));
                     });
-            },
-        );
+                }
+                let modified = common(&self.items, |i| i.modified);
+                let mut committed = row(ui, "Modified", |ui| {
+                    date_field(
+                        ui,
+                        "properties-modified",
+                        modified,
+                        &mut self.edits.modified,
+                        &mut self.drafts.modified,
+                        editable,
+                    )
+                });
+                let accessed = common(&self.items, |i| i.accessed);
+                committed |= row(ui, "Accessed", |ui| {
+                    date_field(
+                        ui,
+                        "properties-accessed",
+                        accessed,
+                        &mut self.edits.accessed,
+                        &mut self.drafts.accessed,
+                        editable,
+                    )
+                });
+                if committed {
+                    self.base.get_or_insert_with(|| self.items.clone());
+                    self.commit = true;
+                }
+                if let Some(Some(changed)) = common(&self.items, |i| i.changed) {
+                    row(ui, "Changed", |ui| {
+                        ui.label(format_date(Some(changed)))
+                            .on_hover_text("When the name, permissions or owner last changed");
+                    });
+                }
+            });
+        });
     }
 
     fn any_dirs(&self) -> bool {
         self.items.iter().any(|i| i.is_dir && !i.is_symlink)
     }
 
-    fn permissions_ui(&mut self, ui: &mut Ui) {
+    fn permissions_ui(&mut self, ui: &mut Ui, open: bool) {
         let unix = self.items.iter().all(|i| i.mode.is_some());
         let windows = self.items.iter().all(|i| i.attributes.is_some());
         if !unix && !windows {
@@ -672,90 +872,89 @@ impl View {
         let changed = pending.iter().any(|b| !b.is_empty())
             && self.changed_on_disk(|i| (i.mode, i.attributes));
         let title = if unix { "Permissions" } else { "Attributes" };
-        section(ui, title, "properties-permissions", true, changed, |ui| {
+        section(ui, title, "properties-permissions", open, changed, |ui| {
             let value = |i: &Item| if unix { i.mode } else { i.attributes }.unwrap_or(0);
-            let kinds: Vec<(&str, usize)> = if self.recursive {
-                vec![("Files", 0), ("Folders", 1)]
+            // Columns: everything, or the selected files and folders apart
+            // (what's inside them is unknown until applied).
+            let kinds: &[(&str, usize)] = if self.recursive {
+                &[("Files", 0), ("Folders", 1)]
             } else {
-                vec![("", 2)]
+                &[("", 2)]
             };
             let mut clicked: Option<(usize, u32, bool)> = None;
-            let layout = |ui: &mut Ui, add: &mut dyn FnMut(&mut Ui)| {
-                if self.compact || !self.recursive {
-                    ui.vertical(|ui| add(ui));
-                } else {
-                    ui.horizontal_top(|ui| add(ui));
+            for &(label, kind) in kinds {
+                let of_kind: Vec<u32> = self
+                    .items
+                    .iter()
+                    .filter(|i| match kind {
+                        0 => !i.is_dir,
+                        1 => i.is_dir,
+                        _ => true,
+                    })
+                    .map(value)
+                    .collect();
+                let bits = pending[if kind == 2 { 0 } else { kind }];
+                let state = |bit: u32| -> Option<bool> {
+                    bits.get(bit).or_else(|| tri_state(&of_kind, bit))
+                };
+                if !label.is_empty() {
+                    ui.add_space(2.0);
+                    ui.strong(label);
                 }
-            };
-            layout(ui, &mut |ui| {
-                for (label, kind) in &kinds {
-                    // Which items the column is about: all of them, or the
-                    // selected files or folders (their contents are unknown).
-                    let of_kind: Vec<u32> = self
-                        .items
-                        .iter()
-                        .filter(|i| match kind {
-                            0 => !i.is_dir,
-                            1 => i.is_dir,
-                            _ => true,
-                        })
-                        .map(value)
-                        .collect();
-                    let bits = pending[if *kind == 2 { 0 } else { *kind }];
-                    let state = |bit: u32| -> Option<bool> {
-                        bits.get(bit).or_else(|| tri_state(&of_kind, bit))
-                    };
-                    ui.vertical(|ui| {
-                        if !label.is_empty() {
-                            ui.strong(*label);
-                        }
-                        ui.add_enabled_ui(editable, |ui| {
-                            if unix {
-                                let folders = *kind == 1;
-                                Grid::new(("properties-mode-grid", *kind))
-                                    .num_columns(4)
-                                    .spacing([10.0, 4.0])
-                                    .show(ui, |ui| {
-                                        ui.label("");
-                                        ui.weak("Read");
-                                        ui.weak("Write");
-                                        ui.weak(if folders { "Enter" } else { "Execute" })
-                                            .on_hover_text(if folders {
-                                                "Execute on a folder: open it and reach what's inside"
-                                            } else {
-                                                "Run the file as a program"
-                                            });
-                                        ui.end_row();
-                                        for (who, row_bits) in PERMISSIONS {
-                                            ui.label(who);
-                                            for bit in row_bits {
-                                                if let Some(on) = tri_box(ui, "", state(bit), "") {
-                                                    clicked = Some((*kind, bit, on));
-                                                }
-                                            }
-                                            ui.end_row();
+                ui.add_enabled_ui(editable, |ui| {
+                    if unix {
+                        let folders = kind == 1;
+                        Grid::new(("properties-mode-grid", kind))
+                            .spacing(ROW_SPACING)
+                            .show(ui, |ui| {
+                                label_cell(ui, "");
+                                ui.weak("Read");
+                                ui.weak("Write");
+                                ui.weak(if folders { "Open" } else { "Run" }).on_hover_text(
+                                    if folders {
+                                        "Execute on a folder: open it and reach what's inside"
+                                    } else {
+                                        "Execute: run the file as a program"
+                                    },
+                                );
+                                ui.end_row();
+                                for (who, row_bits) in PERMISSIONS {
+                                    label_cell(ui, who);
+                                    for bit in row_bits {
+                                        if let Some(on) = tri_box(ui, "", state(bit), "") {
+                                            clicked = Some((kind, bit, on));
                                         }
-                                    });
+                                    }
+                                    ui.end_row();
+                                }
+                            });
+                        let any_special =
+                            SPECIAL.iter().any(|(_, bit, _)| state(*bit) != Some(false));
+                        CollapsingHeader::new(RichText::new("Special").weak())
+                            .id_salt(("properties-special", kind))
+                            .default_open(any_special)
+                            .show(ui, |ui| {
                                 ui.horizontal_wrapped(|ui| {
                                     for (name, bit, hint) in SPECIAL {
                                         if let Some(on) = tri_box(ui, name, state(bit), hint) {
-                                            clicked = Some((*kind, bit, on));
+                                            clicked = Some((kind, bit, on));
                                         }
                                     }
                                 });
-                            } else {
-                                ui.horizontal_wrapped(|ui| {
-                                    for (name, bit) in ATTRIBUTES {
-                                        if let Some(on) = tri_box(ui, name, state(bit), "") {
-                                            clicked = Some((*kind, bit, on));
-                                        }
+                            });
+                    } else {
+                        grid(ui, ("properties-attr-grid", kind), |ui| {
+                            row(ui, "Attributes", |ui| {
+                                for (name, bit) in ATTRIBUTES {
+                                    if let Some(on) = tri_box(ui, name, state(bit), "") {
+                                        clicked = Some((kind, bit, on));
                                     }
-                                });
-                            }
+                                }
+                            });
                         });
-                    });
-                }
-            });
+                    }
+                });
+            }
             if let Some((kind, bit, on)) = clicked {
                 self.set_edit(|e| {
                     let target = if unix { &mut e.mode } else { &mut e.attributes };
@@ -769,57 +968,64 @@ impl View {
                 });
                 self.commit = true;
             }
-            if unix
-                && !self.recursive
-                && let [item] = self.items.as_slice()
-            {
-                let (current, is_dir) = (item.mode.unwrap_or(0), item.is_dir);
-                let mode = self.edits.mode[0].apply(current);
-                ui.horizontal(|ui| {
-                    ui.label("As a number");
-                    let draft = self
-                        .drafts
-                        .octal
-                        .get_or_insert_with(|| format!("{mode:04o}"));
-                    let valid = u32::from_str_radix(draft.trim(), 8).is_ok_and(|m| m <= 0o7777);
-                    let response = ui.add_enabled(
-                        editable,
-                        TextEdit::singleline(draft)
-                            .desired_width(48.0)
-                            .font(egui::TextStyle::Monospace)
-                            .text_color_opt((!valid).then_some(ui.visuals().error_fg_color)),
-                    );
-                    if !response.has_focus() {
-                        let typed = self.drafts.octal.take().unwrap_or_default();
-                        if let Ok(new) = u32::from_str_radix(typed.trim(), 8)
-                            && new <= 0o7777
-                            && new != mode
-                        {
-                            let bits = Bits {
-                                set: new & !current,
-                                clear: !new & current & 0o7777,
-                            };
-                            self.set_edit(|e| e.mode = [bits, bits]);
-                            self.commit = true;
+            grid(ui, "properties-permissions-extra", |ui| {
+                if unix
+                    && !self.recursive
+                    && let [item] = self.items.as_slice()
+                {
+                    let (current, is_dir) = (item.mode.unwrap_or(0), item.is_dir);
+                    let mode = self.edits.mode[0].apply(current);
+                    row(ui, "Mode", |ui| {
+                        let draft = self
+                            .drafts
+                            .octal
+                            .get_or_insert_with(|| format!("{mode:04o}"));
+                        let valid = u32::from_str_radix(draft.trim(), 8).is_ok_and(|m| m <= 0o7777);
+                        let response = ui
+                            .add_enabled(
+                                editable,
+                                TextEdit::singleline(draft)
+                                    .desired_width(44.0)
+                                    .font(egui::TextStyle::Monospace)
+                                    .text_color_opt(
+                                        (!valid).then_some(ui.visuals().error_fg_color),
+                                    ),
+                            )
+                            .on_hover_text("As a number, the way chmod takes it");
+                        if !response.has_focus() {
+                            let typed = self.drafts.octal.take().unwrap_or_default();
+                            if let Ok(new) = u32::from_str_radix(typed.trim(), 8)
+                                && new <= 0o7777
+                                && new != mode
+                            {
+                                let bits = Bits {
+                                    set: new & !current,
+                                    clear: !new & current & 0o7777,
+                                };
+                                self.set_edit(|e| e.mode = [bits, bits]);
+                                self.commit = true;
+                            }
                         }
-                    }
-                    ui.weak(symbolic(mode, is_dir));
-                });
-            }
-            if windows {
-                let others: Vec<&str> = OTHER_ATTRIBUTES
-                    .iter()
-                    .filter(|(_, bit)| {
-                        self.items
-                            .iter()
-                            .all(|i| i.attributes.unwrap_or(0) & bit != 0)
-                    })
-                    .map(|(name, _)| *name)
-                    .collect();
-                if !others.is_empty() {
-                    ui.weak(format!("Also {}", others.join(", ")));
+                        ui.label(RichText::new(symbolic(mode, is_dir)).monospace().weak());
+                    });
                 }
-            }
+                if windows {
+                    let others: Vec<&str> = OTHER_ATTRIBUTES
+                        .iter()
+                        .filter(|(_, bit)| {
+                            self.items
+                                .iter()
+                                .all(|i| i.attributes.unwrap_or(0) & bit != 0)
+                        })
+                        .map(|(name, _)| *name)
+                        .collect();
+                    if !others.is_empty() {
+                        row(ui, "Also", |ui| {
+                            ui.label(others.join(", "));
+                        });
+                    }
+                }
+            });
             if self.any_dirs() {
                 let mut recursive = self.recursive;
                 if ui
@@ -828,8 +1034,8 @@ impl View {
                         Checkbox::new(&mut recursive, "Also change everything inside"),
                     )
                     .on_hover_text(
-                        "Apply permission and owner changes to the folders' contents too, \
-                         with separate settings for files and folders",
+                        "Apply permission and owner changes to the folders' contents \
+                         too, with separate settings for files and folders",
                     )
                     .changed()
                 {
@@ -846,19 +1052,19 @@ impl View {
                 && let Some((_, acl)) = &self.acl
                 && !acl.is_empty()
             {
-                CollapsingHeader::new("Access")
+                CollapsingHeader::new(RichText::new("Access").weak())
                     .id_salt("properties-acl")
                     .show(ui, |ui| {
                         for line in acl {
                             ui.label(line);
                         }
-                        ui.weak("Edit access in Explorer's Security tab");
+                        ui.weak("Change access in Explorer's Security tab");
                     });
             }
         });
     }
 
-    fn owner_ui(&mut self, ui: &mut Ui) {
+    fn owner_ui(&mut self, ui: &mut Ui, open: bool) {
         if self
             .items
             .iter()
@@ -870,170 +1076,72 @@ impl View {
         let pending =
             self.edits.uid.is_some() || self.edits.gid.is_some() || self.edits.account.is_some();
         let changed = pending && self.changed_on_disk(|i| (i.uid, i.gid, i.owner.clone()));
-        section(
-            ui,
-            "Owner",
-            "properties-owner",
-            !self.compact,
-            changed,
-            |ui| {
-                Grid::new("properties-owner-grid")
-                    .num_columns(2)
-                    .spacing([12.0, 6.0])
-                    .show(ui, |ui| {
-                        #[cfg(target_os = "linux")]
+        section(ui, "Owner", "properties-owner", open, changed, |ui| {
+            grid(ui, "properties-owner-grid", |ui| {
+                #[cfg(target_os = "linux")]
+                {
+                    let uid = self.edits.uid.or(common(&self.items, |i| i.uid).flatten());
+                    let gid = self.edits.gid.or(common(&self.items, |i| i.gid).flatten());
+                    row(ui, "User", |ui| {
+                        if let Some(id) =
+                            id_combo(ui, "properties-user", platform::users(), uid, editable)
                         {
-                            let uid = self.edits.uid.or(common(&self.items, |i| i.uid).flatten());
-                            let gid = self.edits.gid.or(common(&self.items, |i| i.gid).flatten());
-                            row(ui, "User", |ui| {
-                                if let Some(id) = id_combo(
-                                    ui,
-                                    "properties-user",
-                                    platform::users(),
-                                    uid,
-                                    editable,
-                                ) {
-                                    let unchanged =
-                                        common(&self.items, |i| i.uid) == Some(Some(id));
-                                    self.set_edit(|e| e.uid = (!unchanged).then_some(id));
-                                    self.commit = true;
-                                }
-                            });
-                            row(ui, "Group", |ui| {
-                                if let Some(id) = id_combo(
-                                    ui,
-                                    "properties-group",
-                                    platform::groups(),
-                                    gid,
-                                    editable,
-                                ) {
-                                    let unchanged =
-                                        common(&self.items, |i| i.gid) == Some(Some(id));
-                                    self.set_edit(|e| e.gid = (!unchanged).then_some(id));
-                                    self.commit = true;
-                                }
-                            });
+                            let unchanged = common(&self.items, |i| i.uid) == Some(Some(id));
+                            self.set_edit(|e| e.uid = (!unchanged).then_some(id));
+                            self.commit = true;
                         }
-                        #[cfg(not(target_os = "linux"))]
+                    });
+                    row(ui, "Group", |ui| {
+                        if let Some(id) =
+                            id_combo(ui, "properties-group", platform::groups(), gid, editable)
                         {
-                            let owner = common(&self.items, |i| i.owner.clone()).flatten();
-                            row(ui, "Owner", |ui| {
-                                let shown = self
-                                    .edits
-                                    .account
-                                    .clone()
-                                    .or(owner.clone())
-                                    .unwrap_or_default();
-                                let draft = self.drafts.account.get_or_insert(shown);
-                                let response = ui
-                                    .add_enabled(
-                                        editable,
-                                        TextEdit::singleline(draft)
-                                            .hint_text("Various")
-                                            .desired_width(220.0),
-                                    )
-                                    .on_hover_text(
-                                        "An account name, like “Administrators” or “DOMAIN\\user”",
-                                    );
-                                if !response.has_focus() {
-                                    let typed = self.drafts.account.take().unwrap_or_default();
-                                    let typed = typed.trim().to_owned();
-                                    let changed =
-                                        !typed.is_empty() && Some(&typed) != owner.as_ref();
-                                    if changed != self.edits.account.is_some()
-                                        || (changed && self.edits.account.as_ref() != Some(&typed))
-                                    {
-                                        self.set_edit(|e| e.account = changed.then_some(typed));
-                                    }
-                                    if response.lost_focus() {
-                                        self.commit = true;
-                                    }
-                                }
-                            });
-                            if let Some(Some(group)) = common(&self.items, |i| i.group.clone()) {
-                                row(ui, "Group", |ui| {
-                                    ui.label(group);
-                                });
+                            let unchanged = common(&self.items, |i| i.gid) == Some(Some(id));
+                            self.set_edit(|e| e.gid = (!unchanged).then_some(id));
+                            self.commit = true;
+                        }
+                    });
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    let owner = common(&self.items, |i| i.owner.clone()).flatten();
+                    row(ui, "Owner", |ui| {
+                        let shown = self
+                            .edits
+                            .account
+                            .clone()
+                            .or(owner.clone())
+                            .unwrap_or_default();
+                        let draft = self.drafts.account.get_or_insert(shown);
+                        let response = ui
+                            .add_enabled(
+                                editable,
+                                TextEdit::singleline(draft)
+                                    .hint_text("Various")
+                                    .desired_width(ui.available_width().min(220.0)),
+                            )
+                            .on_hover_text(
+                                "An account name, like “Administrators” or “DOMAIN\\user”",
+                            );
+                        if !response.has_focus() {
+                            let typed = self.drafts.account.take().unwrap_or_default();
+                            let typed = typed.trim().to_owned();
+                            let changed = !typed.is_empty() && Some(&typed) != owner.as_ref();
+                            let wanted = changed.then_some(typed);
+                            if wanted != self.edits.account {
+                                self.set_edit(|e| e.account = wanted);
+                            }
+                            if response.lost_focus() {
+                                self.commit = true;
                             }
                         }
                     });
-            },
-        );
-    }
-
-    fn media_ui(&mut self, ui: &mut Ui) {
-        let Some(probe) = &self.media else { return };
-        if self.items.len() != 1 {
-            return;
-        }
-        section(ui, "Media", "properties-media", true, false, |ui| {
-            let Some(media) = probe.get() else {
-                ui.spinner();
-                return;
-            };
-            Grid::new("properties-media-grid")
-                .num_columns(2)
-                .spacing([12.0, 6.0])
-                .show(ui, |ui| {
-                    if let Some([w, h]) = media.dimensions {
-                        row(ui, "Dimensions", |ui| {
-                            let megapixels = f64::from(w) * f64::from(h) / 1e6;
-                            ui.label(format!("{w} × {h} px ({megapixels:.1} MP)"));
+                    if let Some(Some(group)) = common(&self.items, |i| i.group.clone()) {
+                        row(ui, "Group", |ui| {
+                            ui.label(group);
                         });
                     }
-                    if let Some(av) = &media.av {
-                        if let Some(format) = &av.format {
-                            row(ui, "Format", |ui| {
-                                ui.label(format);
-                            });
-                        }
-                        if let Some(duration) = av.duration {
-                            row(ui, "Duration", |ui| {
-                                ui.label(crate::video::format_time(duration));
-                            });
-                            if let Some(item) = self.items.first()
-                                && duration > 0.0
-                            {
-                                row(ui, "Bit rate", |ui| {
-                                    let kbps = item.size as f64 * 8.0 / duration / 1000.0;
-                                    ui.label(format!("{kbps:.0} kb/s"));
-                                });
-                            }
-                        }
-                        for track in &av.tracks {
-                            row(ui, "Stream", |ui| {
-                                ui.label(track);
-                            });
-                        }
-                    }
-                    for (tag, value) in &media.exif {
-                        row(ui, tag, |ui| {
-                            ui.label(value);
-                        });
-                    }
-                    if let Some(error) = &media.error {
-                        row(ui, "", |ui| {
-                            ui.weak(error);
-                        });
-                    }
-                });
-            if !media.exif_rest.is_empty() {
-                CollapsingHeader::new("All EXIF tags")
-                    .id_salt("properties-exif")
-                    .show(ui, |ui| {
-                        Grid::new("properties-exif-grid")
-                            .num_columns(2)
-                            .spacing([12.0, 4.0])
-                            .striped(true)
-                            .show(ui, |ui| {
-                                for (tag, value) in &media.exif_rest {
-                                    row(ui, tag, |ui| {
-                                        ui.label(value);
-                                    });
-                                }
-                            });
-                    });
-            }
+                }
+            });
         });
     }
 
@@ -1068,7 +1176,7 @@ impl View {
                             ui.add(
                                 ProgressBar::new(share)
                                     .show_percentage()
-                                    .desired_width(200.0),
+                                    .desired_width((ui.available_width() - 70.0).max(60.0)),
                             );
                             if ui.button("Cancel").clicked() {
                                 self.hashing = None;
@@ -1079,40 +1187,42 @@ impl View {
                         ui.colored_label(ui.visuals().error_fg_color, error);
                     }
                     Some(Ok(sums)) => {
-                        Grid::new("properties-sums")
-                            .num_columns(3)
-                            .spacing([8.0, 4.0])
-                            .show(ui, |ui| {
-                                for (name, sum) in [("MD5", &sums.md5), ("SHA-256", &sums.sha256)] {
-                                    ui.label(name);
-                                    ui.add(
-                                        egui::Label::new(RichText::new(sum).monospace().size(11.0))
-                                            .wrap(),
-                                    );
-                                    if ui.small_button(icon::COPY).on_hover_text("Copy").clicked() {
+                        grid(ui, "properties-sums", |ui| {
+                            for (name, sum) in [("MD5", &sums.md5), ("SHA-256", &sums.sha256)] {
+                                row(ui, name, |ui| {
+                                    let text = RichText::new(sum).monospace().size(11.0);
+                                    let response = ui
+                                        .add(egui::Label::new(text).wrap().sense(Sense::click()))
+                                        .on_hover_text("Click to copy");
+                                    if response.clicked() {
                                         ui.ctx().copy_text(sum.clone());
                                     }
-                                    ui.end_row();
-                                }
-                            });
-                        ui.horizontal(|ui| {
-                            ui.add(
-                                TextEdit::singleline(&mut self.compare)
-                                    .hint_text("Paste a checksum to compare")
-                                    .desired_width(260.0),
-                            );
-                            if !self.compare.trim().is_empty() {
-                                match hash::matches(&sums, &self.compare) {
-                                    Some(kind) => ui.colored_label(
-                                        Color32::from_rgb(0x3f, 0xb9, 0x50),
-                                        format!("{} Matches {kind}", icon::CHECK_CIRCLE),
-                                    ),
-                                    None => ui.colored_label(
-                                        ui.visuals().error_fg_color,
-                                        format!("{} Doesn't match", icon::X_CIRCLE),
-                                    ),
-                                };
+                                });
                             }
+                            row(ui, "Compare", |ui| {
+                                ui.vertical(|ui| {
+                                    ui.add(
+                                        TextEdit::singleline(&mut self.compare)
+                                            .hint_text("Paste a checksum")
+                                            .desired_width(f32::INFINITY),
+                                    );
+                                    if !self.compare.trim().is_empty() {
+                                        match hash::matches(&sums, &self.compare) {
+                                            Some(kind) => ui.colored_label(
+                                                Color32::from_rgb(0x3f, 0xb9, 0x50),
+                                                format!(
+                                                    "{} Matches the {kind}",
+                                                    icon::CHECK_CIRCLE
+                                                ),
+                                            ),
+                                            None => ui.colored_label(
+                                                ui.visuals().error_fg_color,
+                                                format!("{} Doesn't match", icon::X_CIRCLE),
+                                            ),
+                                        };
+                                    }
+                                });
+                            });
                         });
                     }
                 }
@@ -1132,56 +1242,51 @@ impl View {
             false,
             false,
             |ui| {
-                Grid::new("properties-filesystem-grid")
-                    .num_columns(2)
-                    .spacing([12.0, 6.0])
-                    .show(ui, |ui| {
-                        if let Some(volume) = volume {
-                            row(ui, "Mounted at", |ui| {
-                                ui.label(volume.mount.display().to_string());
-                            });
-                            if !volume.fs_type.is_empty() {
-                                row(ui, "Filesystem", |ui| {
-                                    ui.label(&volume.fs_type);
-                                });
-                            }
-                            if !volume.device.is_empty() {
-                                row(ui, if cfg!(windows) { "Label" } else { "Device" }, |ui| {
-                                    ui.label(&volume.device);
-                                });
-                            }
-                        }
-                        if let Some(space) = space {
-                            row(ui, "Free", |ui| {
-                                ui.vertical(|ui| {
-                                    ui.label(format!(
-                                        "{} free of {}",
-                                        human_size(space.available),
-                                        human_size(space.total)
-                                    ));
-                                    ui.add(
-                                        ProgressBar::new(space.used_share())
-                                            .desired_width(200.0)
-                                            .desired_height(6.0),
-                                    );
-                                });
+                grid(ui, "properties-filesystem-grid", |ui| {
+                    if let Some(volume) = volume {
+                        row(ui, "Mounted at", |ui| {
+                            ui.label(volume.mount.display().to_string());
+                        });
+                        if !volume.fs_type.is_empty() {
+                            row(ui, "Type", |ui| {
+                                ui.label(&volume.fs_type);
+                                if !volume.device.is_empty() {
+                                    ui.weak(if cfg!(windows) {
+                                        format!("“{}”", volume.device)
+                                    } else {
+                                        format!("on {}", volume.device)
+                                    });
+                                }
                             });
                         }
-                        if let Some(item) = single {
-                            if let Some(inode) = item.inode {
-                                row(ui, "Inode", |ui| {
-                                    ui.label(inode.to_string());
-                                });
-                            }
-                            if let Some(links) = item.links.filter(|_| !item.is_dir) {
-                                row(ui, "Hard links", |ui| {
-                                    ui.label(links.to_string()).on_hover_text(
-                                        "Names this file has; it's deleted with the last",
-                                    );
-                                });
-                            }
+                    }
+                    if let Some(space) = space {
+                        row(ui, "Free", |ui| {
+                            ui.vertical(|ui| {
+                                ui.label(format!(
+                                    "{} of {}",
+                                    human_size(space.available),
+                                    human_size(space.total)
+                                ));
+                                space_bar(ui, *space);
+                            });
+                        });
+                    }
+                    if let Some(item) = single {
+                        if let Some(inode) = item.inode {
+                            row(ui, "Inode", |ui| {
+                                ui.label(inode.to_string());
+                            });
                         }
-                    });
+                        if let Some(links) = item.links.filter(|_| !item.is_dir) {
+                            row(ui, "Hard links", |ui| {
+                                ui.label(links.to_string()).on_hover_text(
+                                    "Names this file has; it's deleted with the last",
+                                );
+                            });
+                        }
+                    }
+                });
             },
         );
     }
@@ -1215,12 +1320,13 @@ impl View {
         let mut ops = Vec::new();
         for item in &self.items {
             let path = item.path.clone();
+            let recursive = self.recursive && item.is_dir;
             if e.mode.iter().any(|b| !b.is_empty()) {
                 ops.push(Op::Mode {
                     path: path.clone(),
                     files: e.mode[0],
                     dirs: e.mode[1],
-                    recursive: self.recursive && item.is_dir,
+                    recursive,
                 });
             }
             if e.attributes.iter().any(|b| !b.is_empty()) {
@@ -1228,7 +1334,7 @@ impl View {
                     path: path.clone(),
                     files: e.attributes[0],
                     dirs: e.attributes[1],
-                    recursive: self.recursive && item.is_dir,
+                    recursive,
                 });
             }
             if e.uid.is_some() || e.gid.is_some() || e.account.is_some() {
@@ -1237,7 +1343,7 @@ impl View {
                     uid: e.uid,
                     gid: e.gid,
                     account: e.account.clone(),
-                    recursive: self.recursive && item.is_dir,
+                    recursive,
                 });
             }
             if e.modified.is_some() || e.accessed.is_some() {
@@ -1276,13 +1382,7 @@ impl View {
         }
         #[cfg(target_os = "linux")]
         if let Some(app) = self.edits.default_app.take()
-            && let Some(mime) = self.items.first().and_then(|i| {
-                let subject = open_with::Subject {
-                    path: i.path.clone(),
-                    on_disk: true,
-                };
-                open_with::handlers(ctx, &[subject]).and_then(|h| h.types.first().cloned())
-            })
+            && let Some(mime) = self.handlers(ctx).and_then(|h| h.types.first().cloned())
             && let Err(error) = open_with::set_default(ctx, &app, &mime)
         {
             self.error = Some(format!("Couldn't change the default app: {error}"));
@@ -1325,73 +1425,44 @@ impl View {
         self.error = None;
     }
 
+    /// Whether there's anything for the footer to show.
+    fn footer_needed(&self, window: bool) -> bool {
+        window
+            || !self.edits.is_empty()
+            || self.busy()
+            || self.error.is_some()
+            || !self.failures.is_empty()
+    }
+
     fn footer(
         &mut self,
         ui: &mut Ui,
         ctx: &egui::Context,
         immediate: bool,
-        close: Option<&mut bool>,
+        closed: Option<&mut bool>,
     ) {
         if !matches!(self.source, Source::Files(_)) {
-            if let Some(close) = close
-                && ui.button("Close").clicked()
-            {
-                *close = true;
-            }
-            return;
-        }
-        // In a bottom-up layout, so the buttons come first and the
-        // messages above them.
-        let pending = !self.edits.is_empty();
-        ui.horizontal(|ui| {
-            if let Some(applying) = &self.applying {
-                ui.spinner();
-                let done = applying
-                    .progress
-                    .done
-                    .load(std::sync::atomic::Ordering::Relaxed);
-                ui.label(format!("Applying… {done} done"));
-                if ui.button("Stop").clicked() {
-                    applying
-                        .progress
-                        .cancel
-                        .store(true, std::sync::atomic::Ordering::Relaxed);
-                }
-            } else if self.elevated.is_some() {
-                ui.spinner();
-                ui.label("Waiting for authorization…");
-            } else if !immediate || close.is_some() {
+            if let Some(closed) = closed {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if let Some(close) = close {
-                        let ok = if immediate || !pending { "Close" } else { "OK" };
-                        if ui.button(ok).clicked() {
-                            if pending {
-                                self.apply(ctx);
-                            }
-                            *close = true;
-                        }
-                    }
-                    if !immediate {
-                        if ui
-                            .add_enabled(pending, Button::new(format!("{} Apply", icon::CHECK)))
-                            .clicked()
-                        {
-                            self.apply(ctx);
-                        }
-                        if ui
-                            .add_enabled(pending, Button::new("Revert"))
-                            .on_hover_text("Forget the changes not applied yet")
-                            .clicked()
-                        {
-                            self.revert();
-                        }
-                        if pending {
-                            ui.weak("Not applied yet");
-                        }
+                    if ui.button("Close").clicked() {
+                        *closed = true;
                     }
                 });
             }
-        });
+            return;
+        }
+        // In a tab or window the footer is laid out bottom-up, so there the
+        // buttons go first and the messages above them.
+        if self.compact {
+            self.messages_ui(ui, ctx);
+            self.buttons_ui(ui, ctx, immediate, closed);
+        } else {
+            self.buttons_ui(ui, ctx, immediate, closed);
+            self.messages_ui(ui, ctx);
+        }
+    }
+
+    fn messages_ui(&mut self, ui: &mut Ui, ctx: &egui::Context) {
         if let Some(error) = &self.error {
             ui.colored_label(
                 ui.visuals().error_fg_color,
@@ -1399,33 +1470,103 @@ impl View {
             );
         }
         if !self.failures.is_empty() {
-            let denied = self.failures.iter().any(|f| f.denied);
-            let mut retry = false;
-            let mut dismiss = false;
-            ui.horizontal_wrapped(|ui| {
-                if denied
-                    && elevate::available()
-                    && !self.busy()
-                    && ui
-                        .button(format!("{} {}", icon::SHIELD_CHECK, elevate::label()))
-                        .on_hover_text("Ask for the password and try the failed changes again")
-                        .clicked()
-                {
-                    retry = true;
-                }
-                if ui.small_button("Dismiss").clicked() {
-                    dismiss = true;
+            self.failures_ui(ui, ctx);
+        }
+    }
+
+    fn buttons_ui(
+        &mut self,
+        ui: &mut Ui,
+        ctx: &egui::Context,
+        immediate: bool,
+        closed: Option<&mut bool>,
+    ) {
+        if self.busy() {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                if let Some(applying) = &self.applying {
+                    let done = applying
+                        .progress
+                        .done
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    ui.label(format!("Applying… {done} done"));
+                    if ui.button("Stop").clicked() {
+                        applying
+                            .progress
+                            .cancel
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                } else {
+                    ui.label("Waiting for authorization…");
                 }
             });
-            let n = self.failures.len();
-            CollapsingHeader::new(
-                RichText::new(format!(
-                    "{} {n} change{} failed",
+            return;
+        }
+        let pending = if immediate { 0 } else { self.edits.count() };
+        if pending == 0 && closed.is_none() {
+            return;
+        }
+        ui.horizontal(|ui| {
+            if pending > 0 {
+                ui.weak(plural(pending as u64, "change", "changes") + " not applied");
+            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if let Some(closed) = closed {
+                    let label = if pending > 0 { "OK" } else { "Close" };
+                    if ui.button(label).clicked() {
+                        if pending > 0 {
+                            self.apply(ctx);
+                        }
+                        *closed = true;
+                    }
+                }
+                if pending > 0 {
+                    let apply = Button::new(format!("{} Apply", icon::CHECK))
+                        .fill(ui.visuals().selection.bg_fill);
+                    if ui.add(apply).clicked() {
+                        self.apply(ctx);
+                    }
+                    if ui
+                        .button("Revert")
+                        .on_hover_text("Forget the changes not applied yet")
+                        .clicked()
+                    {
+                        self.revert();
+                    }
+                }
+            });
+        });
+    }
+
+    fn failures_ui(&mut self, ui: &mut Ui, ctx: &egui::Context) {
+        let n = self.failures.len();
+        let denied = self.failures.iter().any(|f| f.denied);
+        let mut retry = false;
+        let mut dismiss = false;
+        ui.horizontal_wrapped(|ui| {
+            ui.colored_label(
+                ui.visuals().error_fg_color,
+                format!(
+                    "{} {} failed",
                     icon::WARNING,
-                    if n == 1 { "" } else { "s" }
-                ))
-                .color(ui.visuals().error_fg_color),
-            )
+                    plural(n as u64, "change", "changes")
+                ),
+            );
+            if denied
+                && elevate::available()
+                && !self.busy()
+                && ui
+                    .button(format!("{} {}", icon::SHIELD_CHECK, elevate::label()))
+                    .on_hover_text("Ask for the password and try the failed changes again")
+                    .clicked()
+            {
+                retry = true;
+            }
+            if ui.small_button("Dismiss").clicked() {
+                dismiss = true;
+            }
+        });
+        CollapsingHeader::new(RichText::new("Details").weak())
             .id_salt("properties-failures")
             .default_open(n <= 3)
             .show(ui, |ui| {
@@ -1436,142 +1577,120 @@ impl View {
                     ui.weak(format!("and {} more", n - SHOWN_FAILURES));
                 }
             });
-            if retry {
-                self.retry_elevated(ctx);
-            }
-            if dismiss {
-                self.failures.clear();
-            }
+        if retry {
+            self.retry_elevated(ctx);
+        }
+        if dismiss {
+            self.failures.clear();
         }
     }
+}
+
+fn open_full_button(ui: &mut Ui) -> bool {
+    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        ui.add(Button::new(icon::ARROWS_OUT_SIMPLE).frame(false))
+            .on_hover_text("Open in its own tab or window (Alt+Enter)")
+            .clicked()
+    })
+    .inner
 }
 
 // ---------------------------------------------------------------------------
 // Trash and archive entries (read-only)
 
+fn kind_of_name(name: &str, is_dir: bool) -> String {
+    if is_dir {
+        return "Folder".to_owned();
+    }
+    Item {
+        path: PathBuf::from(name),
+        name: name.to_owned(),
+        exists: true,
+        ..Item::default()
+    }
+    .kind()
+}
+
 fn trash_ui(ui: &mut Ui, items: &[TrashedItem]) {
     section(ui, "General", "properties-trash", true, false, |ui| {
-        Grid::new("properties-trash-grid")
-            .num_columns(2)
-            .spacing([12.0, 6.0])
-            .show(ui, |ui| {
-                if let [item] = items {
-                    row(ui, "Name", |ui| {
-                        ui.strong(&item.name);
-                    });
-                    row(ui, "Type", |ui| {
-                        ui.label(if item.is_dir {
-                            "Folder".to_owned()
-                        } else {
-                            Item {
-                                path: PathBuf::from(&item.name),
-                                name: item.name.clone(),
-                                exists: true,
-                                ..Item::default()
-                            }
-                            .kind()
-                        });
-                    });
-                    row(ui, "Deleted from", |ui| {
-                        let parent = item.original.parent().unwrap_or(&item.original);
-                        ui.label(parent.display().to_string());
-                    });
-                    row(ui, "Deleted", |ui| {
-                        ui.label(format_date(item.deleted));
-                    });
-                } else {
-                    row(ui, "Items", |ui| {
-                        ui.strong(format!("{} items in the trash", items.len()));
-                    });
-                }
+        grid(ui, "properties-trash-grid", |ui| {
+            if let [item] = items {
+                row(ui, "Type", |ui| {
+                    ui.label(kind_of_name(&item.name, item.is_dir));
+                });
+                row(ui, "Was in", |ui| {
+                    let parent = item.original.parent().unwrap_or(&item.original);
+                    ui.label(parent.display().to_string());
+                });
+                row(ui, "Deleted", |ui| {
+                    ui.label(format_date(item.deleted));
+                });
+            }
+            if items.iter().any(|i| i.size.is_some()) {
                 let bytes: u64 = items.iter().filter_map(|i| i.size).sum();
-                if items.iter().any(|i| i.size.is_some()) {
-                    row(ui, "Size", |ui| {
-                        ui.label(format!(
-                            "{} ({} bytes)",
-                            human_size(bytes),
-                            group_digits(bytes)
-                        ));
-                    });
-                }
+                row(ui, "Size", |ui| {
+                    ui.label(human_size(bytes));
+                    if bytes >= 1024 {
+                        ui.weak(format!("{} bytes", group_digits(bytes)));
+                    }
+                });
+            }
+            if items.iter().any(|i| i.entries.is_some()) {
                 let entries: u64 = items.iter().filter_map(|i| i.entries).sum();
-                if items.iter().any(|i| i.entries.is_some()) {
-                    row(ui, "Contains", |ui| {
-                        ui.label(format!("{entries} items"));
-                    });
-                }
-            });
+                row(ui, "Contains", |ui| {
+                    ui.label(plural(entries, "item", "items"));
+                });
+            }
+        });
+        ui.add_space(4.0);
         ui.weak("Restore items to change them.");
     });
 }
 
 fn archive_ui(ui: &mut Ui, archive: &Path, entries: &[ArchivedItem]) {
     section(ui, "General", "properties-archive", true, false, |ui| {
-        Grid::new("properties-archive-grid")
-            .num_columns(2)
-            .spacing([12.0, 6.0])
-            .show(ui, |ui| {
-                if let [entry] = entries {
-                    let name = entry.path.rsplit('/').next().unwrap_or(&entry.path);
-                    row(ui, "Name", |ui| {
-                        ui.strong(name);
-                    });
-                    row(ui, "Inside", |ui| {
-                        let folder = entry.path.rsplit_once('/').map_or("", |(dir, _)| dir);
-                        ui.label(format!("{}/{folder}", display_name(archive)));
-                    });
-                    row(ui, "Type", |ui| {
-                        ui.label(if entry.is_dir {
-                            "Folder".to_owned()
-                        } else {
-                            Item {
-                                path: PathBuf::from(name),
-                                name: name.to_owned(),
-                                exists: true,
-                                ..Item::default()
-                            }
-                            .kind()
-                        });
-                    });
-                    if let Some(modified) = entry.modified {
-                        row(ui, "Modified", |ui| {
-                            ui.label(format_date(Some(modified)));
-                        });
-                    }
-                } else {
-                    row(ui, "Items", |ui| {
-                        ui.strong(format!(
-                            "{} items in {}",
-                            entries.len(),
-                            display_name(archive)
-                        ));
-                    });
-                }
-                let size: u64 = entries.iter().map(|e| e.size).sum();
-                row(ui, "Size", |ui| {
-                    ui.label(format!(
-                        "{} ({} bytes)",
-                        human_size(size),
-                        group_digits(size)
-                    ));
+        grid(ui, "properties-archive-grid", |ui| {
+            if let [entry] = entries {
+                let name = entry.path.rsplit('/').next().unwrap_or(&entry.path);
+                row(ui, "Type", |ui| {
+                    ui.label(kind_of_name(name, entry.is_dir));
                 });
-                if entries.iter().all(|e| e.packed.is_some()) {
-                    let packed: u64 = entries.iter().filter_map(|e| e.packed).sum();
-                    row(ui, "Compressed", |ui| {
-                        let ratio = if size > 0 {
-                            format!(" ({:.0}% of the size)", packed as f64 * 100.0 / size as f64)
-                        } else {
-                            String::new()
-                        };
-                        ui.label(format!("{}{ratio}", human_size(packed)));
+                row(ui, "Location", |ui| {
+                    let folder = entry.path.rsplit_once('/').map_or("", |(dir, _)| dir);
+                    ui.label(format!("{}/{folder}", display_name(archive)));
+                });
+                if let Some(modified) = entry.modified {
+                    row(ui, "Modified", |ui| {
+                        ui.label(format_date(Some(modified)));
                     });
                 }
-                if entries.iter().any(|e| e.encrypted) {
-                    row(ui, "Encrypted", |ui| {
-                        ui.label(format!("{} Yes", icon::LOCK));
-                    });
+            }
+            let size: u64 = entries.iter().map(|e| e.size).sum();
+            row(ui, "Size", |ui| {
+                ui.label(human_size(size));
+                if size >= 1024 {
+                    ui.weak(format!("{} bytes", group_digits(size)));
                 }
             });
+            if entries.iter().all(|e| e.packed.is_some()) {
+                let packed: u64 = entries.iter().filter_map(|e| e.packed).sum();
+                row(ui, "Compressed", |ui| {
+                    ui.label(human_size(packed));
+                    if size > 0 {
+                        ui.weak(format!(
+                            "{:.0}% of the size",
+                            packed as f64 * 100.0 / size as f64
+                        ));
+                    }
+                });
+            }
+            if entries.iter().any(|e| e.encrypted) {
+                row(ui, "Encrypted", |ui| {
+                    ui.label(format!("{} Yes", icon::LOCK));
+                });
+            }
+        });
+        ui.add_space(4.0);
         ui.weak("Extract items to change them.");
     });
 }
@@ -1588,12 +1707,14 @@ fn section(
     changed: bool,
     add: impl FnOnce(&mut Ui),
 ) {
-    let title = if changed {
-        RichText::new(format!("{title}  {}", icon::WARNING)).color(ui.visuals().warn_fg_color)
+    let text = if changed {
+        RichText::new(format!("{title}  {}", icon::WARNING))
+            .strong()
+            .color(ui.visuals().warn_fg_color)
     } else {
-        RichText::new(title)
+        RichText::new(title).strong()
     };
-    let response = CollapsingHeader::new(title)
+    let response = CollapsingHeader::new(text)
         .id_salt(id)
         .default_open(open)
         .show(ui, |ui| {
@@ -1601,6 +1722,7 @@ fn section(
                 changed_marker(ui);
             }
             add(ui);
+            ui.add_space(4.0);
         });
     if changed {
         response.header_response.on_hover_text(
@@ -1619,10 +1741,39 @@ fn changed_marker(ui: &mut Ui) {
     );
 }
 
-fn row(ui: &mut Ui, label: &str, value: impl FnOnce(&mut Ui)) {
-    ui.with_layout(Layout::left_to_right(Align::Min), |ui| ui.weak(label));
-    value(ui);
+/// A two-column grid of label and value rows.
+fn grid(ui: &mut Ui, id: impl egui::AsIdSalt, add: impl FnOnce(&mut Ui)) {
+    Grid::new(id)
+        .num_columns(2)
+        .spacing(ROW_SPACING)
+        .show(ui, |ui| add(ui));
+}
+
+/// A label in the label column, which is the same width everywhere.
+fn label_cell(ui: &mut Ui, text: &str) {
+    let height = ui.spacing().interact_size.y;
+    ui.allocate_ui_with_layout(
+        vec2(LABEL_WIDTH, height),
+        Layout::left_to_right(Align::Center),
+        |ui| {
+            ui.set_min_width(LABEL_WIDTH);
+            ui.add(egui::Label::new(RichText::new(text).weak()).truncate());
+        },
+    );
+}
+
+/// A row of a [`grid`]: the label, then whatever `value` adds side by side,
+/// wrapping when the column is narrow.
+fn row<R>(ui: &mut Ui, label: &str, value: impl FnOnce(&mut Ui) -> R) -> R {
+    label_cell(ui, label);
+    let inner = ui
+        .horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            value(ui)
+        })
+        .inner;
     ui.end_row();
+    inner
 }
 
 /// The value all items share, or `None` if they differ.
@@ -1673,76 +1824,96 @@ fn id_combo(
             .find(|(i, _)| *i == id)
             .map_or_else(|| id.to_string(), |(_, n)| n.clone())
     };
-    let text = current.map_or_else(
-        || "Various".to_owned(),
-        |id| format!("{} ({id})", name_of(id)),
-    );
+    let text = current.map_or_else(|| "Various".to_owned(), name_of);
     let mut chosen = None;
     ui.add_enabled_ui(editable, |ui| {
         egui::ComboBox::from_id_salt(id)
             .selected_text(text)
-            .width(200.0)
+            .width(ui.available_width().min(180.0))
             .height(320.0)
             .show_ui(ui, |ui| {
                 for (i, name) in names {
-                    if ui
-                        .selectable_label(current == Some(*i), format!("{name} ({i})"))
-                        .clicked()
-                    {
+                    let label = format!("{name}  ({i})");
+                    if ui.selectable_label(current == Some(*i), label).clicked() {
                         chosen = Some(*i);
                     }
                 }
-            });
+            })
+            .response
+            .on_hover_text(current.map_or_else(String::new, |id| format!("ID {id}")));
     });
     chosen
 }
 
-/// A date that can be typed in, with a "Now" button. Returns true when a
-/// new date was committed.
+/// A date, shown like every other date, with a button to change it.
+/// Returns true when a new date was committed.
 fn date_field(
     ui: &mut Ui,
     id: &str,
-    current: Option<SystemTime>,
+    current: Option<Option<SystemTime>>,
     pending: &mut Option<SystemTime>,
     draft: &mut Option<String>,
     editable: bool,
 ) -> bool {
-    let shown = pending.or(current);
-    let original = shown.map(format_editable).unwrap_or_default();
-    let mut committed = false;
-    ui.horizontal(|ui| {
-        let text = draft.get_or_insert_with(|| original.clone());
-        let parsed = parse_date(text);
-        let invalid = !text.trim().is_empty() && parsed.is_none();
-        let response = ui.add_enabled(
-            editable,
-            TextEdit::singleline(text)
-                .id_salt(id)
-                .hint_text(if current.is_none() { "Various" } else { "" })
-                .desired_width(150.0)
-                .text_color_opt(invalid.then_some(ui.visuals().error_fg_color)),
-        );
-        if response.lost_focus() && !invalid && *text != original {
-            *pending = parsed;
-            committed = true;
+    let id = Id::new(id);
+    match draft {
+        None => {
+            let shown = pending.or(current.flatten());
+            let text = match (shown, current) {
+                (Some(time), _) => format_date(Some(time)),
+                (None, None) => "Various".to_owned(),
+                (None, Some(_)) => "Unknown".to_owned(),
+            };
+            if pending.is_some() {
+                ui.label(RichText::new(text).strong())
+                    .on_hover_text(format!("Was {}", format_date(current.flatten())));
+            } else {
+                ui.label(text);
+            }
+            if editable
+                && ui
+                    .add(Button::new(icon::PENCIL_SIMPLE).frame(false).small())
+                    .on_hover_text("Change")
+                    .clicked()
+            {
+                *draft = Some(shown.map(format_editable).unwrap_or_default());
+                ui.memory_mut(|m| m.request_focus(id));
+            }
+            false
         }
-        if !response.has_focus() && !invalid {
-            *draft = None;
+        Some(text) => {
+            let parsed = parse_date(text);
+            let response = ui.add(
+                TextEdit::singleline(text)
+                    .id(id)
+                    .hint_text("YYYY-MM-DD HH:MM:SS")
+                    .desired_width(150.0)
+                    .text_color_opt(parsed.is_none().then_some(ui.visuals().error_fg_color)),
+            );
+            let escape = ui.input(|i| i.key_pressed(Key::Escape));
+            if ui
+                .add(Button::new("Now").small())
+                .on_hover_text("The current time")
+                .clicked()
+            {
+                *pending = Some(SystemTime::now());
+                *draft = None;
+                return true;
+            }
+            if response.lost_focus() {
+                if escape {
+                    *draft = None;
+                } else if let Some(time) = parsed {
+                    *draft = None;
+                    if Some(time) != current.flatten() {
+                        *pending = Some(time);
+                        return true;
+                    }
+                }
+            }
+            false
         }
-        if ui
-            .add_enabled(editable, Button::new("Now").small())
-            .on_hover_text("Set to the current time")
-            .clicked()
-        {
-            *pending = Some(SystemTime::now());
-            *draft = None;
-            committed = true;
-        }
-        if pending.is_some() && current.is_some_and(|c| Some(c) != *pending) {
-            ui.weak(format!("was {}", format_date(current)));
-        }
-    });
-    committed
+    }
 }
 
 fn format_date(time: Option<SystemTime>) -> String {
@@ -1773,24 +1944,41 @@ fn parse_date(text: &str) -> Option<SystemTime> {
         .map(SystemTime::from)
 }
 
+/// How full a drive is, as a bar.
+fn space_bar(ui: &mut Ui, space: Space) {
+    let width = ui.available_width().clamp(80.0, 240.0);
+    let (rect, _) = ui.allocate_exact_size(vec2(width, 6.0), Sense::hover());
+    let visuals = ui.visuals();
+    let used = space.used_share();
+    let fill = if used > 0.9 {
+        visuals.warn_fg_color
+    } else {
+        visuals.selection.bg_fill
+    };
+    let radius = CornerRadius::same(3);
+    ui.painter()
+        .rect_filled(rect, radius, visuals.extreme_bg_color);
+    let mut filled = rect;
+    filled.set_width(rect.width() * used);
+    ui.painter().rect_filled(filled, radius, fill);
+}
+
 fn contains_label(ui: &mut Ui, counts: Counts) {
-    ui.horizontal(|ui| {
-        ui.label(count_words(counts.files, counts.dirs));
-        if counts.unreadable > 0 {
-            ui.colored_label(ui.visuals().warn_fg_color, icon::WARNING)
-                .on_hover_text(format!(
-                    "{} folder{} couldn't be read, so the totals may be low",
-                    counts.unreadable,
-                    if counts.unreadable == 1 { "" } else { "s" }
-                ));
-        }
-    });
+    ui.label(count_words(counts.files, counts.dirs));
+    if counts.unreadable > 0 {
+        ui.colored_label(ui.visuals().warn_fg_color, icon::WARNING)
+            .on_hover_text(format!(
+                "{} couldn't be read, so the totals may be low",
+                plural(counts.unreadable, "folder", "folders")
+            ));
+    }
+}
+
+fn plural(n: u64, one: &str, many: &str) -> String {
+    format!("{} {}", group_digits(n), if n == 1 { one } else { many })
 }
 
 fn count_words(files: u64, dirs: u64) -> String {
-    let plural = |n: u64, one: &str, many: &str| {
-        format!("{} {}", group_digits(n), if n == 1 { one } else { many })
-    };
     format!(
         "{}, {}",
         plural(files, "file", "files"),
@@ -1883,5 +2071,14 @@ mod tests {
         assert!(bad_name("a/b").is_some());
         assert!(bad_name("..").is_some());
         assert!(bad_name("fine.txt").is_none());
+    }
+
+    #[test]
+    fn counts_edits() {
+        let mut edits = Edits::default();
+        assert_eq!(edits.count(), 0);
+        edits.name = Some("x".into());
+        edits.mode[0].put(0o100, true);
+        assert_eq!(edits.count(), 2);
     }
 }
