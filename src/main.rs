@@ -44,6 +44,10 @@ fn main() -> eframe::Result {
     if let Some(code) = properties::run_helper() {
         std::process::exit(code);
     }
+    // Started elevated to read a drive's master file table for disk usage.
+    if let Some(code) = usage::run_helper() {
+        std::process::exit(code);
+    }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("egui-files")

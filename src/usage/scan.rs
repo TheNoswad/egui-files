@@ -399,6 +399,53 @@ impl Tree {
         dirs
     }
 
+    /// The tree below `ROOT_RECORD`, from a drive's master file table.
+    fn from_entries(root_path: PathBuf, mut entries: Vec<super::mft::Entry>) -> Self {
+        use super::mft::{EntryKind, ROOT_RECORD};
+        let mut tree = Tree::new(root_path);
+        entries.sort_unstable_by_key(|e| e.parent);
+        let max_record = entries.iter().map(|e| e.record).max().unwrap_or(0);
+        // Guards against a damaged table looping a folder into itself.
+        let mut visited = vec![false; max_record.max(ROOT_RECORD) as usize + 1];
+        visited[ROOT_RECORD as usize] = true;
+        let mut stack = vec![(ROOT, ROOT_RECORD)];
+        while let Some((id, record)) = stack.pop() {
+            let start = entries.partition_point(|e| e.parent < record);
+            let end = entries.partition_point(|e| e.parent <= record);
+            let mut dir_records = Vec::new();
+            let scanned = entries[start..end]
+                .iter()
+                .map(|e| {
+                    let name = e.os_name();
+                    let kind = match e.kind {
+                        EntryKind::Dir => {
+                            dir_records.push(e.record);
+                            Kind::Dir
+                        }
+                        EntryKind::Link => Kind::Symlink,
+                        EntryKind::File => Kind::File(Category::of(&name)),
+                    };
+                    Scanned {
+                        name,
+                        kind,
+                        disk: e.disk,
+                        apparent: e.apparent,
+                        modified: e.modified,
+                        link: (e.links > 1 && e.kind == EntryKind::File)
+                            .then_some((0, e.record as u64)),
+                    }
+                })
+                .collect();
+            let dirs = tree.add_children(id, scanned);
+            for ((child, _), record) in dirs.into_iter().zip(dir_records) {
+                if !std::mem::replace(&mut visited[record as usize], true) {
+                    stack.push((child, record));
+                }
+            }
+        }
+        tree
+    }
+
     /// Takes a node out of the tree, and its sizes out of its folders'.
     pub fn remove(&mut self, id: u32) {
         let parent = self.node(id).parent;
@@ -607,8 +654,16 @@ fn read(dir: &Path, _root_device: u64) -> std::io::Result<Vec<Scanned>> {
                 entries.push(Scanned {
                     name,
                     kind,
-                    disk: if file { info.AllocationSize.max(0) as u64 } else { 0 },
-                    apparent: if file { info.EndOfFile.max(0) as u64 } else { 0 },
+                    disk: if file {
+                        info.AllocationSize.max(0) as u64
+                    } else {
+                        0
+                    },
+                    apparent: if file {
+                        info.EndOfFile.max(0) as u64
+                    } else {
+                        0
+                    },
                     modified: unix_seconds(info.LastWriteTime),
                     link: None,
                 });
@@ -664,6 +719,12 @@ pub struct Scan {
     ctx: Context,
     /// When the scan started, and how long it took once it's done.
     timing: Mutex<(Instant, Option<Duration>)>,
+    /// Reading the drive's master file table, before the tree has anything.
+    reading_mft: AtomicBool,
+    /// The tree came from the master file table.
+    from_mft: AtomicBool,
+    /// Why reading the master file table failed, so folders were listed.
+    mft_error: Mutex<Option<String>>,
 }
 
 impl Scan {
@@ -678,9 +739,85 @@ impl Scan {
             root_device,
             ctx: ctx.clone(),
             timing: Mutex::new((Instant::now(), None)),
+            reading_mft: AtomicBool::new(false),
+            from_mft: AtomicBool::new(false),
+            mft_error: Mutex::new(None),
         });
         scan.push(vec![Work::Scan(ROOT, root)]);
         scan
+    }
+
+    /// Scans a whole NTFS drive from its master file table, or by listing
+    /// folders if that can't be read.
+    pub fn start_mft(ctx: &Context, root: PathBuf, access: super::mft::Access) -> Arc<Self> {
+        let scan = Arc::new(Self {
+            tree: RwLock::new(Tree::new(root.clone())),
+            queue: Mutex::default(),
+            wake: Condvar::new(),
+            cancel: AtomicBool::new(false),
+            root_device: 0,
+            ctx: ctx.clone(),
+            timing: Mutex::new((Instant::now(), None)),
+            reading_mft: AtomicBool::new(true),
+            from_mft: AtomicBool::new(false),
+            mft_error: Mutex::new(None),
+        });
+        let worker = scan.clone();
+        let spawned = std::thread::Builder::new()
+            .name("disk-usage-mft".into())
+            .spawn(move || worker.read_mft(root, access));
+        if spawned.is_err() {
+            scan.reading_mft.store(false, Ordering::Relaxed);
+            let root = scan.tree().root_path.clone();
+            scan.push(vec![Work::Scan(ROOT, root)]);
+        }
+        scan
+    }
+
+    fn read_mft(self: Arc<Self>, root: PathBuf, access: super::mft::Access) {
+        let result = super::mft::read(&root, access);
+        if self.cancelled() {
+            self.finish_timing();
+        } else {
+            match result {
+                Ok(entries) => {
+                    let mut fresh = Tree::from_entries(root, entries);
+                    let mut tree = self.tree.write().unwrap();
+                    fresh.generation = tree.generation + 1;
+                    *tree = fresh;
+                    drop(tree);
+                    self.from_mft.store(true, Ordering::Relaxed);
+                    self.finish_timing();
+                }
+                Err(error) => {
+                    *self.mft_error.lock().unwrap() = Some(error.to_string());
+                    // Queued before `reading_mft` clears, so the scan never
+                    // looks finished in between.
+                    self.push(vec![Work::Scan(ROOT, root)]);
+                }
+            }
+        }
+        self.reading_mft.store(false, Ordering::Relaxed);
+        self.ctx.request_repaint();
+    }
+
+    fn finish_timing(&self) {
+        let mut timing = self.timing.lock().unwrap();
+        if timing.1.is_none() {
+            timing.1 = Some(timing.0.elapsed());
+        }
+    }
+
+    pub fn reading_mft(&self) -> bool {
+        self.reading_mft.load(Ordering::Relaxed)
+    }
+
+    pub fn used_mft(&self) -> bool {
+        self.from_mft.load(Ordering::Relaxed)
+    }
+
+    pub fn mft_error(&self) -> Option<String> {
+        self.mft_error.lock().unwrap().clone()
     }
 
     pub fn tree(&self) -> std::sync::RwLockReadGuard<'_, Tree> {
@@ -688,6 +825,9 @@ impl Scan {
     }
 
     pub fn running(&self) -> bool {
+        if self.reading_mft() {
+            return true;
+        }
         let queue = self.queue.lock().unwrap();
         queue.workers > 0 || !queue.work.is_empty()
     }
@@ -782,10 +922,7 @@ impl Scan {
                 let mut queue = self.queue.lock().unwrap();
                 queue.workers -= 1;
                 if queue.workers == 0 {
-                    let mut timing = self.timing.lock().unwrap();
-                    if timing.1.is_none() {
-                        timing.1 = Some(timing.0.elapsed());
-                    }
+                    self.finish_timing();
                 }
                 self.wake.notify_all();
                 self.ctx.request_repaint();
@@ -948,6 +1085,45 @@ mod tests {
         assert!(tree.find(&root.join("a/b/sub/deep.png")).is_some());
         drop(tree);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn builds_the_tree_from_the_master_file_table() {
+        use super::super::mft::{Entry, EntryKind};
+        let entry = |record, parent, kind, disk, links, name: &str| Entry {
+            record,
+            parent,
+            kind,
+            disk,
+            apparent: disk,
+            modified: record as i64,
+            links,
+            name: name.encode_utf16().collect(),
+        };
+        let root = PathBuf::from("/drive");
+        let tree = Tree::from_entries(
+            root.clone(),
+            vec![
+                entry(30, 5, EntryKind::Dir, 0, 1, "Games"),
+                entry(31, 30, EntryKind::File, 8192, 2, "game.exe"),
+                entry(31, 5, EntryKind::File, 8192, 2, "link.exe"),
+                entry(32, 30, EntryKind::Dir, 0, 1, "saves"),
+                entry(33, 32, EntryKind::File, 100, 1, "one.sav"),
+                entry(34, 5, EntryKind::Link, 0, 1, "Junction"),
+                // A damaged table: a folder inside itself, and an orphan.
+                entry(35, 35, EntryKind::Dir, 0, 1, "loop"),
+                entry(36, 999, EntryKind::File, 5, 1, "orphan"),
+            ],
+        );
+        assert_eq!(tree.node(ROOT).totals.disk, 8292);
+        assert_eq!(tree.node(ROOT).totals.files, 4);
+        assert_eq!(tree.node(ROOT).newest, 34);
+        assert_eq!(tree.dirs, 3);
+        let saves = tree.find(&root.join("Games/saves")).unwrap();
+        assert_eq!(tree.node(saves).totals.disk, 100);
+        assert_eq!(tree.path(saves), root.join("Games/saves"));
+        let junction = tree.find(&root.join("Junction")).unwrap();
+        assert_eq!(tree.node(junction).kind, Kind::Symlink);
     }
 
     #[cfg(unix)]

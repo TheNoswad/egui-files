@@ -4,7 +4,7 @@
 //! choice), and for the previewed item in the preview pane.
 
 mod edit;
-mod elevate;
+pub mod elevate;
 mod hash;
 mod info;
 mod media;

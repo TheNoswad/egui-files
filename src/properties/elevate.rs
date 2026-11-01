@@ -137,6 +137,32 @@ fn run(plan: &Plan) -> io::Result<Vec<Failure>> {
 
 #[cfg(windows)]
 fn run(plan: &Plan) -> io::Result<Vec<Failure>> {
+    let text = toml::to_string(plan).map_err(io::Error::other)?;
+    let stem = temp_stem("properties");
+    let plan_file = std::env::temp_dir().join(format!("{stem}.toml"));
+    let report_file = std::env::temp_dir().join(format!("{stem}-report.toml"));
+    std::fs::write(&plan_file, text)?;
+    let _cleanup = Cleanup(vec![plan_file.clone(), report_file.clone()]);
+    run_as_admin(&format!(
+        "{FLAG} \"{}\" \"{}\"",
+        plan_file.display(),
+        report_file.display()
+    ))?;
+    parse_report(&std::fs::read_to_string(&report_file)?)
+}
+
+/// A file name stem in the temp folder that no other helper run uses.
+#[cfg(windows)]
+pub fn temp_stem(what: &str) -> String {
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("egui-files-{what}-{}-{n}", std::process::id())
+}
+
+/// Runs this app again as an administrator (the UAC prompt) with `params`,
+/// waits for it, and fails unless it exits with 0.
+#[cfg(windows)]
+pub fn run_as_admin(params: &str) -> io::Result<()> {
     use windows::{
         Win32::{
             Foundation::{CloseHandle, ERROR_CANCELLED},
@@ -150,20 +176,8 @@ fn run(plan: &Plan) -> io::Result<Vec<Failure>> {
         },
         core::{HSTRING, PCWSTR},
     };
-    let text = toml::to_string(plan).map_err(io::Error::other)?;
-    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let stem = format!("egui-files-properties-{}-{n}", std::process::id());
-    let plan_file = std::env::temp_dir().join(format!("{stem}.toml"));
-    let report_file = std::env::temp_dir().join(format!("{stem}-report.toml"));
-    std::fs::write(&plan_file, text)?;
-    let _cleanup = Cleanup(vec![plan_file.clone(), report_file.clone()]);
     let exe = HSTRING::from(std::env::current_exe()?.as_os_str());
-    let params = HSTRING::from(format!(
-        "{FLAG} \"{}\" \"{}\"",
-        plan_file.display(),
-        report_file.display()
-    ));
+    let params = HSTRING::from(params);
     let verb = HSTRING::from("runas");
     let mut info = SHELLEXECUTEINFOW {
         cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
@@ -194,11 +208,11 @@ fn run(plan: &Plan) -> io::Result<Vec<Failure>> {
             "The helper failed (exit code {code})"
         )));
     }
-    parse_report(&std::fs::read_to_string(&report_file)?)
+    Ok(())
 }
 
 #[cfg(windows)]
-struct Cleanup(Vec<std::path::PathBuf>);
+pub struct Cleanup(pub Vec<std::path::PathBuf>);
 
 #[cfg(windows)]
 impl Drop for Cleanup {

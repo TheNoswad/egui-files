@@ -4,6 +4,7 @@
 
 mod colors;
 mod lists;
+mod mft;
 mod partition;
 mod scan;
 mod treemap;
@@ -30,6 +31,7 @@ use crate::{
 };
 pub use colors::ColorMode;
 use colors::{Painter, Palette};
+pub use mft::run_helper;
 use scan::{Category, Kind, Metric, NONE, ROOT, Scan, ScanHandle, Tree};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -325,6 +327,13 @@ pub struct UsageTab {
     partition: partition::Cache,
     #[serde(skip)]
     space: Option<(Instant, Option<crate::places::Space>)>,
+    /// How the drive's master file table can be read, when the scanned
+    /// folder is a whole NTFS drive.
+    #[serde(skip)]
+    mft: Option<mft::Access>,
+    /// Asked for the fast scan as administrator: scanning again asks again.
+    #[serde(skip)]
+    fast: bool,
 }
 
 impl UsageTab {
@@ -352,6 +361,8 @@ impl UsageTab {
             treemap: Default::default(),
             partition: Default::default(),
             space: None,
+            mft: None,
+            fast: false,
         }
     }
 
@@ -364,7 +375,15 @@ impl UsageTab {
     }
 
     fn start(&mut self, ctx: &egui::Context, shared: &mut Shared) {
-        let scan = Scan::start(ctx, self.usage.clone());
+        let root = self.usage.clone();
+        self.mft = mft::access(&root);
+        let scan = match self.mft {
+            Some(mft::Access::Direct) => Scan::start_mft(ctx, root, mft::Access::Direct),
+            Some(mft::Access::Elevate) if self.fast => {
+                Scan::start_mft(ctx, root, mft::Access::Elevate)
+            }
+            _ => Scan::start(ctx, root),
+        };
         shared.usage.register(&scan);
         self.scan = Some(ScanHandle(scan));
         self.focus = ROOT;
@@ -505,8 +524,13 @@ impl UsageTab {
             Panel::top(Id::new(("usage-toolbar", self.id))).show(ui, |ui| {
                 self.toolbar(ui, &tree, &scan, &mut acts, &mut rescan)
             });
-            Panel::top(Id::new(("usage-status", self.id)))
-                .show(ui, |ui| self.status(ui, &tree, &scan));
+            let fast = Panel::top(Id::new(("usage-status", self.id)))
+                .show(ui, |ui| self.status(ui, &tree, &scan))
+                .inner;
+            if fast {
+                self.fast = true;
+                rescan = true;
+            }
             Panel::left(Id::new(("usage-tree", self.id)))
                 .resizable(true)
                 .default_size(440.0)
@@ -723,7 +747,9 @@ impl UsageTab {
         });
     }
 
-    fn status(&mut self, ui: &mut Ui, tree: &Tree, scan: &Scan) {
+    /// True when the fast scan was asked for.
+    fn status(&mut self, ui: &mut Ui, tree: &Tree, scan: &Scan) -> bool {
+        let mut fast = false;
         let root = tree.node(ROOT);
         let running = scan.running();
         let space = match self.space {
@@ -737,6 +763,13 @@ impl UsageTab {
         ui.horizontal(|ui| {
             if running {
                 ui.spinner();
+            }
+            if scan.reading_mft() {
+                ui.label(format!(
+                    "Reading the drive's master file table… {:.1} s",
+                    scan.elapsed().as_secs_f32()
+                ));
+                return;
             }
             let mut text = format!(
                 "{} in {} files, {} folders",
@@ -756,6 +789,30 @@ impl UsageTab {
                 )
                 .on_hover_text("Folders that couldn't be listed, usually for lack of permission");
             }
+            if let Some(error) = scan.mft_error() {
+                // Declined or failed: scanning again lists folders.
+                self.fast = false;
+                ui.label(
+                    RichText::new(format!("{} Fast scan didn't work", icon::WARNING))
+                        .color(ui.visuals().warn_fg_color),
+                )
+                .on_hover_text(format!(
+                    "Couldn't read the drive's master file table ({error}), so its folders \
+                     were listed instead"
+                ));
+            } else if self.mft == Some(mft::Access::Elevate)
+                && !scan.used_mft()
+                && ui
+                    .button(format!("{} Fast scan", icon::LIGHTNING))
+                    .on_hover_text(
+                        "Scan the whole drive again from its master file table: seconds \
+                         instead of minutes on a hard drive. Needs an administrator, so \
+                         Windows asks first.",
+                    )
+                    .clicked()
+            {
+                fast = true;
+            }
             if let Some(space) = space {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.label(
@@ -770,6 +827,7 @@ impl UsageTab {
                 });
             }
         });
+        fast
     }
 
     fn legend(&self, ui: &mut Ui, painter: &Painter, acts: &mut Vec<Act>) {
