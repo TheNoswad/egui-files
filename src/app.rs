@@ -1,6 +1,9 @@
 //! Top-level application: menu bar and the dock of tabs and panes.
 
-use std::{collections::HashMap, path::PathBuf};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+};
 
 use egui::{
     Button, CentralPanel, Id, Key, Modifiers, Panel, Pos2, Rect, RichText, Ui, Vec2, WidgetText,
@@ -84,6 +87,9 @@ struct Persisted {
     hide_empty_drives: bool,
     #[serde(default)]
     properties: properties::Prefs,
+    /// Ids of the pinned tabs.
+    #[serde(default)]
+    pinned: HashSet<u64>,
 }
 
 fn default_true() -> bool {
@@ -116,6 +122,7 @@ struct PersistedRef<'a> {
     theme: &'a theme::Prefs,
     hide_empty_drives: bool,
     properties: &'a properties::Prefs,
+    pinned: &'a HashSet<u64>,
 }
 
 /// The panes a fresh layout starts with.
@@ -283,6 +290,27 @@ fn add_button_hints(ui: &mut Ui, dock: &DockState<DockTab>) {
     }
 }
 
+/// Moves pinned tabs to the front of their tab bar, keeping their order and
+/// which tab is shown, and forgets pins of tabs that closed.
+fn pinned_first(dock: &mut DockState<DockTab>, pinned: &mut HashSet<u64>) {
+    let open: HashSet<u64> = dock.iter_all_tabs().map(|(_, t)| t.id()).collect();
+    pinned.retain(|id| open.contains(id));
+    for (_, node) in dock.iter_all_nodes_mut() {
+        let Some(leaf) = node.get_leaf_mut() else {
+            continue;
+        };
+        let unpinned = |t: &DockTab| !pinned.contains(&t.id());
+        if leaf.tabs.is_sorted_by_key(unpinned) {
+            continue;
+        }
+        let active = leaf.tabs.get(leaf.active.0).map(DockTab::id);
+        leaf.tabs.sort_by_key(unpinned);
+        if let Some(index) = active.and_then(|id| leaf.tabs.iter().position(|t| t.id() == id)) {
+            leaf.active.0 = index;
+        }
+    }
+}
+
 /// Where a drop at `rel` (0 to 1 across a tab's content) splits it off: the
 /// nearest edge, if within a quarter of the way across.
 fn split_zone(rel: Vec2) -> Option<Split> {
@@ -356,6 +384,9 @@ pub struct FilesApp {
     /// The dock's size last frame, which new panes are sized against.
     dock_size: Vec2,
     add_menu: Option<AddMenu>,
+    /// Ids of the pinned tabs: they can't be closed and stay at the front of
+    /// their tab bar.
+    pinned: HashSet<u64>,
     /// The main surface's node kinds and the dock's size last frame, to
     /// notice them changing.
     dock_shape: (Vec<u8>, Vec2),
@@ -397,6 +428,7 @@ impl FilesApp {
                 theme: theme::Prefs::default(),
                 hide_empty_drives: true,
                 properties: properties::Prefs::default(),
+                pinned: HashSet::new(),
             });
         let Persisted {
             dock,
@@ -417,6 +449,7 @@ impl FilesApp {
             theme,
             hide_empty_drives,
             properties,
+            pinned,
         } = persisted;
         editor::highlight::preload();
         let pending_panes = if panes_docked {
@@ -486,6 +519,7 @@ impl FilesApp {
             pending_panes,
             dock_size: Vec2::ZERO,
             add_menu: None,
+            pinned,
             dock_shape: (Vec::new(), Vec2::ZERO),
             about: About::new(cc),
             system_theme: SystemTheme::watch(&cc.egui_ctx),
@@ -837,11 +871,23 @@ impl FilesApp {
             .dock
             .find_active_focused()
             .filter(|(_, t)| !(last_browser && t.browser().is_some()))
+            .filter(|(_, t)| !self.pinned.contains(&t.id()))
             .map(|(_, t)| t.id())
         else {
             return;
         };
         self.request_close(id);
+    }
+
+    fn toggle_pin(&mut self, id: u64) {
+        if !self.pinned.remove(&id) {
+            self.pinned.insert(id);
+        }
+        self.keep_pinned_first();
+    }
+
+    fn keep_pinned_first(&mut self) {
+        pinned_first(&mut self.dock, &mut self.pinned);
     }
 
     /// Shows `path` in the active browser tab, or a new one, and focuses it.
@@ -1344,6 +1390,7 @@ struct Viewer<'a> {
     /// The last browser tab can't be closed, so the panes always have one
     /// to follow and never spread into the space it leaves.
     browser_count: usize,
+    pinned: &'a HashSet<u64>,
 }
 
 impl Viewer<'_> {
@@ -1385,7 +1432,11 @@ impl TabViewer for Viewer<'_> {
     type Tab = DockTab;
 
     fn title(&mut self, tab: &mut DockTab) -> WidgetText {
-        tab.title().into()
+        if self.pinned.contains(&tab.id()) {
+            format!("{} {}", icon::PUSH_PIN, tab.title()).into()
+        } else {
+            tab.title().into()
+        }
     }
 
     fn id(&mut self, tab: &mut DockTab) -> Id {
@@ -1400,6 +1451,17 @@ impl TabViewer for Viewer<'_> {
     }
 
     fn context_menu(&mut self, ui: &mut Ui, tab: &mut DockTab, _path: NodePath) {
+        if tab.pane().is_none() {
+            let label = if self.pinned.contains(&tab.id()) {
+                format!("{} Unpin tab", icon::PUSH_PIN_SLASH)
+            } else {
+                format!("{} Pin tab", icon::PUSH_PIN)
+            };
+            if ui.button(label).clicked() {
+                self.shared.app_actions.push(AppAction::TogglePin(tab.id()));
+                ui.close();
+            }
+        }
         if let Some(browser) = tab.browser()
             && ui.button("Duplicate tab").clicked()
         {
@@ -1456,8 +1518,9 @@ impl TabViewer for Viewer<'_> {
         }
     }
 
+    /// Pinned tabs can't be closed, nor can the leaf holding them.
     fn is_closeable(&self, tab: &DockTab) -> bool {
-        tab.browser().is_none() || self.browser_count > 1
+        !self.pinned.contains(&tab.id()) && (tab.browser().is_none() || self.browser_count > 1)
     }
 
     fn scroll_bars(&self, _tab: &DockTab) -> [bool; 2] {
@@ -1806,6 +1869,7 @@ impl eframe::App for FilesApp {
             add_requests: &mut add_requests,
             tab_buttons: &mut tab_buttons,
             browser_count,
+            pinned: &self.pinned,
         };
         CentralPanel::default()
             .frame(egui::Frame::NONE)
@@ -1880,6 +1944,7 @@ impl eframe::App for FilesApp {
                 AppAction::OpenWith(request, None) => self.shared.open_with.ask(request),
                 AppAction::Edit(path) => self.open_editor(path),
                 AppAction::CloseTab(id) => self.request_close(id),
+                AppAction::TogglePin(id) => self.toggle_pin(id),
                 AppAction::CopyFiles { paths, cut } => self.copy_files(&ctx, &paths, cut),
                 AppAction::Reveal(path) => self.reveal(path),
                 AppAction::DiskUsage(path) => self.open_usage(path),
@@ -1901,6 +1966,8 @@ impl eframe::App for FilesApp {
             .collect();
         self.watcher.set_watched(shown);
         self.ensure_browser_tab();
+        // Also after tabs are dragged around or closed.
+        self.keep_pinned_first();
         self.refit_on_change();
         self.drag_out(&ctx);
         if !self.os_dropped.is_empty() {
@@ -1998,6 +2065,7 @@ impl eframe::App for FilesApp {
             editor: &self.shared.editor,
             theme: &self.themes.prefs,
             properties: &self.shared.properties.prefs,
+            pinned: &self.pinned,
         };
         eframe::set_value(storage, eframe::APP_KEY, &state);
     }
@@ -2018,6 +2086,21 @@ mod tests {
         assert_eq!(zone(0.2, 0.05), Some(Split::Above));
         assert_eq!(zone(0.5, 0.5), None);
         assert_eq!(zone(0.3, 0.7), None);
+    }
+
+    #[test]
+    fn pinned_tabs_stay_first() {
+        let mut dock = DockState::new(vec![browser(1), browser(2), browser(3), browser(4)]);
+        let path = dock.find_tab_from(|t| t.id() == 2).unwrap();
+        let _ = dock.set_active_tab(path);
+        // 9 isn't open any more.
+        let mut pinned = HashSet::from([3, 4, 9]);
+        pinned_first(&mut dock, &mut pinned);
+        let leaf = dock.leaf(NodePath::MAIN_ROOT).unwrap();
+        let ids: Vec<u64> = leaf.tabs.iter().map(DockTab::id).collect();
+        assert_eq!(ids, [3, 4, 1, 2]);
+        assert_eq!(leaf.tabs[leaf.active.0].id(), 2);
+        assert_eq!(pinned, HashSet::from([3, 4]));
     }
 
     fn browser(id: u64) -> DockTab {

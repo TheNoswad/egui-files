@@ -68,6 +68,8 @@ pub enum AppAction {
     Edit(PathBuf),
     /// Close a tab, asking first if it has unsaved changes.
     CloseTab(u64),
+    /// Pin a tab, or unpin it.
+    TogglePin(u64),
     /// Put files on the system clipboard (see `file_clipboard`).
     CopyFiles {
         paths: Vec<PathBuf>,
