@@ -11,7 +11,7 @@ use std::{
         Arc, Condvar, Mutex, RwLock,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, Instant, SystemTime},
+    time::{Duration, Instant},
 };
 
 use egui::Context;
@@ -442,9 +442,10 @@ struct Scanned {
     link: Option<(u64, u64)>,
 }
 
-fn seconds(time: std::io::Result<SystemTime>) -> i64 {
+#[cfg(not(windows))]
+fn seconds(time: std::io::Result<std::time::SystemTime>) -> i64 {
     time.ok()
-        .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
         .map_or(0, |d| d.as_secs() as i64)
 }
 
@@ -458,6 +459,7 @@ fn device(_meta: &fs::Metadata) -> u64 {
     0
 }
 
+#[cfg(not(windows))]
 fn read(dir: &Path, root_device: u64) -> std::io::Result<Vec<Scanned>> {
     let mut entries = Vec::new();
     for entry in fs::read_dir(dir)? {
@@ -495,6 +497,146 @@ fn read(dir: &Path, root_device: u64) -> std::io::Result<Vec<Scanned>> {
         });
     }
     Ok(entries)
+}
+
+/// Lists a folder by asking for its entries in 64 KiB batches, which takes far
+/// fewer trips into the kernel than `read_dir` (FindNextFileW), and gives each
+/// file's allocated size: the real size on disk.
+#[cfg(windows)]
+fn read(dir: &Path, _root_device: u64) -> std::io::Result<Vec<Scanned>> {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use windows::{
+        Win32::{
+            Foundation::{CloseHandle, ERROR_NO_MORE_FILES, HANDLE},
+            Storage::FileSystem::{
+                CreateFileW, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+                FILE_FLAG_BACKUP_SEMANTICS, FILE_FULL_DIR_INFO, FILE_LIST_DIRECTORY,
+                FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileFullDirectoryInfo,
+                GetFileInformationByHandleEx, OPEN_EXISTING,
+            },
+        },
+        core::PCWSTR,
+    };
+
+    struct Handle(HANDLE);
+    impl Drop for Handle {
+        fn drop(&mut self) {
+            // SAFETY: the handle came from CreateFileW and is closed once.
+            unsafe {
+                let _ = CloseHandle(self.0);
+            }
+        }
+    }
+
+    /// 100 ns ticks since 1601 to seconds since 1970.
+    fn unix_seconds(filetime: i64) -> i64 {
+        if filetime <= 0 {
+            0
+        } else {
+            filetime / 10_000_000 - 11_644_473_600
+        }
+    }
+
+    let path: Vec<u16> = verbatim(dir).encode_wide().chain(Some(0)).collect();
+    // SAFETY: `path` is NUL-terminated.
+    let handle = unsafe {
+        CreateFileW(
+            PCWSTR(path.as_ptr()),
+            FILE_LIST_DIRECTORY.0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            None,
+        )
+    }
+    .map(Handle)
+    .map_err(std::io::Error::from)?;
+
+    // u64s keep the records 8-byte aligned, as they're laid out.
+    let mut buffer = vec![0u64; 64 * 1024 / 8];
+    let mut entries = Vec::new();
+    loop {
+        // SAFETY: the buffer is writable for its whole length.
+        let filled = unsafe {
+            GetFileInformationByHandleEx(
+                handle.0,
+                FileFullDirectoryInfo,
+                buffer.as_mut_ptr().cast(),
+                (buffer.len() * 8) as u32,
+            )
+        };
+        if let Err(err) = filled {
+            if err.code() == ERROR_NO_MORE_FILES.to_hresult() {
+                break;
+            }
+            return Err(err.into());
+        }
+        let base = buffer.as_ptr().cast::<u8>();
+        let mut offset = 0usize;
+        loop {
+            // SAFETY: the system wrote whole records, each 8-byte aligned,
+            // chained by NextEntryOffset within the buffer.
+            let record = unsafe { base.add(offset).cast::<FILE_FULL_DIR_INFO>() };
+            // SAFETY: as above.
+            let info = unsafe { &*record };
+            // SAFETY: the name runs FileNameLength bytes from FileName, past
+            // the end of the struct but inside the buffer.
+            let name = unsafe {
+                std::slice::from_raw_parts(
+                    (&raw const (*record).FileName).cast::<u16>(),
+                    info.FileNameLength as usize / 2,
+                )
+            };
+            if name != [b'.' as u16] && name != [b'.' as u16, b'.' as u16] {
+                let name = OsString::from_wide(name);
+                let attributes = info.FileAttributes;
+                // For reparse points EaSize holds the tag. Only "name
+                // surrogates" (symlinks, junctions) point elsewhere; others,
+                // like cloud placeholders, are real files and folders.
+                let link = attributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0
+                    && info.EaSize & 0x2000_0000 != 0;
+                let kind = if link {
+                    Kind::Symlink
+                } else if attributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0 {
+                    Kind::Dir
+                } else {
+                    Kind::File(Category::of(&name))
+                };
+                let file = matches!(kind, Kind::File(_));
+                entries.push(Scanned {
+                    name,
+                    kind,
+                    disk: if file { info.AllocationSize.max(0) as u64 } else { 0 },
+                    apparent: if file { info.EndOfFile.max(0) as u64 } else { 0 },
+                    modified: unix_seconds(info.LastWriteTime),
+                    link: None,
+                });
+            }
+            if info.NextEntryOffset == 0 {
+                break;
+            }
+            offset += info.NextEntryOffset as usize;
+        }
+    }
+    Ok(entries)
+}
+
+/// `dir` as a `\\?\` path, so folders nested deeper than 260 characters open.
+#[cfg(windows)]
+fn verbatim(dir: &Path) -> OsString {
+    let text = dir.as_os_str().to_string_lossy();
+    if text.starts_with(r"\\?\") || dir.as_os_str().to_str().is_none() {
+        return dir.as_os_str().to_os_string();
+    }
+    let text = text.replace('/', r"\");
+    if let Some(share) = text.strip_prefix(r"\\") {
+        format!(r"\\?\UNC\{share}").into()
+    } else if text.as_bytes().get(1) == Some(&b':') {
+        format!(r"\\?\{text}").into()
+    } else {
+        dir.as_os_str().to_os_string()
+    }
 }
 
 enum Work {
