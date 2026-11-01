@@ -495,6 +495,7 @@ impl BrowserTab {
         if shared.focused_tab == Some(self.id) {
             self.keyboard(ui.ctx(), &mut actions);
         }
+        self.mouse_history(ui, &mut actions);
 
         Panel::top(Id::new(("toolbar", self.id)))
             .show(ui, |ui| self.toolbar(ui, shared, &mut actions));
@@ -543,6 +544,26 @@ impl BrowserTab {
         }
         for action in actions {
             self.apply(action, ui.ctx(), shared);
+        }
+    }
+
+    /// The mouse's back and forward buttons page through the history of the
+    /// tab under the pointer, focused or not, as in a web browser.
+    fn mouse_history(&self, ui: &Ui, actions: &mut Vec<Action>) {
+        if self.rename.is_some() || !ui.rect_contains_pointer(ui.max_rect()) {
+            return;
+        }
+        let (back, forward) = ui.input(|i| {
+            (
+                i.pointer.button_clicked(egui::PointerButton::Extra1),
+                i.pointer.button_clicked(egui::PointerButton::Extra2),
+            )
+        });
+        if back {
+            actions.push(Action::Back);
+        }
+        if forward {
+            actions.push(Action::Forward);
         }
     }
 
