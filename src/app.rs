@@ -1344,7 +1344,10 @@ impl FilesApp {
             && ctx.input(|i| i.pointer.primary_down())
             && let Some(pos) = ctx.input(|i| i.pointer.latest_pos())
             && !ctx.content_rect().contains(pos)
-            && wayland.start_drag(payload.paths.clone())
+            && wayland.start_drag(
+                payload.paths.clone(),
+                crate::drag_icon::render(ctx, dnd::label(&payload)),
+            )
         {
             self.drag_out_active = true;
             egui::DragAndDrop::clear_payload(ctx);

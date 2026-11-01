@@ -7,6 +7,8 @@ mod dates;
 mod devices;
 mod dnd;
 mod dock_tab;
+#[cfg(target_os = "linux")]
+mod drag_icon;
 mod editor;
 #[cfg(windows)]
 mod file_clipboard;

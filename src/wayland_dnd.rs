@@ -14,6 +14,7 @@
 
 use std::{
     io::{Read, Write},
+    os::fd::{AsFd, FromRawFd},
     path::PathBuf,
     sync::{
         Arc, Mutex,
@@ -43,15 +44,21 @@ use wayland_client::{
     Connection, Dispatch, EventQueue, Proxy, QueueHandle,
     globals::registry_queue_init,
     protocol::{
+        wl_buffer::WlBuffer,
+        wl_compositor::WlCompositor,
         wl_data_device::WlDataDevice,
         wl_data_device_manager::DndAction,
         wl_data_source::WlDataSource,
         wl_keyboard::{self, WlKeyboard},
         wl_pointer::WlPointer,
         wl_seat::WlSeat,
+        wl_shm::{self, WlShm},
+        wl_shm_pool::WlShmPool,
         wl_surface::WlSurface,
     },
 };
+
+use crate::drag_icon::DragIcon;
 
 use crate::dnd::{ExternalEvent, parse_uri_list, uri_list};
 
@@ -87,6 +94,8 @@ struct Shared {
     /// Paths being dragged out, while a drag started here is in progress.
     outgoing: Mutex<Option<Vec<PathBuf>>>,
     source: Mutex<Option<DragSource>>,
+    /// The drag icon's surface and buffer, kept alive while dragging out.
+    icon: Mutex<Option<(WlSurface, WlBuffer)>>,
 }
 
 pub struct WaylandDnd {
@@ -95,6 +104,9 @@ pub struct WaylandDnd {
     manager: DataDeviceManagerState,
     device: DataDevice,
     surface: WlSurface,
+    /// For the drag icon; `None` if the compositor lacks them.
+    compositor: Option<WlCompositor>,
+    shm: Option<WlShm>,
     shared: Arc<Shared>,
     events: Receiver<DndEvent>,
 }
@@ -122,6 +134,9 @@ impl WaylandDnd {
         let (globals, mut queue): (_, EventQueue<State>) = registry_queue_init(&conn).ok()?;
         let qh = queue.handle();
         let manager = DataDeviceManagerState::bind(&globals, &qh).ok()?;
+        // Version 5 forbids offsets in attach, which position the icon.
+        let compositor = globals.bind(&qh, 1..=4, ()).ok();
+        let shm = globals.bind(&qh, 1..=1, ()).ok();
         let (sender, events) = mpsc::channel();
         let shared = Arc::new(Shared::default());
         let mut state = State {
@@ -152,6 +167,8 @@ impl WaylandDnd {
             manager,
             device,
             surface,
+            compositor,
+            shm,
             shared,
             events,
         })
@@ -163,7 +180,8 @@ impl WaylandDnd {
 
     /// Hands an in-app drag to the compositor so other apps can receive it.
     /// Must be called while the mouse button that started the drag is held.
-    pub fn start_drag(&self, paths: Vec<PathBuf>) -> bool {
+    /// `icon` follows the pointer, offset like the in-app drag label.
+    pub fn start_drag(&self, paths: Vec<PathBuf>, icon: Option<DragIcon>) -> bool {
         let serial = self.shared.press_serial.load(Ordering::Acquire);
         if serial == 0 || paths.is_empty() {
             return false;
@@ -171,10 +189,52 @@ impl WaylandDnd {
         let source =
             self.manager
                 .create_drag_and_drop_source(&self.qh, [URI_LIST], DndAction::Copy);
-        source.start_drag(&self.device, &self.surface, None, serial);
+        let icon = icon.and_then(|icon| self.icon_surface(&icon));
+        source.start_drag(
+            &self.device,
+            &self.surface,
+            icon.as_ref().map(|i| &i.0),
+            serial,
+        );
+        *self.shared.icon.lock().expect("icon poisoned") = icon;
         *self.shared.outgoing.lock().expect("outgoing poisoned") = Some(paths);
         *self.shared.source.lock().expect("source poisoned") = Some(source);
         self.conn.flush().is_ok()
+    }
+
+    /// A surface showing `icon`, to hand to the compositor as the drag icon.
+    fn icon_surface(&self, icon: &DragIcon) -> Option<(WlSurface, WlBuffer)> {
+        let (compositor, shm) = (self.compositor.as_ref()?, self.shm.as_ref()?);
+        let stride = icon.width as i32 * 4;
+        let len = icon.bgra.len();
+        // SAFETY: memfd_create takes a NUL-terminated name and flags.
+        let fd = unsafe { libc::memfd_create(c"egui-files-drag-icon".as_ptr(), libc::MFD_CLOEXEC) };
+        if fd < 0 {
+            return None;
+        }
+        // SAFETY: memfd_create returned a new descriptor we own.
+        let mut file = std::fs::File::from(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) });
+        file.write_all(&icon.bgra).ok()?;
+        let pool = shm.create_pool(file.as_fd(), len as i32, &self.qh, ());
+        let buffer = pool.create_buffer(
+            0,
+            icon.width as i32,
+            icon.height as i32,
+            stride,
+            wl_shm::Format::Argb8888,
+            &self.qh,
+            (),
+        );
+        pool.destroy();
+        let surface = compositor.create_surface(&self.qh, ());
+        if surface.version() >= 3 {
+            surface.set_buffer_scale(icon.scale);
+        }
+        // Down and right of the pointer, where the in-app label sits.
+        surface.attach(Some(&buffer), 16, 16);
+        surface.damage(0, 0, i32::MAX, i32::MAX);
+        surface.commit();
+        Some((surface, buffer))
     }
 
     /// Puts files on the clipboard. Returns false if there was no input event
@@ -257,6 +317,10 @@ impl State {
             .expect("outgoing poisoned")
             .take();
         self.shared.source.lock().expect("source poisoned").take();
+        if let Some((surface, buffer)) = self.shared.icon.lock().expect("icon poisoned").take() {
+            surface.destroy();
+            buffer.destroy();
+        }
         let _ = self.sender.send(DndEvent::DragOutEnded);
         self.ctx.request_repaint();
     }
@@ -546,6 +610,25 @@ impl Dispatch<WlKeyboard, ()> for State {
         }
     }
 }
+
+/// The drag icon's objects send nothing that needs handling.
+macro_rules! ignore_events {
+    ($($proxy:ty),*) => {$(
+        impl Dispatch<$proxy, ()> for State {
+            fn event(
+                _state: &mut Self,
+                _proxy: &$proxy,
+                _event: <$proxy as Proxy>::Event,
+                _data: &(),
+                _conn: &Connection,
+                _qh: &QueueHandle<Self>,
+            ) {
+            }
+        }
+    )*};
+}
+
+ignore_events!(WlCompositor, WlShm, WlShmPool, WlBuffer, WlSurface);
 
 impl ProvidesRegistryState for State {
     fn registry(&mut self) -> &mut RegistryState {

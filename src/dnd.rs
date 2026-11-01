@@ -280,7 +280,29 @@ pub fn paint_preview(ctx: &Context) {
         return;
     };
     ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
-    let text = if let Some(drag) = &payload.archive {
+    let text = label(&payload);
+    let hint = if ctx.input(|i| i.modifiers.command) {
+        "  (copy)"
+    } else {
+        ""
+    };
+    egui::Area::new(Id::new("egui-files-dnd-preview"))
+        .order(egui::Order::Tooltip)
+        .fixed_pos(pos + egui::vec2(16.0, 16.0))
+        // Follow the pointer off the edge instead of sticking to it; the
+        // platform takes over the drag once the pointer leaves the window.
+        .constrain(false)
+        .interactable(false)
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.label(format!("{text}{hint}"));
+            });
+        });
+}
+
+/// What the drag label says: the file's name, or how many are dragged.
+pub fn label(payload: &FileDrag) -> String {
+    if let Some(drag) = &payload.archive {
         match drag.selection.paths.as_slice() {
             [single] => format!(
                 "{} {}",
@@ -303,21 +325,7 @@ pub fn paint_preview(ctx: &Context) {
             ),
             paths => format!("{} {} items", egui_phosphor::regular::FILES, paths.len()),
         }
-    };
-    let hint = if ctx.input(|i| i.modifiers.command) {
-        "  (copy)"
-    } else {
-        ""
-    };
-    egui::Area::new(Id::new("egui-files-dnd-preview"))
-        .order(egui::Order::Tooltip)
-        .fixed_pos(pos + egui::vec2(16.0, 16.0))
-        .interactable(false)
-        .show(ctx, |ui| {
-            egui::Frame::popup(ui.style()).show(ui, |ui| {
-                ui.label(format!("{text}{hint}"));
-            });
-        });
+    }
 }
 
 // ---------------------------------------------------------------------------
