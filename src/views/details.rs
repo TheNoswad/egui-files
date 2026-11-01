@@ -8,6 +8,7 @@ use crate::{
     fs::{self, SortKey},
     list_columns::{self, Spec},
     tab::{Action, BrowserTab},
+    usage::FolderSizes,
 };
 
 const SIZE: usize = 1;
@@ -53,6 +54,7 @@ pub fn show(
     tab: &BrowserTab,
     visible: &[usize],
     menu: super::MenuContext,
+    folder_sizes: Option<&FolderSizes>,
     actions: &mut Vec<Action>,
 ) {
     let row_height = ui.text_style_height(&TextStyle::Body) + 6.0;
@@ -127,6 +129,13 @@ pub fn show(
                     row.col(|ui| {
                         if !entry.is_dir {
                             ui.label(fs::human_size(entry.size));
+                        } else if let Some(sizes) = folder_sizes
+                            && let Some(size) = sizes.get(&entry.path)
+                        {
+                            // From a disk usage tab; still growing while it scans.
+                            let text = RichText::new(fs::human_size(size)).weak();
+                            let text = if sizes.partial { text.italics() } else { text };
+                            ui.label(text);
                         }
                     });
                 }

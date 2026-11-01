@@ -331,6 +331,25 @@ pub fn handlers(ctx: &Context, subjects: &[Subject]) -> Option<Arc<Handlers>> {
     Some(handlers)
 }
 
+/// Makes `app` the default for files of `mime_type` (Linux).
+#[cfg(target_os = "linux")]
+pub fn set_default(ctx: &Context, app: &App, mime_type: &str) -> std::io::Result<()> {
+    platform::set_default(app, mime_type)?;
+    // Pick the change up right away instead of at the next stale check.
+    GLOBAL.lock().unwrap().checked = None;
+    catalog(ctx);
+    Ok(())
+}
+
+/// Asks the system to change the default app for `path`'s type (Windows,
+/// where only its own dialog may). Returns once the dialog closes.
+#[cfg(windows)]
+pub fn choose_default(path: &Path) -> std::io::Result<()> {
+    platform::choose_default(path)?;
+    GLOBAL.lock().unwrap().cached = None;
+    Ok(())
+}
+
 /// Starts loading the catalog ahead of the first menu.
 pub fn preload(ctx: &Context) {
     catalog(ctx);

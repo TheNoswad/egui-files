@@ -339,3 +339,21 @@ unsafe fn icon_pixels(icon: HICON) -> Option<egui::ColorImage> {
         image
     }
 }
+
+/// Shows the system's "Open with" dialog for `path` with "Always use this
+/// app" ticked, which is the only way Windows lets apps change a default.
+/// Blocks until the dialog closes, so call it off the UI thread.
+pub fn choose_default(path: &Path) -> io::Result<()> {
+    use windows::Win32::UI::Shell::{
+        OAIF_ALLOW_REGISTRATION, OAIF_FORCE_REGISTRATION, OAIF_REGISTER_EXT, OPENASINFO,
+        SHOpenWithDialog,
+    };
+    let wide = HSTRING::from(path.as_os_str());
+    let info = OPENASINFO {
+        pcszFile: windows::core::PCWSTR(wide.as_ptr()),
+        pcszClass: windows::core::PCWSTR::null(),
+        oaifInFlags: OAIF_ALLOW_REGISTRATION | OAIF_REGISTER_EXT | OAIF_FORCE_REGISTRATION,
+    };
+    // SAFETY: `info` and the string it points to outlive the call.
+    unsafe { SHOpenWithDialog(None, &info) }.map_err(io::Error::other)
+}

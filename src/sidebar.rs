@@ -22,6 +22,10 @@ pub struct SidebarResponse {
     pub open_trash: bool,
     /// A drive to eject, and its label.
     pub eject: Option<(PathBuf, String)>,
+    /// A folder to show the disk usage of.
+    pub analyze: Option<PathBuf>,
+    /// A place or folder to show the properties of.
+    pub properties: Option<PathBuf>,
 }
 
 pub struct Sidebar {
@@ -64,6 +68,7 @@ impl Sidebar {
             Some(TreeAction::Navigate(path)) => response.target = Some((path, false)),
             Some(TreeAction::OpenInNewTab(path)) => response.target = Some((path, true)),
             Some(TreeAction::Drop(job)) => jobs.start(job),
+            Some(TreeAction::Properties(path)) => response.properties = Some(path),
             None => {}
         }
     }
@@ -81,6 +86,8 @@ impl Sidebar {
         let mut dropped = None;
         let mut trash_dropped = None;
         let target = &mut response.target;
+        let analyze = &mut response.analyze;
+        let properties = &mut response.properties;
 
         // Places open in a new tab on a middle click, from the right-click
         // menu, or dragged onto a tab bar; dragged near the edge of a tab's
@@ -112,7 +119,19 @@ impl Sidebar {
                     *target = Some((path.clone(), true));
                     ui.close();
                 }
+                if ui
+                    .button(format!("{}  Disk usage", icon::CHART_PIE_SLICE))
+                    .clicked()
+                {
+                    *analyze = Some(path.clone());
+                    ui.close();
+                }
                 more(ui);
+                ui.separator();
+                if ui.button(format!("{}  Properties", icon::INFO)).clicked() {
+                    *properties = Some(path.clone());
+                    ui.close();
+                }
             });
             response
         };
@@ -170,6 +189,9 @@ impl Sidebar {
                         }
                     };
                     let row = place_button(ui, drive.icon, &drive.label, &drive.path, &mut menu);
+                    if let Some(space) = drive.space {
+                        space_bar(ui, space);
+                    }
                     if drive.ejectable {
                         let size = row.rect.height();
                         let rect = egui::Rect::from_min_size(
@@ -196,4 +218,29 @@ impl Sidebar {
             jobs.start(job);
         }
     }
+}
+
+/// A thin bar under a drive showing how full it is.
+fn space_bar(ui: &mut Ui, space: places::Space) {
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 4.0), egui::Sense::hover());
+    let bar = rect
+        .shrink2(egui::vec2(8.0, 0.0))
+        .translate(egui::vec2(0.0, -2.0));
+    let visuals = ui.visuals();
+    let used = space.used_share();
+    let fill = if used > 0.9 {
+        visuals.warn_fg_color
+    } else {
+        visuals.selection.bg_fill
+    };
+    let p = ui.painter();
+    p.rect_filled(bar, 2.0, visuals.extreme_bg_color);
+    let filled = egui::Rect::from_min_size(bar.min, egui::vec2(bar.width() * used, bar.height()));
+    p.rect_filled(filled, 2.0, fill);
+    response.on_hover_text(format!(
+        "{} free of {}",
+        crate::fs::human_size(space.available),
+        crate::fs::human_size(space.total)
+    ));
 }

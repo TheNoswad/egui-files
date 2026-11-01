@@ -9,8 +9,10 @@ use serde::{Deserialize, Serialize};
 use crate::{
     archive::ArchiveTab,
     editor::EditorTab,
+    properties::PropertiesTab,
     tab::{BrowserTab, Shared},
     trash::{self, TrashTab},
+    usage::UsageTab,
 };
 
 /// Untagged so state saved before trash tabs existed (plain `BrowserTab`s)
@@ -27,6 +29,10 @@ pub enum DockTab {
     Archive(ArchiveTab),
     /// Saved as `id`, `edit`, which matches none of the others either.
     Editor(EditorTab),
+    /// Saved as `id`, `usage`.
+    Usage(UsageTab),
+    /// Saved as `id`, `properties`.
+    Properties(PropertiesTab),
 }
 
 /// A tool docked alongside the tabs. Each is open at most once.
@@ -78,6 +84,8 @@ impl DockTab {
             Self::Pane(tab) => tab.pane.id(),
             Self::Archive(tab) => tab.id,
             Self::Editor(tab) => tab.id,
+            Self::Usage(tab) => tab.id,
+            Self::Properties(tab) => tab.id,
         }
     }
 
@@ -88,27 +96,44 @@ impl DockTab {
             Self::Pane(tab) => format!("{} {}", tab.pane.icon(), tab.pane.label()),
             Self::Archive(tab) => tab.title(),
             Self::Editor(tab) => tab.title(),
+            Self::Usage(tab) => tab.title(),
+            Self::Properties(tab) => tab.title(),
         }
     }
 
     pub fn browser(&self) -> Option<&BrowserTab> {
         match self {
             Self::Browser(tab) => Some(tab),
-            Self::Trash(_) | Self::Pane(_) | Self::Archive(_) | Self::Editor(_) => None,
+            Self::Trash(_)
+            | Self::Pane(_)
+            | Self::Archive(_)
+            | Self::Editor(_)
+            | Self::Usage(_)
+            | Self::Properties(_) => None,
         }
     }
 
     pub fn browser_mut(&mut self) -> Option<&mut BrowserTab> {
         match self {
             Self::Browser(tab) => Some(tab),
-            Self::Trash(_) | Self::Pane(_) | Self::Archive(_) | Self::Editor(_) => None,
+            Self::Trash(_)
+            | Self::Pane(_)
+            | Self::Archive(_)
+            | Self::Editor(_)
+            | Self::Usage(_)
+            | Self::Properties(_) => None,
         }
     }
 
     pub fn pane(&self) -> Option<Pane> {
         match self {
             Self::Pane(tab) => Some(tab.pane),
-            Self::Browser(_) | Self::Trash(_) | Self::Archive(_) | Self::Editor(_) => None,
+            Self::Browser(_)
+            | Self::Trash(_)
+            | Self::Archive(_)
+            | Self::Editor(_)
+            | Self::Usage(_)
+            | Self::Properties(_) => None,
         }
     }
 
@@ -119,6 +144,20 @@ impl DockTab {
     pub fn archive(&self) -> Option<&std::path::Path> {
         match self {
             Self::Archive(tab) => Some(&tab.archive),
+            _ => None,
+        }
+    }
+
+    pub fn properties(&self) -> Option<&PropertiesTab> {
+        match self {
+            Self::Properties(tab) => Some(tab),
+            _ => None,
+        }
+    }
+
+    pub fn usage(&self) -> Option<&UsageTab> {
+        match self {
+            Self::Usage(tab) => Some(tab),
             _ => None,
         }
     }
@@ -144,6 +183,8 @@ impl DockTab {
             Self::Trash(tab) => tab.ui(ui, shared),
             Self::Archive(tab) => tab.ui(ui, shared),
             Self::Editor(tab) => tab.ui(ui, shared),
+            Self::Usage(tab) => tab.ui(ui, shared),
+            Self::Properties(tab) => tab.ui(ui, shared),
             Self::Pane(_) => {}
         }
     }
@@ -153,8 +194,10 @@ impl DockTab {
             Self::Browser(tab) => tab.mark_stale(),
             Self::Trash(tab) => tab.mark_stale(),
             Self::Editor(tab) => tab.mark_stale(),
-            // Listings notice changes to the archive themselves.
-            Self::Pane(_) | Self::Archive(_) => {}
+            Self::Usage(tab) => tab.mark_stale(),
+            // Listings notice changes to the archive themselves; properties
+            // look again every few seconds.
+            Self::Pane(_) | Self::Archive(_) | Self::Properties(_) => {}
         }
     }
 
@@ -167,7 +210,8 @@ impl DockTab {
                 }
             }
             Self::Editor(tab) => tab.dirs_changed(dirs),
-            Self::Pane(_) | Self::Archive(_) => {}
+            Self::Usage(tab) => tab.dirs_changed(dirs),
+            Self::Pane(_) | Self::Archive(_) | Self::Properties(_) => {}
         }
     }
 
@@ -178,7 +222,8 @@ impl DockTab {
             Self::Trash(_) => trash::watched_dir().into_iter().collect(),
             Self::Archive(tab) => tab.dir().into_iter().collect(),
             Self::Editor(tab) => tab.dir().into_iter().collect(),
-            Self::Pane(_) => Vec::new(),
+            Self::Usage(tab) => tab.shown_dirs(),
+            Self::Pane(_) | Self::Properties(_) => Vec::new(),
         }
     }
 }
@@ -217,8 +262,14 @@ mod tests {
             4,
             PathBuf::from("/tmp/notes.txt"),
         )));
+        new.push_to_first_leaf(DockTab::Usage(UsageTab::new(5, PathBuf::from("/tmp"))));
         let saved = ron::ser::to_string(&new).unwrap();
         let loaded: DockState<DockTab> = ron::from_str(&saved).unwrap();
+        assert!(
+            loaded
+                .iter_all_tabs()
+                .any(|(_, t)| t.usage().is_some_and(|u| u.id == 5))
+        );
         let kinds: Vec<_> = loaded
             .iter_all_tabs()
             .map(|(_, t)| {
@@ -226,7 +277,7 @@ mod tests {
                     t.id(),
                     t.is_trash(),
                     t.pane(),
-                    t.archive().is_some() || t.editor().is_some(),
+                    t.archive().is_some() || t.editor().is_some() || t.usage().is_some(),
                 )
             })
             .collect();
@@ -238,6 +289,7 @@ mod tests {
                 (Pane::Preview.id(), false, Some(Pane::Preview), false),
                 (3, false, None, true),
                 (4, false, None, true),
+                (5, false, None, true),
             ]
         );
     }

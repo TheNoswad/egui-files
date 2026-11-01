@@ -1,6 +1,6 @@
 //! Standard user folders and mounted drives for the sidebar.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use egui_phosphor::regular as icon;
 
@@ -15,6 +15,67 @@ pub struct Place {
     /// number), so swapping a memory card shows; `None` when the drive is
     /// empty, like a card reader without a card.
     pub media: Option<u32>,
+    /// How big the drive is and how much is free, for drives.
+    pub space: Option<Space>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Space {
+    pub total: u64,
+    /// Free for the user (not counting space reserved for root).
+    pub available: u64,
+}
+
+impl Space {
+    pub fn used_share(self) -> f32 {
+        self.total.saturating_sub(self.available) as f32 / self.total.max(1) as f32
+    }
+}
+
+/// The size and free space of the filesystem holding `path`.
+#[cfg(target_os = "linux")]
+pub fn space(path: &Path) -> Option<Space> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    // SAFETY: `path` is NUL-terminated and `stat` is the struct it fills in.
+    if unsafe { libc::statvfs(path.as_ptr(), &mut stat) } != 0 {
+        return None;
+    }
+    let block = stat.f_frsize as u64;
+    Some(Space {
+        total: stat.f_blocks as u64 * block,
+        available: stat.f_bavail as u64 * block,
+    })
+    .filter(|s| s.total > 0)
+}
+
+#[cfg(windows)]
+pub fn space(path: &Path) -> Option<Space> {
+    use windows::{Win32::Storage::FileSystem::GetDiskFreeSpaceExW, core::PCWSTR};
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .to_string_lossy()
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    let (mut available, mut total) = (0u64, 0u64);
+    // SAFETY: `wide` is NUL-terminated; the outputs are u64s.
+    unsafe {
+        GetDiskFreeSpaceExW(
+            PCWSTR(wide.as_ptr()),
+            Some(&mut available),
+            Some(&mut total),
+            None,
+        )
+    }
+    .ok()?;
+    Some(Space { total, available }).filter(|s| s.total > 0)
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
+pub fn space(_path: &Path) -> Option<Space> {
+    None
 }
 
 pub fn home_dir() -> PathBuf {
@@ -33,6 +94,7 @@ pub fn standard_places() -> Vec<Place> {
         path: dirs.home_dir().to_path_buf(),
         ejectable: false,
         media: Some(0),
+        space: None,
     }];
     let optional = [
         ("Desktop", icon::DESKTOP, dirs.desktop_dir()),
@@ -49,6 +111,7 @@ pub fn standard_places() -> Vec<Place> {
             path: p.to_path_buf(),
             ejectable: false,
             media: Some(0),
+            space: None,
         })
     }));
     places
@@ -129,12 +192,17 @@ pub fn drives() -> Vec<Place> {
             } else {
                 fallback
             };
+            // Network drives can be slow to answer.
+            let space = (media.is_some() && kind != DRIVE_REMOTE)
+                .then(|| space(Path::new(&root)))
+                .flatten();
             Place {
                 label: format!("{name} ({letter}:)"),
                 icon: glyph,
                 path: PathBuf::from(root),
                 ejectable,
                 media,
+                space,
             }
         })
         .collect()
@@ -209,6 +277,7 @@ pub fn drives() -> Vec<Place> {
         path: PathBuf::from("/"),
         ejectable: false,
         media: Some(0),
+        space: space(Path::new("/")),
     }];
     let user = std::env::var("USER").unwrap_or_default();
     let roots = [
@@ -233,6 +302,7 @@ pub fn drives() -> Vec<Place> {
                 } else {
                     icon::HARD_DRIVE
                 },
+                space: space(&path),
                 path,
                 ejectable,
                 media: Some(0),

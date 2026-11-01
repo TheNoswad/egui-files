@@ -883,3 +883,86 @@ mod tests {
         assert_eq!(catalog.handlers(&[dir]).types, ["inode/directory"]);
     }
 }
+
+/// Makes `app` the default for `mime_type`, in the user's most important
+/// `mimeapps.list` (a desktop-specific one if it exists, as it would win).
+pub fn set_default(app: &App, mime_type: &str) -> io::Result<()> {
+    let home = config_dirs()
+        .into_iter()
+        .next()
+        .ok_or_else(|| io::Error::other("no config folder"))?;
+    let file = desktops()
+        .iter()
+        .map(|d| home.join(format!("{}-mimeapps.list", d.to_lowercase())))
+        .find(|f| f.is_file())
+        .unwrap_or_else(|| home.join("mimeapps.list"));
+    let text = fs::read_to_string(&file).unwrap_or_default();
+    let updated = with_default(&text, mime_type, &app.id);
+    fs::create_dir_all(&home)?;
+    fs::write(&file, updated)
+}
+
+/// `text` (a `mimeapps.list`) with `id` as the default for `mime_type`,
+/// keeping everything else as it was.
+fn with_default(text: &str, mime_type: &str, id: &str) -> String {
+    const GROUP: &str = "[Default Applications]";
+    let entry = format!("{mime_type}={id};");
+    let mut out = Vec::new();
+    let (mut in_group, mut seen_group, mut written) = (false, false, false);
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            if in_group && !written {
+                out.push(entry.clone());
+                written = true;
+            }
+            in_group = trimmed == GROUP;
+            seen_group |= in_group;
+        } else if in_group
+            && let Some((key, _)) = trimmed.split_once('=')
+            && key.trim() == mime_type
+        {
+            if !written {
+                out.push(entry.clone());
+                written = true;
+            }
+            continue;
+        }
+        out.push(line.to_owned());
+    }
+    if !written {
+        if !seen_group {
+            if out.last().is_some_and(|l| !l.trim().is_empty()) {
+                out.push(String::new());
+            }
+            out.push(GROUP.to_owned());
+        }
+        out.push(entry);
+    }
+    let mut text = out.join("\n");
+    text.push('\n');
+    text
+}
+
+#[cfg(test)]
+mod default_tests {
+    use super::with_default;
+
+    #[test]
+    fn sets_a_default_keeping_the_rest() {
+        assert_eq!(
+            with_default("", "text/plain", "a.desktop"),
+            "[Default Applications]\ntext/plain=a.desktop;\n"
+        );
+        let text = "[Added Associations]\ntext/plain=b.desktop;\n\n[Default Applications]\nimage/png=c.desktop;\ntext/plain=old.desktop;\n";
+        assert_eq!(
+            with_default(text, "text/plain", "a.desktop"),
+            "[Added Associations]\ntext/plain=b.desktop;\n\n[Default Applications]\nimage/png=c.desktop;\ntext/plain=a.desktop;\n"
+        );
+        let text = "[Default Applications]\nimage/png=c.desktop;\n[Removed Associations]\n";
+        assert_eq!(
+            with_default(text, "text/plain", "a.desktop"),
+            "[Default Applications]\nimage/png=c.desktop;\ntext/plain=a.desktop;\n[Removed Associations]\n"
+        );
+    }
+}

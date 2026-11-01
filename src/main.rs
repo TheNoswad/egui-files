@@ -19,6 +19,7 @@ mod list_columns;
 mod open_with;
 mod places;
 mod preview;
+mod properties;
 mod sidebar;
 mod system_theme;
 mod tab;
@@ -28,6 +29,7 @@ mod theme;
 mod thumbnails;
 mod trash;
 mod tree;
+mod usage;
 mod video;
 mod views;
 mod watcher;
@@ -38,6 +40,10 @@ mod widgets;
 mod windows_drag;
 
 fn main() -> eframe::Result {
+    // Started elevated to apply changes from the Properties window.
+    if let Some(code) = properties::run_helper() {
+        std::process::exit(code);
+    }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("egui-files")

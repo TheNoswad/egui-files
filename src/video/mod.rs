@@ -63,6 +63,105 @@ pub fn libmpv() -> Result<Libmpv, String> {
     })
 }
 
+const AUDIO_EXTENSIONS: &[&str] = &[
+    "mp3", "flac", "ogg", "oga", "opus", "wav", "m4a", "aac", "wma", "aiff", "aif", "ape", "mka",
+    "wv",
+];
+
+pub fn is_audio(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| AUDIO_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
+}
+
+/// What a video or audio file holds, as mpv sees it.
+#[derive(Clone, Debug, Default)]
+pub struct MediaInfo {
+    pub format: Option<String>,
+    pub duration: Option<f64>,
+    /// One line per stream, e.g. "Video: h264, 1920 × 1080, 29.97 fps".
+    pub tracks: Vec<String>,
+}
+
+/// Opens `path` in a silent, invisible mpv core to read its streams.
+/// Blocks for as long as mpv takes to open the file (at most a few seconds).
+pub fn probe(path: &Path) -> Result<MediaInfo, String> {
+    let mpv = mpv::Mpv::new()?;
+    for (name, value) in [
+        ("config", "no"),
+        ("vo", "null"),
+        ("ao", "null"),
+        ("pause", "yes"),
+        ("audio-display", "no"),
+    ] {
+        mpv.set_option(name, value)?;
+    }
+    mpv.initialize()?;
+    mpv.load_file(path)?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match mpv.poll_event() {
+            Some(mpv::Event::FileLoaded) => break,
+            Some(mpv::Event::EndFile { error }) => {
+                return Err(error.unwrap_or_else(|| "Not a media file".to_owned()));
+            }
+            Some(mpv::Event::Shutdown) => return Err("mpv shut down".to_owned()),
+            Some(_) => {}
+            None if std::time::Instant::now() > deadline => {
+                return Err("mpv took too long to open the file".to_owned());
+            }
+            None => std::thread::sleep(std::time::Duration::from_millis(10)),
+        }
+    }
+    let mut info = MediaInfo {
+        format: mpv.get_string("file-format"),
+        duration: mpv.get_string("duration").and_then(|d| d.parse().ok()),
+        tracks: Vec::new(),
+    };
+    let count = mpv.get_int("track-list/count").unwrap_or(0);
+    for i in 0..count {
+        let get = |key: &str| mpv.get_string(&format!("track-list/{i}/{key}"));
+        let kind = get("type").unwrap_or_default();
+        let mut parts: Vec<String> = get("codec").into_iter().collect();
+        match kind.as_str() {
+            "video" => {
+                if get("image").as_deref() == Some("yes")
+                    || get("albumart").as_deref() == Some("yes")
+                {
+                    parts.push("cover art".to_owned());
+                }
+                if let (Some(w), Some(h)) = (get("demux-w"), get("demux-h")) {
+                    parts.push(format!("{w} × {h}"));
+                }
+                if let Some(fps) = get("demux-fps").and_then(|f| f.parse::<f64>().ok()) {
+                    parts.push(format!("{} fps", (fps * 1000.0).round() / 1000.0));
+                }
+            }
+            "audio" => {
+                if let Some(channels) = get("demux-channel-count") {
+                    parts.push(format!("{channels} ch"));
+                }
+                if let Some(rate) = get("demux-samplerate").and_then(|r| r.parse::<f64>().ok()) {
+                    parts.push(format!("{} kHz", rate / 1000.0));
+                }
+            }
+            _ => {}
+        }
+        if let Some(lang) = get("lang") {
+            parts.push(lang);
+        }
+        if let Some(title) = get("title") {
+            parts.push(format!("“{title}”"));
+        }
+        let mut label = kind;
+        if let Some(first) = label.get_mut(0..1) {
+            first.make_ascii_uppercase();
+        }
+        info.tracks.push(format!("{label}: {}", parts.join(", ")));
+    }
+    Ok(info)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     /// Starts paused on the first frame, with sound.

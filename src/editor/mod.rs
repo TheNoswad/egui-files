@@ -1475,6 +1475,8 @@ mod tests {
                 focused_tab: Some(1),
                 preview_shown: false,
                 app_actions: Vec::new(),
+                usage: Default::default(),
+                properties: Default::default(),
                 images: ImageCache::new(&ctx),
                 videos: Videos::new(&ctx),
                 texts: TextCache::default(),

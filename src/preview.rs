@@ -134,7 +134,11 @@ pub fn pane(ui: &mut Ui, entry: Option<&Entry>, shared: &mut Shared, actions: &m
         .id_salt("preview-pane")
         .auto_shrink(false)
         .show(ui, |ui| match entry {
-            Some(entry) => show(ui, entry, shared, images::PREVIEW_SIZE, actions),
+            Some(entry) => {
+                show(ui, entry, shared, images::PREVIEW_SIZE, actions);
+                ui.add_space(8.0);
+                crate::properties::Properties::preview_ui(ui, &entry.path, shared);
+            }
             None => {
                 ui.add_space(16.0);
                 ui.vertical_centered(|ui| ui.weak("Select one item to preview"));
@@ -578,6 +582,8 @@ mod tests {
             focused_tab: None,
             preview_shown: true,
             app_actions: Vec::new(),
+            usage: Default::default(),
+            properties: Default::default(),
             images: ImageCache::new(&ctx),
             videos: Videos::new(&ctx),
             texts: TextCache::default(),

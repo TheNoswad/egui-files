@@ -208,6 +208,7 @@ enum Action {
     ExpandAll(bool),
     Unlock,
     Reload,
+    Properties,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -734,6 +735,8 @@ impl ArchiveTab {
                             };
                             item(ui, label, Action::Toggle(node));
                         }
+                        ui.separator();
+                        item(ui, format!("{} Properties", icon::INFO), Action::Properties);
                         if let Some(target) = open_with {
                             actions.push(Action::OpenWith(index, target));
                         }
@@ -824,6 +827,28 @@ impl ArchiveTab {
                 }
             }
             Action::Activate(index) => self.activate(index, rows, shared),
+            Action::Properties => {
+                let Some(tree) = &self.tree else { return };
+                let entries = self
+                    .selected_paths(rows)
+                    .iter()
+                    .filter_map(|path| tree.nodes.iter().find(|n| &n.path == path))
+                    .map(|n| crate::properties::ArchivedItem {
+                        path: n.path.clone(),
+                        is_dir: n.is_dir,
+                        size: n.size,
+                        packed: n.packed,
+                        modified: n.modified,
+                        encrypted: n.encrypted,
+                    })
+                    .collect();
+                shared.app_actions.push(AppAction::Properties(
+                    crate::properties::Source::Archive {
+                        archive: self.archive.clone(),
+                        entries,
+                    },
+                ));
+            }
             Action::OpenWith(index, target) => {
                 if let Some(job) = self.open_job(index, rows, shared) {
                     let request = open_with::Request::FromArchive(Box::new(job));
@@ -980,6 +1005,8 @@ mod tests {
             focused_tab: Some(1),
             preview_shown: false,
             app_actions: Vec::new(),
+            usage: Default::default(),
+            properties: Default::default(),
             images: ImageCache::new(ctx),
             videos: Videos::new(ctx),
             texts: TextCache::default(),

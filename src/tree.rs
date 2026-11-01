@@ -44,6 +44,7 @@ pub enum TreeAction {
     OpenInNewTab(PathBuf),
     /// Files were dropped onto a folder.
     Drop(JobKind),
+    Properties(PathBuf),
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -264,6 +265,10 @@ impl FolderTree {
                                 action = Some(TreeAction::OpenInNewTab(row.path.clone()));
                                 ui.close();
                             }
+                            if ui.button(format!("{}  Properties", icon::INFO)).clicked() {
+                                action = Some(TreeAction::Properties(row.path.clone()));
+                                ui.close();
+                            }
                         });
                     }
                 }
@@ -298,6 +303,7 @@ mod tests {
             path: root.clone(),
             ejectable: false,
             media: Some(0),
+            space: None,
         };
         let current = root.join("x/y/z");
 

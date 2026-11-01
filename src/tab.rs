@@ -44,6 +44,9 @@ pub struct Shared {
     pub archive_prefs: archive::Prefs,
     pub open_with: OpenWith,
     pub editor: crate::editor::Prefs,
+    /// Disk usage scans, for folder sizes in the Details view.
+    pub usage: crate::usage::Scans,
+    pub properties: crate::properties::Properties,
 }
 
 pub struct FileClipboard {
@@ -70,6 +73,12 @@ pub enum AppAction {
         paths: Vec<PathBuf>,
         cut: bool,
     },
+    /// Show a file or folder selected in its folder, in a new tab.
+    Reveal(PathBuf),
+    /// Scan a folder in a disk usage tab.
+    DiskUsage(PathBuf),
+    /// Show properties, where the user chose.
+    Properties(crate::properties::Source),
 }
 
 /// Everything a view or toolbar can ask the tab to do.
@@ -87,6 +96,12 @@ pub enum Action {
     Activate(PathBuf),
     ActivateCursor,
     OpenInNewTab(PathBuf),
+    /// Scan a folder in a disk usage tab.
+    DiskUsage(PathBuf),
+    /// Show the properties of these items.
+    Properties(Vec<PathBuf>),
+    /// Of the selection, or of the folder if nothing is selected.
+    PropertiesOfSelection,
     Navigate(PathBuf),
     /// Navigate to `dir` and select `select` inside it (Miller-column clicks).
     NavigateSelect {
@@ -542,6 +557,9 @@ impl BrowserTab {
                     extend: false,
                 });
             }
+            if key(Modifiers::ALT, Key::Enter) {
+                actions.push(Action::PropertiesOfSelection);
+            }
             if key(Modifiers::NONE, Key::Enter) {
                 actions.push(Action::ActivateCursor);
             }
@@ -869,10 +887,24 @@ impl BrowserTab {
         );
         item(
             ui,
+            true,
+            format!("{} Disk usage", icon::CHART_PIE_SLICE),
+            "Ctrl+Shift+U",
+            Action::DiskUsage(self.path.clone()),
+        );
+        item(
+            ui,
             self.path.parent().is_some(),
             format!("{} Compress this folder…", icon::FILE_ZIP),
             "",
             Action::CompressFolder,
+        );
+        item(
+            ui,
+            true,
+            format!("{} Properties", icon::INFO),
+            "Alt+Enter",
+            Action::Properties(vec![self.path.clone()]),
         );
         ui.separator();
         ui.menu_button(format!("{} View", icon::EYE), |ui| {
@@ -1201,6 +1233,27 @@ impl BrowserTab {
                 }
             }
             Action::OpenInNewTab(path) => shared.app_actions.push(AppAction::NewTab(path)),
+            Action::DiskUsage(path) => shared.app_actions.push(AppAction::DiskUsage(path)),
+            Action::Properties(paths) => {
+                shared
+                    .app_actions
+                    .push(AppAction::Properties(crate::properties::Source::Files(
+                        paths,
+                    )))
+            }
+            Action::PropertiesOfSelection => {
+                let selected = self.selected_paths();
+                let paths = if selected.is_empty() {
+                    vec![self.path.clone()]
+                } else {
+                    selected
+                };
+                shared
+                    .app_actions
+                    .push(AppAction::Properties(crate::properties::Source::Files(
+                        paths,
+                    )));
+            }
             Action::Navigate(path) => self.navigate(path),
             Action::NavigateSelect { dir, select } => {
                 self.navigate(dir);
@@ -1449,6 +1502,8 @@ mod tests {
             focused_tab: Some(tab.id),
             preview_shown: false,
             app_actions: Vec::new(),
+            usage: Default::default(),
+            properties: Default::default(),
             images: ImageCache::new(ctx),
             videos: Videos::new(ctx),
             texts: TextCache::default(),

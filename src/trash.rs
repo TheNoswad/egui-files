@@ -106,6 +106,7 @@ enum Action {
     Refresh,
     SortBy(SortKey),
     CopyOriginalPath,
+    Properties,
     /// Moves whatever was copied or cut to the trash.
     TrashClipboard,
     /// Open the selection with an app, or ask which when `None`.
@@ -612,6 +613,8 @@ impl TrashTab {
                             format!("{} Copy original path", icon::CLIPBOARD),
                             Action::CopyOriginalPath,
                         );
+                        ui.separator();
+                        item(ui, format!("{} Properties", icon::INFO), Action::Properties);
                     });
                 });
             });
@@ -719,6 +722,32 @@ impl TrashTab {
                     .map(|i| i.original.display().to_string())
                     .collect();
                 ctx.copy_text(paths.join("\n"));
+            }
+            Action::Properties => {
+                let items: Vec<_> = self
+                    .items()
+                    .iter()
+                    .filter(|i| self.selection.contains(&i.item.id))
+                    .map(|i| crate::properties::TrashedItem {
+                        name: i.name.clone(),
+                        original: i.original.clone(),
+                        deleted: i.deleted,
+                        size: match i.size {
+                            Some(TrashItemSize::Bytes(bytes)) => Some(bytes),
+                            _ => None,
+                        },
+                        entries: match i.size {
+                            Some(TrashItemSize::Entries(n)) => Some(n as u64),
+                            _ => None,
+                        },
+                        is_dir: i.is_dir,
+                    })
+                    .collect();
+                shared
+                    .app_actions
+                    .push(AppAction::Properties(crate::properties::Source::Trash(
+                        items,
+                    )));
             }
         }
     }
@@ -840,6 +869,8 @@ mod tests {
             focused_tab: Some(1),
             preview_shown: false,
             app_actions: Vec::new(),
+            usage: Default::default(),
+            properties: Default::default(),
             images: ImageCache::new(&ctx),
             videos: crate::video::Videos::new(&ctx),
             texts: TextCache::default(),

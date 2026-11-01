@@ -24,6 +24,7 @@ use crate::{
     open_with::{self, OpenWith},
     places,
     preview::{self, TextCache},
+    properties::{self, OpenIn, PropertiesTab, Source},
     sidebar::{Sidebar, SidebarResponse},
     system_theme::SystemTheme,
     tab::{self, AppAction, BrowserTab, Shared},
@@ -31,6 +32,7 @@ use crate::{
     theme::{self, Themes},
     trash::{self, TrashCount, TrashTab},
     tree::FolderTree,
+    usage::UsageTab,
     video::{Quality, Videos},
     watcher::DirWatcher,
 };
@@ -80,6 +82,8 @@ struct Persisted {
     theme: theme::Prefs,
     #[serde(default = "default_true")]
     hide_empty_drives: bool,
+    #[serde(default)]
+    properties: properties::Prefs,
 }
 
 fn default_true() -> bool {
@@ -111,6 +115,7 @@ struct PersistedRef<'a> {
     editor: &'a editor::Prefs,
     theme: &'a theme::Prefs,
     hide_empty_drives: bool,
+    properties: &'a properties::Prefs,
 }
 
 /// The panes a fresh layout starts with.
@@ -298,6 +303,8 @@ fn split_zone(rel: Vec2) -> Option<Split> {
 enum NewTab {
     Browser,
     Trash,
+    /// Disk usage of the focused folder.
+    Usage,
     Pane(Pane),
 }
 
@@ -389,6 +396,7 @@ impl FilesApp {
                 editor: editor::Prefs::default(),
                 theme: theme::Prefs::default(),
                 hide_empty_drives: true,
+                properties: properties::Prefs::default(),
             });
         let Persisted {
             dock,
@@ -408,6 +416,7 @@ impl FilesApp {
             editor,
             theme,
             hide_empty_drives,
+            properties,
         } = persisted;
         editor::highlight::preload();
         let pending_panes = if panes_docked {
@@ -452,6 +461,8 @@ impl FilesApp {
                 focused_tab: None,
                 preview_shown: false,
                 app_actions: Vec::new(),
+                usage: Default::default(),
+                properties: properties::Properties::new(properties),
             },
             sidebar: Sidebar::new(&cc.egui_ctx, bookmarks, tree, hide_empty_drives),
             next_tab_id,
@@ -657,6 +668,77 @@ impl FilesApp {
         }
     }
 
+    /// Shows a folder's disk usage, in the tab already showing it if there
+    /// is one.
+    fn open_usage(&mut self, path: PathBuf) {
+        let existing = self
+            .dock
+            .iter_all_tabs()
+            .find(|(_, t)| t.usage().is_some_and(|u| u.usage == path))
+            .map(|(_, t)| t.id());
+        if let Some(id) = existing {
+            self.focus_tab(id);
+        } else {
+            let tab = DockTab::Usage(UsageTab::new(self.next_id(), path));
+            self.push_tab(tab);
+        }
+    }
+
+    /// Shows properties where the user chose: in a tab (the one already
+    /// showing them if there is one) or a window.
+    fn open_properties(&mut self, source: Source) {
+        if source.is_empty() {
+            return;
+        }
+        match self.shared.properties.prefs.open_in {
+            OpenIn::Tab => {
+                let existing = self
+                    .dock
+                    .iter_all_tabs()
+                    .find(|(_, t)| t.properties().is_some_and(|p| p.properties == source))
+                    .map(|(_, t)| t.id());
+                if let Some(id) = existing {
+                    self.focus_tab(id);
+                } else {
+                    let tab = DockTab::Properties(PropertiesTab::new(self.next_id(), source));
+                    self.push_tab(tab);
+                }
+            }
+            OpenIn::Window => self.shared.properties.open_window(source, false),
+            OpenIn::Native => self.shared.properties.open_window(source, true),
+        }
+    }
+
+    /// The selection in the focused browser tab, or its folder if nothing
+    /// is selected.
+    fn focused_selection(&mut self) -> Option<Source> {
+        let tab = self.active_browser_mut()?;
+        let selected = tab.selected_paths();
+        Some(Source::Files(if selected.is_empty() {
+            vec![tab.path.clone()]
+        } else {
+            selected
+        }))
+    }
+
+    /// Opens a new tab on the folder holding `path`, with it selected.
+    fn reveal(&mut self, path: PathBuf) {
+        let Some(parent) = path.parent().map(PathBuf::from) else {
+            return self.open_tab(path);
+        };
+        let tab = self.make_tab(parent);
+        let id = tab.id();
+        self.push_tab(tab);
+        if let Some(browser) = self
+            .dock
+            .iter_all_tabs_mut()
+            .find(|(_, t)| t.id() == id)
+            .and_then(|(_, t)| t.browser_mut())
+        {
+            browser.reveal(path);
+        }
+    }
+
     /// Edits a file, in the tab already editing it if there is one.
     fn open_editor(&mut self, path: PathBuf) {
         let existing = self
@@ -858,6 +940,7 @@ impl FilesApp {
         let existing = self.dock.find_tab_from(|t| match kind {
             NewTab::Browser => false,
             NewTab::Trash => t.is_trash(),
+            NewTab::Usage => false,
             NewTab::Pane(pane) => t.pane() == Some(pane),
         });
         let id = if let Some(path) = existing {
@@ -871,6 +954,10 @@ impl FilesApp {
                     self.make_tab(path)
                 }
                 NewTab::Trash => DockTab::Trash(TrashTab::new(self.next_id())),
+                NewTab::Usage => {
+                    let path = self.focused_path();
+                    DockTab::Usage(UsageTab::new(self.next_id(), path))
+                }
                 NewTab::Pane(pane) => DockTab::Pane(PaneTab { pane }),
             };
             let id = tab.id();
@@ -1022,6 +1109,9 @@ impl FilesApp {
                             ) {
                                 choice = Some(NewTab::Trash);
                             }
+                            if item(ui, icon::CHART_PIE_SLICE, "Disk usage", false) {
+                                choice = Some(NewTab::Usage);
+                            }
                             ui.separator();
                             for pane in Pane::ALL {
                                 if item(ui, pane.icon(), pane.label(), self.has_pane(pane)) {
@@ -1056,6 +1146,10 @@ impl FilesApp {
         // The shell gets everything else typed into it (Ctrl+W deletes a word).
         if self.terminal.has_focus(ctx) {
             return;
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::U)) {
+            let path = self.focused_path();
+            self.open_usage(path);
         }
         let (new_tab, close_tab) = ctx.input_mut(|i| {
             (
@@ -1094,6 +1188,28 @@ impl FilesApp {
                 {
                     self.open_trash();
                 }
+                if ui
+                    .add(
+                        Button::new(format!("{} Disk usage", icon::CHART_PIE_SLICE))
+                            .shortcut_text("Ctrl+Shift+U"),
+                    )
+                    .on_hover_text("Where the space in this folder went")
+                    .clicked()
+                {
+                    let path = self.focused_path();
+                    self.open_usage(path);
+                }
+                if ui
+                    .add(
+                        Button::new(format!("{} Properties", icon::INFO))
+                            .shortcut_text("Alt+Enter"),
+                    )
+                    .on_hover_text("Of the selected items, or of the folder")
+                    .clicked()
+                    && let Some(source) = self.focused_selection()
+                {
+                    self.open_properties(source);
+                }
                 ui.separator();
                 if ui.button("Quit").clicked() {
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
@@ -1115,6 +1231,23 @@ impl FilesApp {
                 .on_hover_text("The “Other application…” dialog gets a box for typing any command");
                 ui.menu_button(format!("{} Syntax colors", icon::PALETTE), |ui| {
                     self.shared.editor.menu_ui(ui);
+                });
+                ui.menu_button(format!("{} Properties", icon::INFO), |ui| {
+                    ui.label("Open properties in");
+                    let prefs = &mut self.shared.properties.prefs;
+                    for open_in in OpenIn::ALL {
+                        if ui
+                            .radio(prefs.open_in == open_in, open_in.label())
+                            .clicked()
+                        {
+                            prefs.open_in = open_in;
+                        }
+                    }
+                    ui.separator();
+                    ui.checkbox(&mut prefs.apply_immediately, "Apply changes immediately")
+                        .on_hover_text(
+                            "Without an Apply button: each change is made as soon as it's set",
+                        );
                 });
                 ui.menu_button("Video quality", |ui| {
                     for quality in Quality::ALL {
@@ -1283,7 +1416,11 @@ impl TabViewer for Viewer<'_> {
         let target = match tab {
             DockTab::Browser(browser) => Some(DropTarget::Folder(browser.path.clone())),
             DockTab::Trash(_) => Some(DropTarget::Trash),
-            DockTab::Pane(_) | DockTab::Archive(_) | DockTab::Editor(_) => None,
+            DockTab::Pane(_)
+            | DockTab::Archive(_)
+            | DockTab::Editor(_)
+            | DockTab::Usage(_)
+            | DockTab::Properties(_) => None,
         };
         if let Some(job) = target.and_then(|target| dnd::target(response, target)) {
             self.shared.jobs.start(job);
@@ -1637,6 +1774,7 @@ impl eframe::App for FilesApp {
 
         Panel::top("menu_bar").show(ui, |ui| self.menu_bar(ui));
         self.about.ui(&ctx);
+        properties::Properties::windows_ui(&ctx, &mut self.shared);
         if self.themes.editor.open {
             self.themes.editor_ui(&ctx);
         }
@@ -1704,6 +1842,12 @@ impl eframe::App for FilesApp {
         if let Some((drive, label)) = sidebar_response.eject {
             self.eject(drive, label);
         }
+        if let Some(path) = sidebar_response.analyze {
+            self.open_usage(path);
+        }
+        if let Some(path) = sidebar_response.properties {
+            self.open_properties(Source::Files(vec![path]));
+        }
         let mut app_actions = Vec::new();
         for action in preview_actions {
             match action {
@@ -1737,6 +1881,9 @@ impl eframe::App for FilesApp {
                 AppAction::Edit(path) => self.open_editor(path),
                 AppAction::CloseTab(id) => self.request_close(id),
                 AppAction::CopyFiles { paths, cut } => self.copy_files(&ctx, &paths, cut),
+                AppAction::Reveal(path) => self.reveal(path),
+                AppAction::DiskUsage(path) => self.open_usage(path),
+                AppAction::Properties(source) => self.open_properties(source),
             }
         }
         self.confirm_close_ui(&ctx);
@@ -1850,6 +1997,7 @@ impl eframe::App for FilesApp {
             open_with: &self.shared.open_with.prefs,
             editor: &self.shared.editor,
             theme: &self.themes.prefs,
+            properties: &self.shared.properties.prefs,
         };
         eframe::set_value(storage, eframe::APP_KEY, &state);
     }

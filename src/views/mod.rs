@@ -41,7 +41,11 @@ pub fn show(
     actions: &mut Vec<Action>,
 ) {
     match tab.view {
-        ViewMode::Details => details::show(ui, tab, visible, MenuContext::new(shared), actions),
+        ViewMode::Details => {
+            let sizes = shared.usage.folder_sizes(&tab.path);
+            let menu = MenuContext::new(shared);
+            details::show(ui, tab, visible, menu, sizes.as_deref(), actions);
+        }
         ViewMode::Grid => grid::show(ui, tab, visible, shared, actions),
         ViewMode::Columns => columns::show(ui, tab, visible, shared, actions),
     }
@@ -151,6 +155,12 @@ fn entry_menu(
             "",
             Action::OpenInNewTab(entry.path.clone()),
         );
+        item(
+            ui,
+            format!("{} Disk usage", icon::CHART_PIE_SLICE),
+            "",
+            Action::DiskUsage(entry.path.clone()),
+        );
     }
     ui.separator();
     item(ui, format!("{} Cut", icon::SCISSORS), "", Action::Cut);
@@ -217,6 +227,17 @@ fn entry_menu(
         format!("{} Move to trash", icon::TRASH),
         "",
         Action::Trash,
+    );
+    ui.separator();
+    item(
+        ui,
+        format!("{} Properties", icon::INFO),
+        "Alt+Enter",
+        Action::Properties(if tab.selection.contains(&entry.path) {
+            tab.selected_paths()
+        } else {
+            vec![entry.path.clone()]
+        }),
     );
     match open_with {
         Some(open_with::Choice::Open(target)) => actions.push(Action::OpenWith(Some(target))),

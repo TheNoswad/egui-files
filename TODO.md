@@ -7,6 +7,7 @@
 - [ ] Zero-copy dmabuf → wgpu import for video, if readback ever matters
 - [ ] Conflict dialog (overwrite / skip) for paste
 - [ ] Drag-out on X11 (Wayland and Windows done)
+- [ ] Disk usage: sort the Details view by folder size when a scan has it; keep scans after their tab closes?
 - [ ] Upstream: egui-winit (0.36 and 0.37) drops Ctrl+V entirely, without even the key press, when the clipboard has no text (or image), e.g. files copied in Explorer. We work around it with `file_clipboard::PasteKey` (Windows: `GetKeyState`) so copied files don't need a text fallback, which Discord would paste instead of the files. Report it, or send a PR that always passes the key press through (or adds an empty-paste event), then drop `PasteKey`.
 
 ## Proton Drive
