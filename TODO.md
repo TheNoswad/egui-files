@@ -10,6 +10,23 @@
 - [ ] Disk usage: keep scans after their tab closes?
 - [ ] Folder sizes: skip (or ask before) measuring network and FUSE mounts
 - [ ] Upstream: egui-winit (0.36 and 0.37) drops Ctrl+V entirely, without even the key press, when the clipboard has no text (or image), e.g. files copied in Explorer. We work around it with `file_clipboard::PasteKey` (Windows: `GetKeyState`) so copied files don't need a text fallback, which Discord would paste instead of the files. Report it, or send a PR that always passes the key press through (or adds an empty-paste event), then drop `PasteKey`.
+- [ ] Custom titlebar that looks native (opt-in; the system frame stays the default)
+    - [ ] Undecorated window: drag to move (`StartDrag`), double-click to maximize, resize from the edges (`BeginResize`), and the system window menu on right-click where there is one
+    - [ ] File / View / Help inline at its left, in place of the menu bar row
+    - [ ] Window buttons: settings for the side (left / right), which ones (minimize, maximize, close) and their look (Windows, Adwaita, Breeze, macOS); default to the platform's, and on Linux read the GNOME / KDE button layout
+    - [ ] Optional parts, each with a toggle: title (the focused tab's folder), back / forward / up for the focused tab, a path or search box, pane toggles (sidebar, preview, terminal). Defaults: title and navigation on, the rest off
+    - [ ] Keep enough empty space to drag by, however much is turned on
+    - [ ] Windows: rounded corners and the shadow via DWM; the Win11 snap layouts flyout needs `HTMAXBUTTON` from `WM_NCHITTEST`, which winit doesn't give us
+    - [ ] Settings section for all of the above, next to the settings screen
+- [ ] properties tab should be a tab style window?
+- [ ] option to set default sort type
+- [ ] scaling issues with the treemap view
+- [ ] sftp etc
+- [ ] google drive
+- [ ] proton drive
+- [ ] mobile support
+    - [ ] tabs like a mobile browser
+- [ ] exe information?
 
 ## Proton Drive
 
