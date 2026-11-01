@@ -3,17 +3,26 @@
 //! "Preferred DropEffect" (copy or move). No text, like Explorer: chat apps such
 //! as Discord paste text in preference to files whenever there is any.
 //!
+//! [`files_if_changed`] reads files copied or cut elsewhere (e.g. Explorer)
+//! back, so they paste here too.
+//!
 //! egui-winit (0.36 and 0.37) drops Ctrl+V entirely when the clipboard has no
 //! text (or image), so [`PasteKey`] notices the key press itself.
 
-use std::{mem::size_of, os::windows::ffi::OsStrExt, path::PathBuf};
+use std::{
+    ffi::OsString,
+    mem::size_of,
+    os::windows::ffi::{OsStrExt, OsStringExt},
+    path::PathBuf,
+};
 
 use windows::{
     Win32::{
-        Foundation::{GlobalFree, HANDLE},
+        Foundation::{GlobalFree, HANDLE, HGLOBAL},
         System::{
             DataExchange::{
-                CloseClipboard, EmptyClipboard, OpenClipboard, RegisterClipboardFormatW,
+                CloseClipboard, EmptyClipboard, GetClipboardData, GetClipboardSequenceNumber,
+                IsClipboardFormatAvailable, OpenClipboard, RegisterClipboardFormatW,
                 SetClipboardData,
             },
             Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock},
@@ -21,7 +30,7 @@ use windows::{
         },
         UI::{
             Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL, VK_MENU, VK_V},
-            Shell::{CFSTR_PREFERREDDROPEFFECT, DROPFILES},
+            Shell::{CFSTR_PREFERREDDROPEFFECT, DROPFILES, DragQueryFileW, HDROP},
         },
     },
     core::Result,
@@ -68,6 +77,54 @@ pub fn set(paths: &[PathBuf], cut: bool) -> Result<()> {
     })();
     let _ = unsafe { CloseClipboard() };
     result
+}
+
+/// The files on the clipboard and whether they were cut, when the clipboard
+/// changed since `seq` (a `GetClipboardSequenceNumber`) and holds files.
+/// Start `seq` at 0 to pick up what was copied before the app started.
+pub fn files_if_changed(seq: &mut u32) -> Option<(Vec<PathBuf>, bool)> {
+    let now = unsafe { GetClipboardSequenceNumber() };
+    if now == *seq {
+        return None;
+    }
+    if unsafe { IsClipboardFormatAvailable(CF_HDROP.0.into()) }.is_err() {
+        *seq = now;
+        return None;
+    }
+    // Busy (another app has it open): leave `seq` alone and try next frame.
+    unsafe { OpenClipboard(None) }.ok()?;
+    let files = unsafe { read_files() };
+    let _ = unsafe { CloseClipboard() };
+    *seq = now;
+    files
+}
+
+/// Reads `CF_HDROP` and "Preferred DropEffect" from the open clipboard.
+unsafe fn read_files() -> Option<(Vec<PathBuf>, bool)> {
+    unsafe {
+        let hdrop = HDROP(GetClipboardData(CF_HDROP.0.into()).ok()?.0);
+        let count = DragQueryFileW(hdrop, u32::MAX, None);
+        let mut paths = Vec::with_capacity(count as usize);
+        for i in 0..count {
+            let len = DragQueryFileW(hdrop, i, None) as usize;
+            let mut buf = vec![0u16; len + 1];
+            let len = DragQueryFileW(hdrop, i, Some(&mut buf)) as usize;
+            paths.push(OsString::from_wide(&buf[..len]).into());
+        }
+        // Explorer: copy is COPY | LINK, cut is MOVE alone.
+        let mut cut = false;
+        let format = RegisterClipboardFormatW(CFSTR_PREFERREDDROPEFFECT);
+        if let Ok(handle) = GetClipboardData(format) {
+            let memory = HGLOBAL(handle.0);
+            let ptr = GlobalLock(memory).cast::<u32>();
+            if !ptr.is_null() {
+                let effect = ptr.read_unaligned();
+                let _ = GlobalUnlock(memory);
+                cut = effect & DROPEFFECT_MOVE.0 != 0 && effect & DROPEFFECT_COPY.0 == 0;
+            }
+        }
+        (!paths.is_empty()).then_some((paths, cut))
+    }
 }
 
 /// Copies `data` into global memory and hands it to the open clipboard.

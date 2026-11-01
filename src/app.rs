@@ -334,6 +334,9 @@ pub struct FilesApp {
     /// Ctrl+V that egui-winit dropped (see `file_clipboard::PasteKey`).
     #[cfg(windows)]
     paste_key: crate::file_clipboard::PasteKey,
+    /// Last clipboard change seen, for picking up files copied in other apps.
+    #[cfg(windows)]
+    clipboard_seq: u32,
     /// An in-app drag was handed to the platform and is still in progress
     /// (Wayland), or just ended and egui still needs the button release (Windows).
     drag_out_active: bool,
@@ -464,6 +467,8 @@ impl FilesApp {
             wayland: crate::wayland_dnd::WaylandDnd::new(cc),
             #[cfg(windows)]
             paste_key: Default::default(),
+            #[cfg(windows)]
+            clipboard_seq: 0,
             drag_out_active: false,
             os_dropped: Vec::new(),
             terminal,
@@ -1607,6 +1612,12 @@ impl eframe::App for FilesApp {
         self.shared.images.begin_frame();
         self.shared.videos.begin_frame();
         self.sync_with_disk(&ctx);
+        // Files copied or cut in another app (or by us) paste here too.
+        #[cfg(windows)]
+        if let Some((paths, cut)) = crate::file_clipboard::files_if_changed(&mut self.clipboard_seq)
+        {
+            self.shared.clipboard = Some(tab::FileClipboard { paths, cut });
+        }
         self.quit_guard(&ctx);
         self.update_active_browser();
         self.global_shortcuts(&ctx);
