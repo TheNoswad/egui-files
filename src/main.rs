@@ -18,6 +18,7 @@ mod jobs;
 mod keymap;
 mod list_columns;
 mod open_with;
+mod pane_sizes;
 mod places;
 mod preview;
 mod properties;

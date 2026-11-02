@@ -7,7 +7,7 @@ use std::{
 
 use egui::{Button, CentralPanel, Id, Key, Panel, Pos2, Rect, RichText, Ui, Vec2, WidgetText};
 use egui_dock::{
-    DockArea, DockState, Node, NodeIndex, NodePath, Split, Style, TabInsert, TabViewer, Tree,
+    DockArea, DockState, Node, NodePath, Split, Style, TabInsert, TabViewer,
     tab_viewer::OnCloseResponse,
 };
 use egui_phosphor::regular as icon;
@@ -23,6 +23,7 @@ use crate::{
     images::ImageCache,
     jobs::{Jobs, Outcome},
     open_with::{self, OpenWith},
+    pane_sizes::PaneSizes,
     places,
     preview::{self, TextCache},
     properties::{self, OpenIn, PropertiesTab, Source},
@@ -110,6 +111,9 @@ struct Persisted {
     keymap: crate::keymap::Keymap,
     #[serde(default)]
     titlebar: crate::titlebar::Prefs,
+    /// The sizes the user dragged the panes to.
+    #[serde(default)]
+    pane_sizes: PaneSizes,
 }
 
 fn default_true() -> bool {
@@ -150,108 +154,27 @@ struct PersistedRef<'a> {
     windows: &'a [TabWindow],
     keymap: &'a crate::keymap::Keymap,
     titlebar: &'a crate::titlebar::Prefs,
+    pane_sizes: &'a PaneSizes,
 }
 
 /// The panes a fresh layout starts with.
 const DEFAULT_PANES: [Pane; 2] = [Pane::Places, Pane::Tree];
 
-/// How big a pane starts out along each axis, in points, and the most of the
-/// dock it may take; what the panels were before they became panes.
-fn default_size(pane: Pane, horizontal: bool) -> Option<(f32, f32)> {
-    match (pane, horizontal) {
-        (Pane::Places | Pane::Tree, true) => Some((220.0, 0.3)),
-        (Pane::Preview, true) => Some((300.0, 0.35)),
-        (Pane::Terminal, false) => Some((240.0, 0.4)),
-        _ => None,
-    }
-}
-
-/// The panes in a subtree, or `None` if it also holds tabs.
-fn panes_in(tree: &Tree<DockTab>, node: NodeIndex) -> Option<Vec<Pane>> {
-    match &tree[node] {
-        Node::Empty => Some(Vec::new()),
-        Node::Leaf(leaf) => leaf.tabs.iter().map(DockTab::pane).collect(),
-        Node::Horizontal(_) | Node::Vertical(_) => {
-            let mut panes = panes_in(tree, node.left())?;
-            panes.extend(panes_in(tree, node.right())?);
-            Some(panes)
-        }
-    }
-}
-
-/// Sets the split fractions in `node`, which is laid out in `rect` of a dock
-/// of size `area`, so each group of panes beside the tabs keeps the size it
-/// was last drawn at, or its default size if it's new. Without this, docking
-/// a pane along the edge of the whole dock would shrink the panes already there.
-fn fit_panes(tree: &mut Tree<DockTab>, node: NodeIndex, rect: Rect, area: Vec2) {
-    let horizontal = match &tree[node] {
-        Node::Horizontal(_) => true,
-        Node::Vertical(_) => false,
-        Node::Empty | Node::Leaf(_) => return,
-    };
-    let length = if horizontal {
-        rect.width()
-    } else {
-        rect.height()
-    };
-    let (first, second) = (node.left(), node.right());
-    let pane_side = match (panes_in(tree, first), panes_in(tree, second)) {
-        (Some(panes), None) => Some((first, panes)),
-        (None, Some(panes)) => Some((second, panes)),
-        _ => None,
-    };
-    if let Some((side, panes)) = pane_side
-        && let Some((default, max)) = panes
-            .iter()
-            .filter_map(|&p| default_size(p, horizontal))
-            .reduce(|a, b| (a.0.max(b.0), a.1.max(b.1)))
-    {
-        let drawn = tree[side]
-            .rect()
-            .filter(|r| r.is_finite() && r.is_positive())
-            .map(|r| if horizontal { r.width() } else { r.height() });
-        let whole = if horizontal { area.x } else { area.y };
-        let size = drawn.unwrap_or_else(|| default.min(max * whole));
-        let share = (size / length.max(1.0)).clamp(0.1, 0.9);
-        let fraction = if side == first { share } else { 1.0 - share };
-        if let Node::Horizontal(split) | Node::Vertical(split) = &mut tree[node] {
-            split.fraction = fraction;
-        }
-    }
-    let fraction = match &tree[node] {
-        Node::Horizontal(split) | Node::Vertical(split) => split.fraction,
-        Node::Empty | Node::Leaf(_) => return,
-    };
-    let (a, b) = if horizontal {
-        rect.split_left_right_at_fraction(fraction)
-    } else {
-        rect.split_top_bottom_at_fraction(fraction)
-    };
-    fit_panes(tree, first, a, area);
-    fit_panes(tree, second, b, area);
-}
-
 /// Docks `pane` where it goes by default: places and the folder tree on the
 /// left, stacked if both are open, the preview on the right and the terminal
 /// along the bottom. `area` is the dock's size.
-fn dock_pane(dock: &mut DockState<DockTab>, pane: Pane, area: Vec2) {
+fn dock_pane(dock: &mut DockState<DockTab>, sizes: &mut PaneSizes, pane: Pane, area: Vec2) {
     let tab = DockTab::Pane(PaneTab { pane });
     let partner = match pane {
         Pane::Places => Some((Pane::Tree, Split::Above)),
         Pane::Tree => Some((Pane::Places, Split::Below)),
         Pane::Preview | Pane::Terminal => None,
     };
+    // `PaneSizes::fit` sizes it.
     if let Some((partner, split)) = partner
         && let Some(path) = dock.find_tab_from(|t| t.pane() == Some(partner))
     {
-        // Places gets enough height for the standard folders; the tree the rest.
-        let places = (300.0 / area.y.max(1.0)).clamp(0.25, 0.6);
-        let fraction = if split == Split::Above {
-            places
-        } else {
-            1.0 - places
-        };
-        dock.split(path.node_path(), split, fraction, Node::leaf(tab));
+        dock.split(path.node_path(), split, 0.5, Node::leaf(tab));
     } else if dock.main_surface().root_node().is_none_or(|n| n.is_empty()) {
         dock.push_to_first_leaf(tab);
     } else {
@@ -260,11 +183,9 @@ fn dock_pane(dock: &mut DockState<DockTab>, pane: Pane, area: Vec2) {
             Pane::Preview => Split::Right,
             Pane::Terminal => Split::Below,
         };
-        // `fit_panes` sizes it.
         dock.split(NodePath::MAIN_ROOT, split, 0.5, Node::leaf(tab));
     }
-    let rect = Rect::from_min_size(egui::Pos2::ZERO, area);
-    fit_panes(dock.main_surface_mut(), NodeIndex::root(), rect, area);
+    sizes.fit(dock.main_surface_mut(), area, Some(pane));
 }
 
 /// The panes to dock for state saved before panes were in the dock.
@@ -479,9 +400,8 @@ pub struct FilesApp {
     pinned: HashSet<u64>,
     /// How new browser tabs sort and which view they show.
     new_tabs: NewTabs,
-    /// The main surface's node kinds and the dock's size last frame, to
-    /// notice them changing.
-    dock_shape: (Vec<u8>, Vec2),
+    /// The sizes the user dragged the panes to.
+    pane_sizes: PaneSizes,
     about: About,
     system_theme: SystemTheme,
     themes: Themes,
@@ -542,6 +462,7 @@ impl FilesApp {
                 windows: Vec::new(),
                 keymap: Default::default(),
                 titlebar: Default::default(),
+                pane_sizes: PaneSizes::default(),
             });
         let Persisted {
             dock,
@@ -570,6 +491,7 @@ impl FilesApp {
             windows,
             keymap,
             titlebar,
+            pane_sizes,
         } = persisted;
         crate::keymap::set(&cc.egui_ctx, keymap);
         editor::highlight::preload();
@@ -659,7 +581,7 @@ impl FilesApp {
                 sort: default_sort,
                 view: default_view,
             },
-            dock_shape: (Vec::new(), Vec2::ZERO),
+            pane_sizes,
             about: About::new(cc),
             system_theme: SystemTheme::watch(&cc.egui_ctx),
             themes: Themes::new(&cc.egui_ctx, theme),
@@ -1206,7 +1128,7 @@ impl FilesApp {
                 self.terminal.surrender_focus(ctx);
             }
         } else {
-            dock_pane(&mut self.dock, pane, self.dock_size);
+            dock_pane(&mut self.dock, &mut self.pane_sizes, pane, self.dock_size);
             self.focus_pane(pane);
         }
     }
@@ -1256,8 +1178,9 @@ impl FilesApp {
             tabs.push(self.make_tab(places::home_dir()));
         }
         self.dock = DockState::new(tabs);
+        self.pane_sizes = PaneSizes::default();
         for pane in panes {
-            dock_pane(&mut self.dock, pane, self.dock_size);
+            dock_pane(&mut self.dock, &mut self.pane_sizes, pane, self.dock_size);
         }
     }
 
@@ -2280,37 +2203,6 @@ impl FilesApp {
         }
     }
 
-    /// Keeps the panes at the size they were drawn when the dock's shape or
-    /// size changes. egui_dock keeps split fractions, so without this, closing
-    /// a pane, moving a tab or resizing the window would resize the panes.
-    fn refit_on_change(&mut self) {
-        let shape: Vec<u8> = self
-            .dock
-            .main_surface()
-            .iter()
-            .map(|node| match node {
-                Node::Empty => 0,
-                Node::Leaf(_) => 1,
-                Node::Horizontal(_) => 2,
-                Node::Vertical(_) => 3,
-            })
-            .collect();
-        let changed = (shape, self.dock_size);
-        if changed != self.dock_shape {
-            // Not on the first frame, before anything was drawn at its size.
-            if !self.dock_shape.0.is_empty() && self.dock_size.min_elem() > 0.0 {
-                let rect = Rect::from_min_size(Pos2::ZERO, self.dock_size);
-                fit_panes(
-                    self.dock.main_surface_mut(),
-                    NodeIndex::root(),
-                    rect,
-                    self.dock_size,
-                );
-            }
-            self.dock_shape = changed;
-        }
-    }
-
     /// There's always a browser tab, so panes have something to follow.
     fn ensure_browser_tab(&mut self) {
         if self
@@ -2347,7 +2239,12 @@ impl FilesApp {
                 for launch in self.shared.open_with.launch(ctx, &target, &paths) {
                     self.terminal.run(launch);
                     if !self.has_pane(Pane::Terminal) {
-                        dock_pane(&mut self.dock, Pane::Terminal, self.dock_size);
+                        dock_pane(
+                            &mut self.dock,
+                            &mut self.pane_sizes,
+                            Pane::Terminal,
+                            self.dock_size,
+                        );
                     }
                     self.focus_pane(Pane::Terminal);
                 }
@@ -2610,8 +2507,11 @@ impl eframe::App for FilesApp {
             .show(ui, |ui| {
                 self.dock_size = ui.available_size();
                 for pane in std::mem::take(&mut self.pending_panes) {
-                    dock_pane(&mut self.dock, pane, self.dock_size);
+                    dock_pane(&mut self.dock, &mut self.pane_sizes, pane, self.dock_size);
                 }
+                self.pane_sizes
+                    .fit(self.dock.main_surface_mut(), self.dock_size, None);
+                let fractions = PaneSizes::before(self.dock.main_surface());
                 before = Some(tab_windows::Before::of(
                     ui.ctx(),
                     &self.dock,
@@ -2625,6 +2525,11 @@ impl eframe::App for FilesApp {
                     .show_leaf_collapse_buttons(false)
                     .show_leaf_close_all_buttons(true)
                     .show_inside(ui, &mut viewer);
+                self.pane_sizes.note_drags(
+                    self.dock.main_surface_mut(),
+                    &fractions,
+                    self.dock_size,
+                );
                 if self.add_menu.is_none() {
                     add_button_hints(ui, &self.dock, &Style::from_egui(ui.style()));
                 }
@@ -2706,7 +2611,9 @@ impl eframe::App for FilesApp {
         self.ensure_browser_tab();
         // Also after tabs are dragged around or closed.
         self.keep_pinned_first();
-        self.refit_on_change();
+        // Also after panes or tabs moved or closed.
+        self.pane_sizes
+            .fit(self.dock.main_surface_mut(), self.dock_size, None);
         self.drag_out(&ctx);
         if !self.os_dropped.is_empty() {
             // winit reports no drop position, so use the focused folder.
@@ -2817,6 +2724,7 @@ impl eframe::App for FilesApp {
             windows: &self.windows,
             keymap: &keymap,
             titlebar: &self.titlebar,
+            pane_sizes: &self.pane_sizes,
         };
         eframe::set_value(storage, eframe::APP_KEY, &state);
     }
@@ -2839,6 +2747,7 @@ fn outgoing_drag(ctx: &egui::Context) -> Option<Vec<PathBuf>> {
 #[cfg(test)]
 mod tests {
     use egui::Modifiers;
+    use egui_dock::NodeIndex;
 
     use super::*;
 
@@ -2908,16 +2817,41 @@ mod tests {
             .unwrap()
     }
 
+    /// A frame of the app: fits the panes, shows the dock, then takes any
+    /// separator `drag` (a split's new fraction) as the user's.
+    fn shown(
+        dock: &mut DockState<DockTab>,
+        sizes: &mut PaneSizes,
+        size: Vec2,
+        drag: Option<(NodeIndex, f32)>,
+    ) -> Vec<(String, Rect)> {
+        sizes.fit(dock.main_surface_mut(), size, None);
+        let before = PaneSizes::before(dock.main_surface());
+        if let Some((node, fraction)) = drag
+            && let Node::Horizontal(split) | Node::Vertical(split) =
+                &mut dock.main_surface_mut()[node]
+        {
+            split.fraction = fraction;
+        }
+        let leaves = layout(dock, size);
+        sizes.note_drags(dock.main_surface_mut(), &before, size);
+        leaves
+    }
+
+    fn near(got: f32, want: f32) -> bool {
+        (got - want).abs() < 12.0
+    }
+
     #[test]
     fn panes_get_their_old_panel_sizes() {
         let size = egui::vec2(1400.0, 900.0);
         let mut dock = DockState::new(vec![browser(1), browser(2)]);
+        let mut sizes = PaneSizes::default();
         for pane in Pane::ALL {
-            dock_pane(&mut dock, pane, size);
+            dock_pane(&mut dock, &mut sizes, pane, size);
         }
-        let leaves = layout(&mut dock, size);
+        let leaves = shown(&mut dock, &mut sizes, size, None);
         assert_eq!(leaves.len(), 5, "each pane gets a leaf, the tabs share one");
-        let near = |got: f32, want: f32| (got - want).abs() < 12.0;
         let places = rect_of(&leaves, Pane::Places);
         let tree = rect_of(&leaves, Pane::Tree);
         assert!(near(places.width(), 220.0), "{places:?}");
@@ -2929,33 +2863,89 @@ mod tests {
         // A small window caps the panes so the files keep most of it.
         let small = egui::vec2(600.0, 400.0);
         let mut dock = DockState::new(vec![browser(1)]);
+        let mut sizes = PaneSizes::default();
         for pane in Pane::ALL {
-            dock_pane(&mut dock, pane, small);
+            dock_pane(&mut dock, &mut sizes, pane, small);
         }
-        let leaves = layout(&mut dock, small);
+        let leaves = shown(&mut dock, &mut sizes, small, None);
         assert!(rect_of(&leaves, Pane::Places).width() <= 0.3 * 600.0 + 1.0);
         assert!(rect_of(&leaves, Pane::Preview).width() <= 0.35 * 600.0 + 1.0);
-        assert!(rect_of(&leaves, Pane::Terminal).height() <= 0.4 * 400.0 + 1.0);
+        // Except that egui_dock keeps 175 on each side of a separator.
+        assert!(rect_of(&leaves, Pane::Terminal).height() <= 175.0 + 1.0);
+    }
+
+    #[test]
+    fn places_gets_its_height_above_the_tree_either_way_round() {
+        let size = egui::vec2(1400.0, 900.0);
+        for order in [[Pane::Places, Pane::Tree], [Pane::Tree, Pane::Places]] {
+            let mut dock = DockState::new(vec![browser(1)]);
+            let mut sizes = PaneSizes::default();
+            for pane in order {
+                dock_pane(&mut dock, &mut sizes, pane, size);
+            }
+            let leaves = shown(&mut dock, &mut sizes, size, None);
+            let places = rect_of(&leaves, Pane::Places);
+            assert!(near(places.height(), 300.0), "{order:?}: {places:?}");
+            assert!(places.max.y <= rect_of(&leaves, Pane::Tree).min.y + 1.0);
+        }
+    }
+
+    #[test]
+    fn resizing_the_window_only_resizes_the_files() {
+        let size = egui::vec2(1400.0, 900.0);
+        let mut dock = DockState::new(vec![browser(1)]);
+        let mut sizes = PaneSizes::default();
+        for pane in Pane::ALL {
+            dock_pane(&mut dock, &mut sizes, pane, size);
+        }
+        let panes = |leaves: &[(String, Rect)]| {
+            [
+                rect_of(leaves, Pane::Places).width(),
+                rect_of(leaves, Pane::Places).height(),
+                rect_of(leaves, Pane::Preview).width(),
+                rect_of(leaves, Pane::Terminal).height(),
+            ]
+        };
+        let want = panes(&shown(&mut dock, &mut sizes, size, None));
+        // Wide, then small enough to squeeze the panes, a frame at a time
+        // like a window being dragged.
+        let mut steps = Vec::new();
+        for i in 0..=20 {
+            let i = i as f32;
+            steps.push(egui::vec2(1400.0 + i * 100.0, 900.0 + i * 40.0));
+        }
+        for i in 0..=20 {
+            let i = i as f32;
+            steps.push(egui::vec2(3400.0 - i * 150.0, 1700.0 - i * 70.0));
+        }
+        for step in steps {
+            shown(&mut dock, &mut sizes, step, None);
+        }
+        for step in [egui::vec2(1900.0, 1200.0), size] {
+            let got = panes(&shown(&mut dock, &mut sizes, step, None));
+            for (got, want) in got.iter().zip(want) {
+                assert!((got - want).abs() < 2.0, "{step:?}: {got} vs {want}");
+            }
+        }
     }
 
     #[test]
     fn opening_a_pane_keeps_the_others_sizes() {
         let size = egui::vec2(1400.0, 900.0);
         let mut dock = DockState::new(vec![browser(1)]);
-        dock_pane(&mut dock, Pane::Places, size);
-        layout(&mut dock, size);
+        let mut sizes = PaneSizes::default();
+        dock_pane(&mut dock, &mut sizes, Pane::Places, size);
+        shown(&mut dock, &mut sizes, size, None);
         // The user drags the sidebar wider.
-        if let Node::Horizontal(split) = &mut dock.main_surface_mut()[NodeIndex::root()] {
-            split.fraction = 350.0 / 1400.0;
-        }
-        layout(&mut dock, size);
-        for pane in [Pane::Preview, Pane::Terminal] {
-            dock_pane(&mut dock, pane, size);
-            let leaves = layout(&mut dock, size);
+        let drag = Some((NodeIndex::root(), 350.0 / 1400.0));
+        shown(&mut dock, &mut sizes, size, drag);
+        for pane in [Pane::Preview, Pane::Terminal, Pane::Tree] {
+            dock_pane(&mut dock, &mut sizes, pane, size);
+            let leaves = shown(&mut dock, &mut sizes, size, None);
             let places = rect_of(&leaves, Pane::Places).width();
-            assert!((places - 350.0).abs() < 12.0, "{pane:?}: {places}");
+            assert!(near(places, 350.0), "{pane:?}: {places}");
             let preview = rect_of(&leaves, Pane::Preview).width();
-            assert!((preview - 300.0).abs() < 12.0, "{pane:?}: {preview}");
+            assert!(near(preview, 300.0), "{pane:?}: {preview}");
         }
     }
 
@@ -3073,8 +3063,9 @@ mod tests {
         }
         let size = egui::vec2(1400.0, 900.0);
         let mut dock = DockState::new(vec![browser(1)]);
-        dock_pane(&mut dock, Pane::Places, size);
-        dock_pane(&mut dock, Pane::Terminal, size);
+        let mut sizes = PaneSizes::default();
+        dock_pane(&mut dock, &mut sizes, Pane::Places, size);
+        dock_pane(&mut dock, &mut sizes, Pane::Terminal, size);
         let ctx = egui::Context::default();
         let mut viewer = Adds(Vec::new());
         let mut frame = |dock: &mut DockState<DockTab>, events| {
@@ -3120,30 +3111,51 @@ mod tests {
     }
 
     #[test]
-    fn closing_a_pane_or_resizing_keeps_the_others_sizes() {
+    fn closing_a_pane_keeps_the_others_sizes() {
         let size = egui::vec2(1400.0, 900.0);
         let mut dock = DockState::new(vec![browser(1)]);
-        dock_pane(&mut dock, Pane::Places, size);
-        dock_pane(&mut dock, Pane::Preview, size);
-        layout(&mut dock, size);
-        let preview = dock.find_tab_from(|t| t.pane() == Some(Pane::Preview));
-        dock.remove_tab(preview.unwrap());
-        // What `refit_on_change` does.
-        let refit = |dock: &mut DockState<DockTab>, size| {
-            let rect = Rect::from_min_size(Pos2::ZERO, size);
-            fit_panes(dock.main_surface_mut(), NodeIndex::root(), rect, size);
-        };
-        refit(&mut dock, size);
-        let leaves = layout(&mut dock, size);
-        let places = rect_of(&leaves, Pane::Places).width();
-        assert!((places - 220.0).abs() < 12.0, "{places}");
+        let mut sizes = PaneSizes::default();
+        for pane in [Pane::Places, Pane::Tree, Pane::Preview] {
+            dock_pane(&mut dock, &mut sizes, pane, size);
+        }
+        shown(&mut dock, &mut sizes, size, None);
+        for pane in [Pane::Preview, Pane::Tree] {
+            let path = dock.find_tab_from(|t| t.pane() == Some(pane));
+            dock.remove_tab(path.unwrap());
+            let leaves = shown(&mut dock, &mut sizes, size, None);
+            let places = rect_of(&leaves, Pane::Places).width();
+            assert!(near(places, 220.0), "{pane:?}: {places}");
+        }
+    }
 
-        // A bigger window goes to the files, not the sidebar.
-        let bigger = egui::vec2(1900.0, 1000.0);
-        refit(&mut dock, bigger);
-        let leaves = layout(&mut dock, bigger);
-        let places = rect_of(&leaves, Pane::Places).width();
-        assert!((places - 220.0).abs() < 12.0, "{places}");
+    #[test]
+    fn a_dragged_separator_sticks_and_squeezing_does_not() {
+        let size = egui::vec2(1400.0, 900.0);
+        let mut dock = DockState::new(vec![browser(1)]);
+        let mut sizes = PaneSizes::default();
+        for pane in [Pane::Places, Pane::Tree] {
+            dock_pane(&mut dock, &mut sizes, pane, size);
+        }
+        shown(&mut dock, &mut sizes, size, None);
+        // The split between Places and the tree below it.
+        let stack = dock
+            .main_surface()
+            .iter()
+            .position(|n| matches!(n, Node::Vertical(_)))
+            .map(NodeIndex)
+            .unwrap();
+        shown(&mut dock, &mut sizes, size, Some((stack, 0.25)));
+        let want = rect_of(&shown(&mut dock, &mut sizes, size, None), Pane::Places).height();
+        assert!(near(want, 225.0), "{want}");
+        // Too short for it: egui_dock keeps some of the tree on screen.
+        let short = egui::vec2(1400.0, 300.0);
+        let leaves = shown(&mut dock, &mut sizes, short, None);
+        assert!(rect_of(&leaves, Pane::Places).height() < want);
+        shown(&mut dock, &mut sizes, short, None);
+        for step in [egui::vec2(1400.0, 1300.0), size] {
+            let places = rect_of(&shown(&mut dock, &mut sizes, step, None), Pane::Places);
+            assert!((places.height() - want).abs() < 2.0, "{step:?}: {places:?}");
+        }
     }
 
     #[test]
