@@ -72,7 +72,6 @@ impl View {
             Self::Largest => "Largest files",
         }
     }
-
 }
 
 /// What a chart or list asked for, applied once drawing is done (and the
@@ -1202,7 +1201,10 @@ impl Scans {
         if !handle.running() {
             let ids: Vec<u32> = {
                 let tree = handle.tree();
-                own.changed.iter().filter_map(|dir| tree.find(dir)).collect()
+                own.changed
+                    .iter()
+                    .filter_map(|dir| tree.find(dir))
+                    .collect()
             };
             for id in ids {
                 handle.refresh(id);
@@ -1421,7 +1423,8 @@ mod tests {
 
     /// `big/` holds most of the space, in a few files and a subfolder.
     fn fixture(name: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!("egui-files-usage-{name}-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("egui-files-usage-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("big/inner")).unwrap();
         std::fs::create_dir_all(root.join("small")).unwrap();
