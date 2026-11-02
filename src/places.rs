@@ -33,7 +33,7 @@ impl Space {
 }
 
 /// The size and free space of the filesystem holding `path`.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub fn space(path: &Path) -> Option<Space> {
     use std::os::unix::ffi::OsStrExt;
     let path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
@@ -73,7 +73,7 @@ pub fn space(path: &Path) -> Option<Space> {
     Some(Space { total, available }).filter(|s| s.total > 0)
 }
 
-#[cfg(not(any(target_os = "linux", windows)))]
+#[cfg(not(any(target_os = "linux", target_os = "android", windows)))]
 pub fn space(_path: &Path) -> Option<Space> {
     None
 }
@@ -96,19 +96,61 @@ pub fn standard_places() -> Vec<Place> {
         media: Some(0),
         space: None,
     }];
+    #[cfg(not(target_os = "android"))]
     let optional = [
-        ("Desktop", icon::DESKTOP, dirs.desktop_dir()),
-        ("Documents", icon::FILE_TEXT, dirs.document_dir()),
-        ("Downloads", icon::DOWNLOAD_SIMPLE, dirs.download_dir()),
-        ("Pictures", icon::IMAGE, dirs.picture_dir()),
-        ("Music", icon::MUSIC_NOTES, dirs.audio_dir()),
-        ("Videos", icon::FILM_STRIP, dirs.video_dir()),
+        (
+            "Desktop",
+            icon::DESKTOP,
+            dirs.desktop_dir().map(Path::to_path_buf),
+        ),
+        (
+            "Documents",
+            icon::FILE_TEXT,
+            dirs.document_dir().map(Path::to_path_buf),
+        ),
+        (
+            "Downloads",
+            icon::DOWNLOAD_SIMPLE,
+            dirs.download_dir().map(Path::to_path_buf),
+        ),
+        (
+            "Pictures",
+            icon::IMAGE,
+            dirs.picture_dir().map(Path::to_path_buf),
+        ),
+        (
+            "Music",
+            icon::MUSIC_NOTES,
+            dirs.audio_dir().map(Path::to_path_buf),
+        ),
+        (
+            "Videos",
+            icon::FILM_STRIP,
+            dirs.video_dir().map(Path::to_path_buf),
+        ),
     ];
+    // Android's own folders in its shared storage, which XDG doesn't name.
+    #[cfg(target_os = "android")]
+    let optional = {
+        let home = dirs.home_dir();
+        [
+            ("Camera", icon::CAMERA, Some(home.join("DCIM"))),
+            (
+                "Downloads",
+                icon::DOWNLOAD_SIMPLE,
+                Some(home.join("Download")),
+            ),
+            ("Documents", icon::FILE_TEXT, Some(home.join("Documents"))),
+            ("Pictures", icon::IMAGE, Some(home.join("Pictures"))),
+            ("Music", icon::MUSIC_NOTES, Some(home.join("Music"))),
+            ("Movies", icon::FILM_STRIP, Some(home.join("Movies"))),
+        ]
+    };
     places.extend(optional.into_iter().filter_map(|(label, icon, path)| {
         path.filter(|p| p.is_dir()).map(|p| Place {
             label: label.to_owned(),
             icon,
-            path: p.to_path_buf(),
+            path: p,
             ejectable: false,
             media: Some(0),
             space: None,
@@ -269,7 +311,44 @@ fn windows_drive_is_usb(letter: char) -> bool {
     }
 }
 
-#[cfg(not(windows))]
+/// Android's storage volumes: the internal shared storage, then SD cards
+/// and USB drives, each mounted under /storage by its id.
+#[cfg(target_os = "android")]
+pub fn drives() -> Vec<Place> {
+    let internal = PathBuf::from("/storage/emulated/0");
+    let mut drives = vec![Place {
+        label: "Internal storage".to_owned(),
+        icon: icon::DEVICE_MOBILE,
+        space: space(&internal),
+        path: internal,
+        ejectable: false,
+        media: Some(0),
+    }];
+    let Ok(read) = std::fs::read_dir("/storage") else {
+        return drives;
+    };
+    let mut found: Vec<_> = read
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+            name != "emulated" && name != "self" && p.is_dir()
+        })
+        .map(|path| Place {
+            label: crate::fs::display_name(&path),
+            icon: icon::HARD_DRIVES,
+            space: space(&path),
+            path,
+            ejectable: false,
+            media: Some(0),
+        })
+        .collect();
+    found.sort_by(|a, b| a.label.cmp(&b.label));
+    drives.extend(found);
+    drives
+}
+
+#[cfg(not(any(windows, target_os = "android")))]
 pub fn drives() -> Vec<Place> {
     let mut drives = vec![Place {
         label: "File System".to_owned(),

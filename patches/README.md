@@ -7,7 +7,9 @@ published crate as-is, so a patch can be dropped once upstream fixes it.
 ## unrar_sys (0.5.8)
 
 `build.rs`: it checks the host OS instead of the target, which breaks
-cross-compiling to Windows.
+cross-compiling to Windows. It also links `pthread`, which Android doesn't
+have as a library of its own (it's in libc), and links no C++ library, which
+Android needs named (`c++_static`).
 
 `cpu_supports.hpp` (ours, force-included on Linux x86): unrar's
 `__builtin_cpu_supports` links GCC's `__cpu_indicator_init` from the static

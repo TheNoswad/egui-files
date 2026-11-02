@@ -1,6 +1,10 @@
 //! The extract job: unpack into a hidden staging folder next to the
 //! destination, then move the results into place, asking about conflicts.
 
+// Android has no trash of its own; see android/trash.
+#[cfg(target_os = "android")]
+use trash_android as trash;
+
 use std::{
     ffi::OsStr,
     fs, io,

@@ -19,6 +19,9 @@ const LIBRARY_NAMES: &[&str] = &["libmpv.so.2", "libmpv.so"];
 const LIBRARY_NAMES: &[&str] = &["libmpv-2.dll", "mpv-2.dll"];
 #[cfg(target_os = "macos")]
 const LIBRARY_NAMES: &[&str] = &["libmpv.2.dylib", "libmpv.dylib"];
+// Only found if bundled into the APK, which it isn't yet.
+#[cfg(target_os = "android")]
+const LIBRARY_NAMES: &[&str] = &["libmpv.so"];
 
 pub const FORMAT_STRING: c_int = 1;
 pub const FORMAT_FLAG: c_int = 3;

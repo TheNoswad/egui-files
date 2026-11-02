@@ -1,6 +1,10 @@
 //! The trash, shown as a tab: lists trashed items and restores or
 //! permanently deletes them (as background jobs).
 
+// Android has no trash of its own; see android/trash.
+#[cfg(target_os = "android")]
+use trash_android as trash;
+
 use std::{
     collections::HashSet,
     ffi::OsString,
@@ -212,6 +216,9 @@ fn stored_path(item: &TrashItem) -> Option<PathBuf> {
 
 /// The folder whose changes mean the trash changed, for the file watcher.
 pub fn watched_dir() -> Option<PathBuf> {
+    #[cfg(target_os = "android")]
+    return Some(trash::watched_dir());
+    #[allow(unreachable_code)]
     if cfg!(windows) {
         return None;
     }

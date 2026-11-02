@@ -429,6 +429,9 @@ pub struct FilesApp {
     pending_drop: Option<tab_windows::Pending>,
     mobile: mobile::Mobile,
     long_press: crate::touch::LongPress,
+    /// Where Android's system bars are, to keep clear of.
+    #[cfg(target_os = "android")]
+    insets: crate::android::Insets,
     ctx: egui::Context,
 }
 
@@ -607,6 +610,8 @@ impl FilesApp {
             pending_drop: None,
             mobile: mobile::Mobile::new(mobile),
             long_press: Default::default(),
+            #[cfg(target_os = "android")]
+            insets: Default::default(),
             ctx: cc.egui_ctx.clone(),
         }
     }
@@ -2758,6 +2763,8 @@ impl FilesApp {
         if self.mobile.enabled {
             self.long_press.hook(ctx, raw_input);
         }
+        #[cfg(target_os = "android")]
+        self.insets.hook(ctx, raw_input);
         if let Some(theme) = self.system_theme.get() {
             raw_input.system_theme = Some(theme);
             // Tab windows get their input from winit without this hook, and

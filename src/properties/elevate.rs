@@ -94,6 +94,8 @@ impl Running {
     }
 }
 
+// Only Linux and Windows can run the helper elevated.
+#[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
 fn parse_report(text: &str) -> io::Result<Vec<Failure>> {
     toml::from_str::<Report>(text)
         .map(|r| r.failures)

@@ -1,12 +1,18 @@
 // Patched for cross-compiling: the upstream script tests `cfg!(windows)`, which
 // is the *host* OS, so a Linux -> Windows build skipped isnt.cpp and powrprof.
 // It also linked pthread dynamically on windows-gnu, making the exe need
-// MinGW's libwinpthread-1.dll; Rust's std already links it statically.
+// MinGW's libwinpthread-1.dll; Rust's std already links it statically. And
+// Android has no separate pthread library, and needs its C++ library named.
 fn main() {
     let windows = std::env::var("CARGO_CFG_TARGET_OS").unwrap() == "windows";
     if windows {
         println!("cargo:rustc-flags=-lpowrprof");
         println!("cargo:rustc-link-lib=shell32");
+    } else if std::env::var("CARGO_CFG_TARGET_OS").unwrap() == "android" {
+        // Android's pthread is part of its libc, and its C++ library is
+        // linked into the app rather than shipped beside it.
+        println!("cargo:rustc-link-lib=c++_static");
+        println!("cargo:rustc-link-lib=c++abi");
     } else {
         println!("cargo:rustc-link-lib=pthread");
     }

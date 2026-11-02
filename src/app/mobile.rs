@@ -219,6 +219,10 @@ impl FilesApp {
             if let Some(opener) = opener {
                 self.focus_tab(opener);
             }
+        } else {
+            // Nowhere left to go back to.
+            #[cfg(target_os = "android")]
+            crate::android::move_to_back();
         }
     }
 

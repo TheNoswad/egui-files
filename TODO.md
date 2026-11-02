@@ -15,14 +15,23 @@
 - [ ] google drive
 - [ ] proton drive
 - [ ] mobile support (the layout runs on the desktop: View → Mobile layout; `src/app/mobile.rs`)
-    - [ ] Build for Android (and iOS?), with a phone's file access
     - [x] tabs like a mobile browser
+    - [x] Build for Android, with a phone's file access ("All files access"): `cargo apk build --release` in `android/` (Pixel 7a, Android 16)
+    - [ ] iOS
     - [x] Touch: drag scrolls, a tap opens, a long press opens the context menu, and a long press then a drag selects (`src/touch.rs`)
     - [ ] Touch in the trash and archive tabs: they scroll by dragging, but a tap still selects and a double tap opens, as on the desktop
     - [ ] Touch drag selection in the icon grid selects a rectangle; a phone would select in reading order between the two items
     - [ ] Moving files by touch: dragging items onto folders is gone in the mobile layout (cut and paste works)
     - [ ] Pinch to zoom: icon size in the grid, text size in the terminal
+    - [ ] Open files in other apps (Android intents with a `content://` URI from a FileProvider); "Open with" too
     - [ ] Trash tab's toolbar overflows at phone width
+    - [ ] Hide the bottom bar while the on-screen keyboard is up
+    - [ ] Terminal good enough to develop on (on hold: researching first). Today it runs Android's own `sh` with toybox, so no git, compilers or package manager. Needs a Linux userland, and since Android 10 apps can't execute files they download into their own storage. Options:
+        - proot + a downloaded distro rootfs (Debian, Alpine) in app storage, exec routed through proot's loader shipped as a native library (how UserLAnd and AnLinux do it). Real `apt`/`apk`; ptrace overhead on syscalls; a few hundred MB and a first-run setup
+        - Termux's packages: fastest, but built for Termux's prefix (`/data/data/com.termux/files/usr`), so they'd need rebuilding and hosting ourselves
+        - Hand off to an installed Termux (`RUN_COMMAND` intent): little work, but needs Termux and integrates shallowly
+    - [ ] Predictive back: opt in (`enableOnBackInvokedCallback`) once the manifest can say so, then target API 36; targets 35 until then
+    - [x] Check on a real touchscreen that egui's own long touch and ours don't both fire
     - [ ] Dialogs, the theme editor and the About window sized for a phone
 
 ## Proton Drive

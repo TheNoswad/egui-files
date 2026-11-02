@@ -2,6 +2,10 @@
 //! threads, with progress, cancellation, questions for the user, and a status
 //! bar UI.
 
+// Android has no trash of its own; see android/trash.
+#[cfg(target_os = "android")]
+use trash_android as trash;
+
 use std::{
     fs,
     io::{self, Read, Write},

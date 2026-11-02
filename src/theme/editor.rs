@@ -1,6 +1,10 @@
 //! The theme editor window: pick, duplicate, edit, import and export themes,
 //! and the appearance settings that apply over every theme.
 
+// Android has no trash of its own; see android/trash.
+#[cfg(target_os = "android")]
+use trash_android as trash;
+
 use std::path::PathBuf;
 
 use egui::{
