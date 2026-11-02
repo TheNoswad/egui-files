@@ -1586,7 +1586,11 @@ impl View {
 fn open_full_button(ui: &mut Ui) -> bool {
     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
         ui.add(Button::new(icon::ARROWS_OUT_SIMPLE).frame(false))
-            .on_hover_text("Open in its own tab or window (Alt+Enter)")
+            .on_hover_text(crate::keymap::hint(
+                ui.ctx(),
+                "Open in its own tab or window",
+                crate::keymap::Command::Properties,
+            ))
             .clicked()
     })
     .inner

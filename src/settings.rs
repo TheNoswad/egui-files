@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     fs::{Sort, SortKey},
+    keymap::{self, Command, Keymap},
     properties::OpenIn,
     sidebar::{Layout, Section, Sidebar},
     tab::Shared,
@@ -23,15 +24,17 @@ pub enum Page {
     Appearance,
     Places,
     Columns,
+    Keyboard,
     Files,
 }
 
 impl Page {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::General,
         Self::Appearance,
         Self::Places,
         Self::Columns,
+        Self::Keyboard,
         Self::Files,
     ];
 
@@ -41,6 +44,7 @@ impl Page {
             Self::Appearance => "Appearance",
             Self::Places => "Places",
             Self::Columns => "Columns",
+            Self::Keyboard => "Keyboard",
             Self::Files => "Files and apps",
         }
     }
@@ -51,6 +55,7 @@ impl Page {
             Self::Appearance => icon::PAINT_BRUSH,
             Self::Places => icon::COMPASS,
             Self::Columns => icon::COLUMNS,
+            Self::Keyboard => icon::KEYBOARD,
             Self::Files => icon::APP_WINDOW,
         }
     }
@@ -129,6 +134,7 @@ pub fn ui(ui: &mut Ui, tab: &mut SettingsTab, app: &mut Access) {
                 Page::Appearance => appearance(ui, app),
                 Page::Places => places(ui, app),
                 Page::Columns => columns(ui),
+                Page::Keyboard => keyboard(ui),
                 Page::Files => files(ui, app),
             }
             ui.add_space(12.0);
@@ -145,7 +151,8 @@ fn group(ui: &mut Ui, title: &str) {
 fn general(ui: &mut Ui, app: &mut Access) {
     let shared = &mut *app.shared;
     group(ui, "Listing");
-    ui.checkbox(&mut shared.show_hidden, "Show hidden files (Ctrl+H)");
+    let label = keymap::hint(ui.ctx(), "Show hidden files", Command::ToggleHidden);
+    ui.checkbox(&mut shared.show_hidden, label);
     ui.checkbox(&mut shared.show_thumbnails, "Show thumbnails");
     ui.checkbox(&mut shared.usage.enabled, "Show folder sizes")
         .on_hover_text(
@@ -287,6 +294,154 @@ fn columns(ui: &mut Ui) {
     }
     group(ui, "Dates");
     crate::dates::checkbox(ui);
+}
+
+/// What the keyboard page is doing, in the context's temp data.
+#[derive(Clone, Default)]
+struct KeyboardState {
+    /// Waiting for a shortcut to add to this command.
+    capturing: Option<Command>,
+    /// What the last change did, and the keymap from before it.
+    notice: Option<(String, Option<Keymap>)>,
+}
+
+fn keyboard(ui: &mut Ui) {
+    let ctx = ui.ctx().clone();
+    let state_id = egui::Id::new("settings-keyboard");
+    let mut state: KeyboardState = ctx.data(|d| d.get_temp(state_id)).unwrap_or_default();
+    let mut keymap = (*keymap::get(&ctx)).clone();
+    let before = keymap.clone();
+    // Capturing ended while the page wasn't shown.
+    if !keymap.is_capturing() {
+        state.capturing = None;
+    }
+
+    if let Some(command) = state.capturing {
+        // The first key pressed with any modifiers; Escape alone cancels.
+        let pressed = ctx.input_mut(|i| {
+            let at = i
+                .events
+                .iter()
+                .position(|e| matches!(e, egui::Event::Key { pressed: true, .. }))?;
+            match i.events.remove(at) {
+                egui::Event::Key { key, modifiers, .. } => Some((key, modifiers)),
+                _ => None,
+            }
+        });
+        match pressed {
+            Some((egui::Key::Escape, m)) if m.is_none() => state.capturing = None,
+            Some((key, modifiers)) => {
+                let shortcut = egui::KeyboardShortcut::new(modifiers, key);
+                let text = ctx.format_shortcut(&shortcut);
+                if let Some(why) = keymap::refusal(shortcut) {
+                    state.notice = Some((format!("{text}: {why}."), None));
+                } else {
+                    let undo = keymap.clone();
+                    state.notice = keymap.bind(command, shortcut).map(|other| {
+                        let text = format!("{text} was taken from “{}”.", other.label());
+                        (text, Some(undo))
+                    });
+                }
+                state.capturing = None;
+            }
+            None => {}
+        }
+    }
+
+    ui.weak("Click + and press the keys to add a shortcut; click one to remove it.");
+    if let Some((text, undo)) = state.notice.clone() {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(text).color(ui.visuals().warn_fg_color));
+            if let Some(undo) = undo
+                && ui.small_button("Undo").clicked()
+            {
+                keymap = undo;
+                state.notice = None;
+            }
+            if ui.small_button(icon::X).on_hover_text("Dismiss").clicked() {
+                state.notice = None;
+            }
+        });
+    }
+
+    for (title, commands) in keymap::GROUPS {
+        group(ui, title);
+        egui::Grid::new(("settings-keys", title))
+            .num_columns(2)
+            .spacing([16.0, 4.0])
+            .min_col_width(150.0)
+            .show(ui, |ui| {
+                for &command in commands {
+                    let label = ui.label(command.label());
+                    if let Some(note) = command.note() {
+                        label.on_hover_text(note);
+                    }
+                    ui.horizontal_wrapped(|ui| {
+                        for shortcut in keymap.shortcuts(command) {
+                            let text = format!("{}  {}", ctx.format_shortcut(&shortcut), icon::X);
+                            if ui.small_button(text).on_hover_text("Remove").clicked() {
+                                keymap.unbind(command, shortcut);
+                                state.notice = None;
+                            }
+                        }
+                        let waiting = state.capturing == Some(command);
+                        let add = if waiting {
+                            ui.add(Button::selectable(true, "Press keys… (Esc cancels)"))
+                        } else {
+                            ui.small_button(icon::PLUS).on_hover_text("Add a shortcut")
+                        };
+                        if add.clicked() {
+                            state.capturing = (!waiting).then_some(command);
+                            state.notice = None;
+                            // Or Enter and Space would press it again.
+                            add.surrender_focus();
+                        }
+                        if !keymap.is_default(command)
+                            && ui
+                                .small_button(icon::ARROW_COUNTER_CLOCKWISE)
+                                .on_hover_text("Back to the default")
+                                .clicked()
+                        {
+                            keymap.reset(command);
+                            state.notice = None;
+                        }
+                    });
+                    ui.end_row();
+                }
+            });
+    }
+
+    group(ui, "Fixed");
+    egui::Grid::new("settings-keys-fixed")
+        .num_columns(2)
+        .spacing([16.0, 4.0])
+        .min_col_width(150.0)
+        .show(ui, |ui| {
+            for (label, modifiers, key) in keymap::FIXED {
+                ui.weak(label);
+                let shortcut = egui::KeyboardShortcut::new(modifiers, key);
+                ui.weak(ctx.format_shortcut(&shortcut));
+                ui.end_row();
+            }
+        });
+    ui.add_space(8.0);
+    if ui.button("Reset all shortcuts").clicked() {
+        state.notice = Some((
+            "All shortcuts are back to their defaults.".to_owned(),
+            Some(keymap.clone()),
+        ));
+        keymap.reset_all();
+    }
+
+    keymap.set_capturing(state.capturing.is_some());
+    if keymap != before || keymap.is_capturing() != before.is_capturing() {
+        keymap::set(&ctx, keymap);
+    }
+    if state.capturing.is_some() {
+        keymap::keep_capturing(&ctx);
+        ctx.request_repaint();
+    }
+    ctx.data_mut(|d| d.insert_temp(state_id, state));
 }
 
 fn files(ui: &mut Ui, app: &mut Access) {

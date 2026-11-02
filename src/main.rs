@@ -15,6 +15,7 @@ mod file_clipboard;
 mod fs;
 mod images;
 mod jobs;
+mod keymap;
 mod list_columns;
 mod open_with;
 mod places;

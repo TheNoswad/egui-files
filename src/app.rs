@@ -5,9 +5,7 @@ use std::{
     path::PathBuf,
 };
 
-use egui::{
-    Button, CentralPanel, Id, Key, Modifiers, Panel, Pos2, Rect, RichText, Ui, Vec2, WidgetText,
-};
+use egui::{Button, CentralPanel, Id, Key, Panel, Pos2, Rect, RichText, Ui, Vec2, WidgetText};
 use egui_dock::{
     DockArea, DockState, Node, NodeIndex, NodePath, Split, Style, TabInsert, TabViewer, Tree,
     tab_viewer::OnCloseResponse,
@@ -107,6 +105,9 @@ struct Persisted {
     /// Tabs in windows of their own.
     #[serde(default)]
     windows: Vec<TabWindow>,
+    /// Shortcuts changed from the defaults.
+    #[serde(default)]
+    keymap: crate::keymap::Keymap,
 }
 
 fn default_true() -> bool {
@@ -145,6 +146,7 @@ struct PersistedRef<'a> {
     default_sort: Sort,
     default_view: ViewMode,
     windows: &'a [TabWindow],
+    keymap: &'a crate::keymap::Keymap,
 }
 
 /// The panes a fresh layout starts with.
@@ -352,24 +354,23 @@ fn tab_bar_ui(
 
 /// The app's shortcuts for tabs, pressed in one of its windows.
 struct TabKeys {
-    /// Ctrl+T
     new_tab: bool,
-    /// Ctrl+W
     close_tab: bool,
-    /// Ctrl+Shift+U: disk usage of the focused folder.
+    /// Disk usage of the focused folder.
     usage: bool,
-    /// Ctrl+,
     settings: bool,
 }
 
 impl TabKeys {
     /// Takes them from the input of the viewport `ctx` is running.
     fn read(ctx: &egui::Context) -> Self {
+        use crate::keymap::Command as C;
+        let keymap = crate::keymap::get(ctx);
         ctx.input_mut(|i| Self {
-            usage: i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::U),
-            new_tab: i.consume_key(Modifiers::COMMAND, Key::T),
-            close_tab: i.consume_key(Modifiers::COMMAND, Key::W),
-            settings: i.consume_key(Modifiers::COMMAND, Key::Comma),
+            usage: keymap.pressed(i, C::DiskUsage),
+            new_tab: keymap.pressed(i, C::NewTab),
+            close_tab: keymap.pressed(i, C::CloseTab),
+            settings: keymap.pressed(i, C::Settings),
         })
     }
 }
@@ -528,6 +529,7 @@ impl FilesApp {
                 default_sort: Sort::default(),
                 default_view: ViewMode::default(),
                 windows: Vec::new(),
+                keymap: Default::default(),
             });
         let Persisted {
             dock,
@@ -554,7 +556,9 @@ impl FilesApp {
             default_sort,
             default_view,
             windows,
+            keymap,
         } = persisted;
+        crate::keymap::set(&cc.egui_ctx, keymap);
         editor::highlight::preload();
         let pending_panes = if panes_docked {
             Vec::new()
@@ -1455,10 +1459,7 @@ impl FilesApp {
 
     /// The app's own shortcuts, pressed in the main window.
     fn global_shortcuts(&mut self, ctx: &egui::Context) {
-        // Shift+F4 edits the selection.
-        if !ctx.input(|i| i.modifiers.shift)
-            && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F4))
-        {
+        if crate::keymap::pressed(ctx, crate::keymap::Command::ToggleTerminal) {
             self.show_or_toggle_pane(ctx, Pane::Terminal);
         }
         // The shell gets everything else typed into it (Ctrl+W deletes a word).
@@ -1487,17 +1488,20 @@ impl FilesApp {
     }
 
     fn menu_bar(&mut self, ui: &mut Ui) {
+        use crate::keymap::Command as C;
+        let ctx = ui.ctx().clone();
+        let keys = |command| crate::keymap::text(&ctx, command);
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("File", |ui| {
                 if ui
-                    .add(Button::new("New tab").shortcut_text("Ctrl+T"))
+                    .add(Button::new("New tab").shortcut_text(keys(C::NewTab)))
                     .clicked()
                 {
                     let path = self.focused_path();
                     self.open_tab(None, path);
                 }
                 if ui
-                    .add(Button::new("Close tab").shortcut_text("Ctrl+W"))
+                    .add(Button::new("Close tab").shortcut_text(keys(C::CloseTab)))
                     .clicked()
                 {
                     self.close_focused_tab(None);
@@ -1511,7 +1515,7 @@ impl FilesApp {
                 if ui
                     .add(
                         Button::new(format!("{} Disk usage", icon::CHART_PIE_SLICE))
-                            .shortcut_text("Ctrl+Shift+U"),
+                            .shortcut_text(keys(C::DiskUsage)),
                     )
                     .on_hover_text("Where the space in this folder went")
                     .clicked()
@@ -1522,7 +1526,7 @@ impl FilesApp {
                 if ui
                     .add(
                         Button::new(format!("{} Properties", icon::INFO))
-                            .shortcut_text("Alt+Enter"),
+                            .shortcut_text(keys(C::Properties)),
                     )
                     .on_hover_text("Of the selected items, or of the folder")
                     .clicked()
@@ -1532,7 +1536,10 @@ impl FilesApp {
                 }
                 ui.separator();
                 if ui
-                    .add(Button::new(format!("{} Settings", icon::GEAR)).shortcut_text("Ctrl+,"))
+                    .add(
+                        Button::new(format!("{} Settings", icon::GEAR))
+                            .shortcut_text(keys(C::Settings)),
+                    )
                     .clicked()
                 {
                     self.open_settings(None);
@@ -1543,7 +1550,10 @@ impl FilesApp {
                 }
             });
             ui.menu_button("View", |ui| {
-                ui.checkbox(&mut self.shared.show_hidden, "Show hidden files (Ctrl+H)");
+                ui.checkbox(
+                    &mut self.shared.show_hidden,
+                    crate::keymap::hint(&ctx, "Show hidden files", C::ToggleHidden),
+                );
                 ui.checkbox(&mut self.shared.show_thumbnails, "Show thumbnails");
                 ui.add(
                     egui::Slider::new(&mut self.shared.icon_size, 32.0..=192.0).text("Icon size"),
@@ -1570,7 +1580,7 @@ impl FilesApp {
                 if ui
                     .add(
                         Button::new(format!("{} More settings…", icon::GEAR))
-                            .shortcut_text("Ctrl+,"),
+                            .shortcut_text(keys(C::Settings)),
                     )
                     .clicked()
                 {
@@ -1581,9 +1591,9 @@ impl FilesApp {
                 ui.label("Panes");
                 for pane in Pane::ALL {
                     let label = match pane {
-                        Pane::Preview => "Preview (F3)",
-                        Pane::Terminal => "Terminal (F4)",
-                        _ => pane.label(),
+                        Pane::Preview => crate::keymap::hint(&ctx, "Preview", C::TogglePreview),
+                        Pane::Terminal => crate::keymap::hint(&ctx, "Terminal", C::ToggleTerminal),
+                        _ => pane.label().to_owned(),
                     };
                     let mut open = self.has_pane(pane);
                     if ui
@@ -2416,6 +2426,7 @@ impl eframe::App for FilesApp {
         }
         self.quit_guard(&ctx);
         self.update_active_browser();
+        crate::keymap::end_stale_capture(&ctx);
         self.global_shortcuts(&ctx);
         // Keys go to the focused tab; with a pane focused, to the browser tab
         // it follows; and with a shell focused, to nobody else. In a tab
@@ -2658,6 +2669,7 @@ impl eframe::App for FilesApp {
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         self.terminal.remember_dirs();
+        let keymap = crate::keymap::get(&self.ctx);
         let state = PersistedRef {
             dock: &self.dock,
             show_hidden: self.shared.show_hidden,
@@ -2681,6 +2693,7 @@ impl eframe::App for FilesApp {
             default_sort: self.new_tabs.sort,
             default_view: self.new_tabs.view,
             windows: &self.windows,
+            keymap: &keymap,
         };
         eframe::set_value(storage, eframe::APP_KEY, &state);
     }
@@ -2688,6 +2701,8 @@ impl eframe::App for FilesApp {
 
 #[cfg(test)]
 mod tests {
+    use egui::Modifiers;
+
     use super::*;
 
     #[test]

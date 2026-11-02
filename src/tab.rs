@@ -585,19 +585,40 @@ impl BrowserTab {
         {
             return;
         }
-        let cmd = Modifiers::COMMAND;
-        let cmd_shift = Modifiers::COMMAND | Modifiers::SHIFT;
+        use crate::keymap::Command as C;
+        let keymap = crate::keymap::get(ctx);
+        // The settings are waiting for a shortcut to bind.
+        if keymap.is_capturing() {
+            return;
+        }
         ctx.input_mut(|i| {
+            // The user's shortcuts first: the fixed keys below match
+            // loosely, so Alt+Down would otherwise move the cursor.
+            let bound = [
+                (C::Back, Action::Back),
+                (C::Forward, Action::Forward),
+                (C::Up, Action::Up),
+                (C::Properties, Action::PropertiesOfSelection),
+                (C::Edit, Action::EditSelected),
+                (C::Rename, Action::StartRename),
+                (C::TogglePreview, Action::TogglePreview),
+                (C::Refresh, Action::Refresh),
+                (C::Trash, Action::Trash),
+                (C::NewFile, Action::NewFile(None)),
+                (C::NewFolder, Action::NewFolder),
+                (C::EditPath, Action::EditPath),
+                (C::Filter, Action::FocusFilter),
+                (C::SelectAll, Action::SelectAll),
+                (C::ToggleHidden, Action::ToggleHidden),
+                (C::ExtractTo, Action::ExtractTo),
+                (C::Extract, Action::Extract(ExtractMode::Smart)),
+            ];
+            for (command, action) in bound {
+                if keymap.pressed(i, command) {
+                    actions.push(action);
+                }
+            }
             let mut key = |mods, key| i.consume_key(mods, key);
-            if key(Modifiers::ALT, Key::ArrowLeft) {
-                actions.push(Action::Back);
-            }
-            if key(Modifiers::ALT, Key::ArrowRight) {
-                actions.push(Action::Forward);
-            }
-            if key(Modifiers::ALT, Key::ArrowUp) || key(Modifiers::NONE, Key::Backspace) {
-                actions.push(Action::Up);
-            }
             if self.view == ViewMode::Columns {
                 if key(Modifiers::NONE, Key::ArrowLeft) {
                     actions.push(Action::Up);
@@ -642,50 +663,8 @@ impl BrowserTab {
                     extend: false,
                 });
             }
-            if key(Modifiers::ALT, Key::Enter) {
-                actions.push(Action::PropertiesOfSelection);
-            }
             if key(Modifiers::NONE, Key::Enter) {
                 actions.push(Action::ActivateCursor);
-            }
-            if key(Modifiers::SHIFT, Key::F4) {
-                actions.push(Action::EditSelected);
-            }
-            if key(Modifiers::NONE, Key::F2) {
-                actions.push(Action::StartRename);
-            }
-            if key(Modifiers::NONE, Key::F3) {
-                actions.push(Action::TogglePreview);
-            }
-            if key(Modifiers::NONE, Key::F5) {
-                actions.push(Action::Refresh);
-            }
-            if key(Modifiers::NONE, Key::Delete) {
-                actions.push(Action::Trash);
-            }
-            if key(Modifiers::COMMAND | Modifiers::ALT, Key::N) {
-                actions.push(Action::NewFile(None));
-            }
-            if key(cmd_shift, Key::N) {
-                actions.push(Action::NewFolder);
-            }
-            if key(cmd, Key::L) {
-                actions.push(Action::EditPath);
-            }
-            if key(cmd, Key::F) {
-                actions.push(Action::FocusFilter);
-            }
-            if key(cmd, Key::A) {
-                actions.push(Action::SelectAll);
-            }
-            if key(cmd, Key::H) {
-                actions.push(Action::ToggleHidden);
-            }
-            if key(cmd_shift, Key::E) {
-                actions.push(Action::ExtractTo);
-            }
-            if key(cmd, Key::E) {
-                actions.push(Action::Extract(ExtractMode::Smart));
             }
             // egui-winit turns Ctrl+C/X/V into dedicated events, also with Shift.
             let shift = i.modifiers.shift;
@@ -773,18 +752,21 @@ impl BrowserTab {
     /// Returns the width of a button, which the toolbar's layout goes by.
     fn nav_buttons(&self, ui: &mut Ui, actions: &mut Vec<Action>) -> f32 {
         let mut width = 0.0_f32;
-        let mut nav = |ui: &mut Ui, enabled, glyph, tip| {
+        let mut nav = |ui: &mut Ui, enabled, glyph, tip: String| {
             let response = ui
                 .add_enabled(enabled, Button::new(RichText::new(glyph).size(16.0)))
                 .on_hover_text(tip);
             width = width.max(response.rect.width());
             response.clicked()
         };
+        let ctx = ui.ctx().clone();
+        let hint = |label, command| crate::keymap::hint(&ctx, label, command);
+        use crate::keymap::Command as C;
         if nav(
             ui,
             !self.back.is_empty(),
             icon::ARROW_LEFT,
-            "Back (Alt+Left)",
+            hint("Back", C::Back),
         ) {
             actions.push(Action::Back);
         }
@@ -792,7 +774,7 @@ impl BrowserTab {
             ui,
             !self.forward.is_empty(),
             icon::ARROW_RIGHT,
-            "Forward (Alt+Right)",
+            hint("Forward", C::Forward),
         ) {
             actions.push(Action::Forward);
         }
@@ -800,11 +782,11 @@ impl BrowserTab {
             ui,
             self.path.parent().is_some(),
             icon::ARROW_UP,
-            "Up (Backspace)",
+            hint("Up", C::Up),
         ) {
             actions.push(Action::Up);
         }
-        if nav(ui, true, icon::ARROW_CLOCKWISE, "Refresh (F5)") {
+        if nav(ui, true, icon::ARROW_CLOCKWISE, hint("Refresh", C::Refresh)) {
             actions.push(Action::Refresh);
         }
         width
@@ -820,7 +802,15 @@ impl BrowserTab {
         actions: &mut Vec<Action>,
     ) {
         let preview = Button::selectable(shared.preview_shown, RichText::new(icon::EYE).size(16.0));
-        if ui.add(preview).on_hover_text("Preview pane (F3)").clicked() {
+        if ui
+            .add(preview)
+            .on_hover_text(crate::keymap::hint(
+                ui.ctx(),
+                "Preview pane",
+                crate::keymap::Command::TogglePreview,
+            ))
+            .clicked()
+        {
             actions.push(Action::TogglePreview);
         }
         ui.separator();
@@ -857,7 +847,15 @@ impl BrowserTab {
             let active = self.filter_open || !self.filter.is_empty();
             let button =
                 Button::selectable(active, RichText::new(icon::MAGNIFYING_GLASS).size(16.0));
-            if ui.add(button).on_hover_text("Filter (Ctrl+F)").clicked() {
+            if ui
+                .add(button)
+                .on_hover_text(crate::keymap::hint(
+                    ui.ctx(),
+                    "Filter",
+                    crate::keymap::Command::Filter,
+                ))
+                .clicked()
+            {
                 if self.filter_open {
                     self.filter_open = false;
                 } else {
@@ -872,7 +870,11 @@ impl BrowserTab {
         let response = ui.add(
             TextEdit::singleline(&mut self.filter)
                 .id(id)
-                .hint_text(format!("{} Filter (Ctrl+F)", icon::MAGNIFYING_GLASS))
+                .hint_text(format!(
+                    "{} {}",
+                    icon::MAGNIFYING_GLASS,
+                    crate::keymap::hint(ui.ctx(), "Filter", crate::keymap::Command::Filter)
+                ))
                 .desired_width(width),
         );
         if std::mem::take(&mut self.focus_filter) {
@@ -889,6 +891,9 @@ impl BrowserTab {
 
     /// Context menu for empty space in the listing; acts on the folder itself.
     fn background_menu(&self, ui: &mut Ui, shared: &Shared, actions: &mut Vec<Action>) {
+        use crate::keymap::Command as C;
+        let ctx = ui.ctx().clone();
+        let keys = |command| crate::keymap::text(&ctx, command);
         let mut item =
             |ui: &mut Ui, enabled: bool, label: String, shortcut: &str, action: Action| {
                 let button = Button::new(label).shortcut_text(shortcut);
@@ -918,14 +923,14 @@ impl BrowserTab {
             ui,
             true,
             format!("{} New folder", icon::FOLDER_PLUS),
-            "Ctrl+Shift+N",
+            &keys(C::NewFolder),
             Action::NewFolder,
         );
         item(
             ui,
             true,
             format!("{} New file", icon::FILE_PLUS),
-            "Ctrl+Alt+N",
+            &keys(C::NewFile),
             Action::NewFile(None),
         );
         let templates = places::templates();
@@ -946,14 +951,14 @@ impl BrowserTab {
             ui,
             true,
             format!("{} Select all", icon::CHECK_SQUARE),
-            "Ctrl+A",
+            &keys(C::SelectAll),
             Action::SelectAll,
         );
         item(
             ui,
             true,
             format!("{} Refresh", icon::ARROW_CLOCKWISE),
-            "F5",
+            &keys(C::Refresh),
             Action::Refresh,
         );
         item(
@@ -974,7 +979,7 @@ impl BrowserTab {
             ui,
             true,
             format!("{} Disk usage", icon::CHART_PIE_SLICE),
-            "Ctrl+Shift+U",
+            &keys(C::DiskUsage),
             Action::DiskUsage(self.path.clone()),
         );
         item(
@@ -988,7 +993,7 @@ impl BrowserTab {
             ui,
             true,
             format!("{} Properties", icon::INFO),
-            "Alt+Enter",
+            &keys(C::Properties),
             Action::Properties(vec![self.path.clone()]),
         );
         ui.separator();
@@ -1097,7 +1102,11 @@ impl BrowserTab {
 
         if ui
             .button(icon::PENCIL_SIMPLE)
-            .on_hover_text("Edit path (Ctrl+L)")
+            .on_hover_text(crate::keymap::hint(
+                ui.ctx(),
+                "Edit path",
+                crate::keymap::Command::EditPath,
+            ))
             .clicked()
         {
             actions.push(Action::EditPath);

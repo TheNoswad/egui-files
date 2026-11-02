@@ -477,18 +477,20 @@ impl UsageTab {
         if ctx.memory(|m| m.focused().is_some()) {
             return;
         }
+        let keymap = crate::keymap::get(ctx);
+        if keymap.is_capturing() {
+            return;
+        }
         ctx.input_mut(|i| {
-            if i.consume_key(Modifiers::NONE, Key::Backspace)
-                || i.consume_key(Modifiers::ALT, Key::ArrowUp)
-            {
+            if keymap.pressed(i, crate::keymap::Command::Up) {
                 acts.push(Act::Up);
             }
             if let Some(id) = self.selected {
+                if keymap.pressed(i, crate::keymap::Command::Trash) {
+                    acts.push(Act::Trash(id));
+                }
                 if i.consume_key(Modifiers::NONE, Key::Enter) {
                     acts.push(Act::Activate(id));
-                }
-                if i.consume_key(Modifiers::NONE, Key::Delete) {
-                    acts.push(Act::Trash(id));
                 }
             }
         });

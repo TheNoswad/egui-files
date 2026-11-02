@@ -131,6 +131,9 @@ fn entry_menu(
     menu: MenuContext,
     actions: &mut Vec<Action>,
 ) {
+    use crate::keymap::Command as C;
+    let ctx = ui.ctx().clone();
+    let keys = |command| crate::keymap::text(&ctx, command);
     let mut item = |ui: &mut Ui, label: String, shortcut: &str, action: Action| {
         if ui
             .add(egui::Button::new(label).shortcut_text(shortcut))
@@ -151,7 +154,7 @@ fn entry_menu(
         item(
             ui,
             format!("{} Edit", icon::NOTE_PENCIL),
-            "Shift+F4",
+            &keys(C::Edit),
             if tab.selection.contains(&entry.path) {
                 Action::EditSelected
             } else {
@@ -207,7 +210,7 @@ fn entry_menu(
         item(
             ui,
             format!("{} Extract here", icon::ARCHIVE),
-            "Ctrl+E",
+            &keys(C::Extract),
             Action::Extract(archive::ExtractMode::Smart),
         );
         item(
@@ -223,7 +226,7 @@ fn entry_menu(
         item(
             ui,
             format!("{} Extract to…", icon::FOLDER_OPEN),
-            "Ctrl+Shift+E",
+            &keys(C::ExtractTo),
             Action::ExtractTo,
         );
     }
@@ -237,20 +240,20 @@ fn entry_menu(
     item(
         ui,
         format!("{} Rename", icon::PENCIL_SIMPLE),
-        "",
+        &keys(C::Rename),
         Action::StartRename,
     );
     item(
         ui,
         format!("{} Move to trash", icon::TRASH),
-        "",
+        &keys(C::Trash),
         Action::Trash,
     );
     ui.separator();
     item(
         ui,
         format!("{} Properties", icon::INFO),
-        "Alt+Enter",
+        &keys(C::Properties),
         Action::Properties(if tab.selection.contains(&entry.path) {
             tab.selected_paths()
         } else {

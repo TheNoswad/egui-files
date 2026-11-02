@@ -275,7 +275,11 @@ pub fn buttons(ui: &mut Ui, entry: &Entry, editable: bool, actions: &mut Vec<Act
         if editable
             && ui
                 .button(format!("{} Edit", icon::NOTE_PENCIL))
-                .on_hover_text("Edit in a tab (Shift+F4)")
+                .on_hover_text(crate::keymap::hint(
+                    ui.ctx(),
+                    "Edit in a tab",
+                    crate::keymap::Command::Edit,
+                ))
                 .clicked()
         {
             actions.push(Action::Edit(entry.path.clone()));

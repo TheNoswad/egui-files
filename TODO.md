@@ -2,7 +2,6 @@
 
 ## General
 
-- [ ] Settings screen / config: columns, keybindings, sidebar sections, default view
 - [ ] Video backend for Windows/macOS (WGL / ANGLE); Linux-only for now
 - [ ] Zero-copy dmabuf → wgpu import for video, if readback ever matters
 - [ ] Drag-out on X11 (Wayland and Windows done)

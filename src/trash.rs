@@ -13,14 +13,15 @@ use std::{
 };
 
 use egui::{
-    Align, Button, CentralPanel, Context, Id, Key, Layout, Modal, Modifiers, Panel, RichText,
-    Sense, TextEdit, TextStyle, Ui,
+    Align, Button, CentralPanel, Context, Id, Layout, Modal, Modifiers, Panel, RichText, Sense,
+    TextEdit, TextStyle, Ui,
 };
 use egui_extras::TableBuilder;
 use egui_phosphor::regular as icon;
 use serde::{Deserialize, Serialize};
 use trash::{TrashItem, TrashItemSize, os_limited};
 
+use crate::keymap::Command as C;
 use crate::{
     dnd::{self, DropTarget},
     fs,
@@ -360,6 +361,8 @@ impl TrashTab {
                 }
                 let clipboard_len = shared.clipboard.as_ref().map(|c| c.paths.len());
                 background.context_menu(|ui| {
+                    let ctx = ui.ctx().clone();
+                    let keys = |command| crate::keymap::text(&ctx, command);
                     let has_items = !self.items().is_empty();
                     let mut item =
                         |ui: &mut Ui, enabled: bool, label: String, shortcut: &str, action| {
@@ -387,14 +390,14 @@ impl TrashTab {
                         ui,
                         has_items,
                         format!("{} Select all", icon::CHECK_SQUARE),
-                        "Ctrl+A",
+                        &keys(C::SelectAll),
                         Action::SelectAll,
                     );
                     item(
                         ui,
                         true,
                         format!("{} Refresh", icon::ARROW_CLOCKWISE),
-                        "F5",
+                        &keys(C::Refresh),
                         Action::Refresh,
                     );
                     ui.separator();
@@ -421,14 +424,18 @@ impl TrashTab {
         if ctx.text_edit_focused() || self.confirm_purge.is_some() {
             return;
         }
+        let keymap = crate::keymap::get(ctx);
+        if keymap.is_capturing() {
+            return;
+        }
         ctx.input_mut(|i| {
-            if i.consume_key(Modifiers::NONE, Key::Delete) {
+            if keymap.pressed(i, C::Trash) {
                 actions.push(Action::AskPurge);
             }
-            if i.consume_key(Modifiers::COMMAND, Key::A) {
+            if keymap.pressed(i, C::SelectAll) {
                 actions.push(Action::SelectAll);
             }
-            if i.consume_key(Modifiers::NONE, Key::F5) {
+            if keymap.pressed(i, C::Refresh) {
                 actions.push(Action::Refresh);
             }
             if i.events.iter().any(|e| matches!(e, egui::Event::Paste(_))) {
@@ -442,7 +449,7 @@ impl TrashTab {
             let has_selection = !self.selection.is_empty();
             if ui
                 .button(RichText::new(icon::ARROW_CLOCKWISE).size(16.0))
-                .on_hover_text("Refresh (F5)")
+                .on_hover_text(crate::keymap::hint(ui.ctx(), "Refresh", C::Refresh))
                 .clicked()
             {
                 actions.push(Action::Refresh);
@@ -463,7 +470,7 @@ impl TrashTab {
                     has_selection,
                     Button::new(format!("{} Delete permanently", icon::X)),
                 )
-                .on_hover_text("Delete")
+                .on_hover_text(crate::keymap::hint(ui.ctx(), "Delete", C::Trash))
                 .clicked()
             {
                 actions.push(Action::AskPurge);
@@ -794,6 +801,8 @@ fn size_key(item: &Item) -> (bool, u64) {
 #[cfg(test)]
 mod tests {
     use std::time::Instant;
+
+    use egui::Key;
 
     use super::*;
     use crate::{images::ImageCache, jobs::Jobs, preview::TextCache};

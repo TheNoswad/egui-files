@@ -408,21 +408,25 @@ impl ArchiveTab {
         if ctx.text_edit_focused() || self.dialog.is_some() {
             return;
         }
-        let cmd = Modifiers::COMMAND;
+        use crate::keymap::Command as C;
+        let keymap = crate::keymap::get(ctx);
+        if keymap.is_capturing() {
+            return;
+        }
         ctx.input_mut(|i| {
-            let mut key = |mods, key| i.consume_key(mods, key);
-            if key(cmd | Modifiers::SHIFT, Key::E) {
+            if keymap.pressed(i, C::ExtractTo) {
                 actions.push(Action::ExtractTo { selected: false });
             }
-            if key(cmd, Key::E) {
+            if keymap.pressed(i, C::Extract) {
                 actions.push(Action::ExtractHere { selected: false });
             }
-            if key(cmd, Key::A) {
+            if keymap.pressed(i, C::SelectAll) {
                 actions.push(Action::SelectAll);
             }
-            if key(Modifiers::NONE, Key::F5) {
+            if keymap.pressed(i, C::Refresh) {
                 actions.push(Action::Reload);
             }
+            let mut key = |mods, key| i.consume_key(mods, key);
             if key(Modifiers::NONE, Key::ArrowDown) {
                 actions.push(Action::MoveCursor(1));
             }
@@ -455,7 +459,11 @@ impl ArchiveTab {
                     ready,
                     Button::new(format!("{} Extract here", icon::ARCHIVE)),
                 )
-                .on_hover_text("Extract everything next to the archive (Ctrl+E)")
+                .on_hover_text(crate::keymap::hint(
+                    ui.ctx(),
+                    "Extract everything next to the archive",
+                    crate::keymap::Command::Extract,
+                ))
                 .clicked()
             {
                 actions.push(Action::ExtractHere { selected: false });
@@ -465,7 +473,11 @@ impl ArchiveTab {
                     ready,
                     Button::new(format!("{} Extract to…", icon::FOLDER_OPEN)),
                 )
-                .on_hover_text("Choose where to extract everything (Ctrl+Shift+E)")
+                .on_hover_text(crate::keymap::hint(
+                    ui.ctx(),
+                    "Choose where to extract everything",
+                    crate::keymap::Command::ExtractTo,
+                ))
                 .clicked()
             {
                 actions.push(Action::ExtractTo { selected: false });
