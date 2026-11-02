@@ -21,7 +21,7 @@ use crate::{
     dnd::{self, DropTarget},
     dock_tab::{DockTab, Pane, PaneTab},
     editor::{self, EditorTab},
-    fs::Entry,
+    fs::{Entry, Sort},
     images::ImageCache,
     jobs::{Jobs, Outcome},
     open_with::{self, OpenWith},
@@ -92,6 +92,9 @@ struct Persisted {
     pinned: HashSet<u64>,
     #[serde(default = "default_true")]
     folder_sizes: bool,
+    /// How new browser tabs sort.
+    #[serde(default)]
+    default_sort: Sort,
 }
 
 fn default_true() -> bool {
@@ -126,6 +129,7 @@ struct PersistedRef<'a> {
     properties: &'a properties::Prefs,
     pinned: &'a HashSet<u64>,
     folder_sizes: bool,
+    default_sort: Sort,
 }
 
 /// The panes a fresh layout starts with.
@@ -390,6 +394,8 @@ pub struct FilesApp {
     /// Ids of the pinned tabs: they can't be closed and stay at the front of
     /// their tab bar.
     pinned: HashSet<u64>,
+    /// How new browser tabs sort.
+    default_sort: Sort,
     /// The main surface's node kinds and the dock's size last frame, to
     /// notice them changing.
     dock_shape: (Vec<u8>, Vec2),
@@ -433,6 +439,7 @@ impl FilesApp {
                 properties: properties::Prefs::default(),
                 pinned: HashSet::new(),
                 folder_sizes: true,
+                default_sort: Sort::default(),
             });
         let Persisted {
             dock,
@@ -455,6 +462,7 @@ impl FilesApp {
             properties,
             pinned,
             folder_sizes,
+            default_sort,
         } = persisted;
         editor::highlight::preload();
         let pending_panes = if panes_docked {
@@ -529,6 +537,7 @@ impl FilesApp {
             dock_size: Vec2::ZERO,
             add_menu: None,
             pinned,
+            default_sort,
             dock_shape: (Vec::new(), Vec2::ZERO),
             about: About::new(cc),
             system_theme: SystemTheme::watch(&cc.egui_ctx),
@@ -542,7 +551,9 @@ impl FilesApp {
     }
 
     fn make_tab(&mut self, path: PathBuf) -> DockTab {
-        DockTab::Browser(BrowserTab::new(self.next_id(), path))
+        let mut tab = BrowserTab::new(self.next_id(), path);
+        tab.sort = self.default_sort;
+        DockTab::Browser(tab)
     }
 
     /// Keeps `active_browser` pointing at an open browser tab.
@@ -1953,6 +1964,7 @@ impl eframe::App for FilesApp {
             match action {
                 AppAction::NewTab(path) => self.open_tab(path),
                 AppAction::FocusTab(id) => self.focus_tab(id),
+                AppAction::SetDefaultSort(sort) => self.default_sort = sort,
                 AppAction::TogglePreview => self.show_or_toggle_pane(&ctx, Pane::Preview),
                 AppAction::OpenArchive(path) => self.open_archive(path),
                 AppAction::OpenWith(request, Some(target)) => {
@@ -2084,6 +2096,7 @@ impl eframe::App for FilesApp {
             properties: &self.shared.properties.prefs,
             pinned: &self.pinned,
             folder_sizes: self.shared.usage.enabled,
+            default_sort: self.default_sort,
         };
         eframe::set_value(storage, eframe::APP_KEY, &state);
     }

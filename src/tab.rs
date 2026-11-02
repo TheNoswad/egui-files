@@ -59,6 +59,8 @@ pub enum AppAction {
     NewTab(PathBuf),
     /// Bring the tab with this id to the front.
     FocusTab(u64),
+    /// Sort new browser tabs this way.
+    SetDefaultSort(Sort),
     TogglePreview,
     /// Show an archive's contents in a tab.
     OpenArchive(PathBuf),
@@ -120,6 +122,8 @@ pub enum Action {
     Refresh,
     SortBy(SortKey),
     SetSort(Sort),
+    /// Make this tab's sort the one new tabs start with.
+    SetDefaultSort,
     SetView(ViewMode),
     EditPath,
     FocusFilter,
@@ -1031,6 +1035,15 @@ impl BrowserTab {
                 ..sort
             }));
         }
+        ui.separator();
+        if ui
+            .button("Use for new tabs")
+            .on_hover_text("New tabs start out sorted this way")
+            .clicked()
+        {
+            actions.push(Action::SetDefaultSort);
+            ui.close();
+        }
     }
 
     fn view_menu(&self, ui: &mut Ui, actions: &mut Vec<Action>) {
@@ -1391,6 +1404,9 @@ impl BrowserTab {
                 self.anchor = None;
                 self.cursor = None;
             }
+            Action::SetDefaultSort => shared
+                .app_actions
+                .push(AppAction::SetDefaultSort(self.sort)),
             Action::SetView(view) => self.view = view,
             Action::EditPath => {
                 self.path_edit = Some(self.path.display().to_string());
