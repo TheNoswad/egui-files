@@ -82,10 +82,6 @@ const DATE_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
 /// Where the view is shown, and what that adds.
 pub enum Host<'a> {
     Tab,
-    /// With OK/Close buttons; `closed` is set when one closes it.
-    Window {
-        closed: &'a mut bool,
-    },
     /// The preview pane: the bulkier sections start closed, and the
     /// preview's own buttons go under the name.
     Preview {
@@ -336,17 +332,13 @@ impl View {
                 buttons(ui);
                 ui.add_space(6.0);
                 self.body(ui, shared);
-                self.footer(ui, &ctx, immediate, None);
+                self.footer(ui, &ctx, immediate);
             }
-            Host::Tab | Host::Window { .. } => {
-                let closed = match host {
-                    Host::Window { closed } => Some(closed),
-                    _ => None,
-                };
+            Host::Tab => {
                 ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
-                    if self.footer_needed(closed.is_some()) {
+                    if self.footer_needed() {
                         ui.add_space(4.0);
-                        self.footer(ui, &ctx, immediate, closed);
+                        self.footer(ui, &ctx, immediate);
                         ui.separator();
                     }
                     ui.with_layout(Layout::top_down(Align::Min), |ui| {
@@ -1465,38 +1457,21 @@ impl View {
     }
 
     /// Whether there's anything for the footer to show.
-    fn footer_needed(&self, window: bool) -> bool {
-        window
-            || !self.edits.is_empty()
-            || self.busy()
-            || self.error.is_some()
-            || !self.failures.is_empty()
+    fn footer_needed(&self) -> bool {
+        !self.edits.is_empty() || self.busy() || self.error.is_some() || !self.failures.is_empty()
     }
 
-    fn footer(
-        &mut self,
-        ui: &mut Ui,
-        ctx: &egui::Context,
-        immediate: bool,
-        closed: Option<&mut bool>,
-    ) {
+    fn footer(&mut self, ui: &mut Ui, ctx: &egui::Context, immediate: bool) {
         if !matches!(self.source, Source::Files(_)) {
-            if let Some(closed) = closed {
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.button("Close").clicked() {
-                        *closed = true;
-                    }
-                });
-            }
             return;
         }
-        // In a tab or window the footer is laid out bottom-up, so there the
-        // buttons go first and the messages above them.
+        // In a tab the footer is laid out bottom-up, so there the buttons go
+        // first and the messages above them.
         if self.compact {
             self.messages_ui(ui, ctx);
-            self.buttons_ui(ui, ctx, immediate, closed);
+            self.buttons_ui(ui, ctx, immediate);
         } else {
-            self.buttons_ui(ui, ctx, immediate, closed);
+            self.buttons_ui(ui, ctx, immediate);
             self.messages_ui(ui, ctx);
         }
     }
@@ -1513,13 +1488,7 @@ impl View {
         }
     }
 
-    fn buttons_ui(
-        &mut self,
-        ui: &mut Ui,
-        ctx: &egui::Context,
-        immediate: bool,
-        closed: Option<&mut bool>,
-    ) {
+    fn buttons_ui(&mut self, ui: &mut Ui, ctx: &egui::Context, immediate: bool) {
         if self.busy() {
             ui.horizontal(|ui| {
                 ui.spinner();
@@ -1542,7 +1511,7 @@ impl View {
             return;
         }
         let pending = if immediate { 0 } else { self.edits.count() };
-        if pending == 0 && closed.is_none() {
+        if pending == 0 {
             return;
         }
         ui.horizontal(|ui| {
@@ -1550,28 +1519,17 @@ impl View {
                 ui.weak(plural(pending as u64, "change", "changes") + " not applied");
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if let Some(closed) = closed {
-                    let label = if pending > 0 { "OK" } else { "Close" };
-                    if ui.button(label).clicked() {
-                        if pending > 0 {
-                            self.apply(ctx);
-                        }
-                        *closed = true;
-                    }
+                let apply = Button::new(format!("{} Apply", icon::CHECK))
+                    .fill(ui.visuals().selection.bg_fill);
+                if ui.add(apply).clicked() {
+                    self.apply(ctx);
                 }
-                if pending > 0 {
-                    let apply = Button::new(format!("{} Apply", icon::CHECK))
-                        .fill(ui.visuals().selection.bg_fill);
-                    if ui.add(apply).clicked() {
-                        self.apply(ctx);
-                    }
-                    if ui
-                        .button("Revert")
-                        .on_hover_text("Forget the changes not applied yet")
-                        .clicked()
-                    {
-                        self.revert();
-                    }
+                if ui
+                    .button("Revert")
+                    .on_hover_text("Forget the changes not applied yet")
+                    .clicked()
+                {
+                    self.revert();
                 }
             });
         });

@@ -900,25 +900,32 @@ impl FilesApp {
             return;
         }
         let open_in = self.shared.properties.prefs.open_in;
-        if open_in == OpenIn::Window {
-            self.shared.properties.open_window(source);
-            return;
-        }
         if let Some(id) = self.find_tab(|t| t.properties().is_some_and(|p| p.properties == source))
         {
             self.focus_tab(id);
             return;
         }
         let tab = DockTab::Properties(PropertiesTab::new(self.next_id(), source));
-        if open_in == OpenIn::Tab {
-            self.push_main(tab);
-        } else if let Some(window) = self.windows.iter_mut().rev().find(|w| w.properties) {
-            // Properties opened in a window of their own join each other.
-            window.dock.push_to_focused_leaf(tab);
-            window.raise = true;
-        } else {
-            self.new_window(tab, Vec2::new(460.0, 600.0)).properties = true;
+        match open_in {
+            OpenIn::Tab => self.push_main(tab),
+            OpenIn::Window => self.float_properties(tab),
+            OpenIn::Native => {
+                if let Some(window) = self.windows.iter_mut().rev().find(|w| w.properties) {
+                    // Properties opened in a window of their own join each other.
+                    window.dock.push_to_focused_leaf(tab);
+                    window.raise = true;
+                } else {
+                    self.new_window(tab, PROPERTIES_SIZE).properties = true;
+                }
+            }
         }
+    }
+
+    /// Floats a properties tab over the main window; see `float_properties`.
+    fn float_properties(&mut self, tab: DockTab) {
+        let id = tab.id();
+        float_properties(&mut self.dock, tab, self.ctx.content_rect());
+        self.focus_tab(id);
     }
 
     /// The selection in the focused browser tab, or its folder if nothing
@@ -1594,6 +1601,38 @@ impl FilesApp {
         });
     }
 }
+
+/// Floats a properties tab over `area` of `dock`, as a tab dragged out of
+/// its tab bar does, joining a floating window holding only properties if
+/// there is one.
+fn float_properties(dock: &mut DockState<DockTab>, tab: DockTab, area: Rect) {
+    let only_properties = |surface| {
+        dock.iter_all_tabs()
+            .filter(|(path, _)| path.surface == surface)
+            .all(|(_, t)| t.properties().is_some())
+    };
+    let joins = dock
+        .iter_all_tabs()
+        .find(|(path, t)| {
+            !path.surface.is_main() && t.properties().is_some() && only_properties(path.surface)
+        })
+        .map(|(path, _)| path.node_path());
+    if let Some(leaf) = joins {
+        dock.set_focused_node_and_surface(leaf);
+        dock.push_to_focused_leaf(tab);
+    } else {
+        let size = PROPERTIES_SIZE.min(area.size() * 0.9);
+        let surface = dock.add_window(vec![tab]);
+        if let Some(state) = dock.get_window_state_mut(surface) {
+            state
+                .set_position(area.center() - size / 2.0)
+                .set_size(size);
+        }
+    }
+}
+
+/// How big properties open in a window.
+const PROPERTIES_SIZE: Vec2 = Vec2::new(460.0, 600.0);
 
 /// Seconds a drag must hover over a tab title before switching to it.
 const TAB_SWITCH_DELAY: f64 = 0.6;
@@ -2369,7 +2408,6 @@ impl eframe::App for FilesApp {
 
         Panel::top("menu_bar").show(ui, |ui| self.menu_bar(ui));
         self.about.ui(&ctx);
-        properties::Properties::windows_ui(&ctx, &mut self.shared);
         if self.themes.editor.open {
             self.themes.editor_ui(&ctx);
         }
@@ -2731,6 +2769,33 @@ mod tests {
             let preview = rect_of(&leaves, Pane::Preview).width();
             assert!((preview - 300.0).abs() < 12.0, "{pane:?}: {preview}");
         }
+    }
+
+    #[test]
+    fn floating_properties_join_each_other() {
+        let properties = |id: u64| {
+            let source = Source::Files(vec![PathBuf::from(format!("/{id}"))]);
+            DockTab::Properties(PropertiesTab::new(id, source))
+        };
+        let surfaces = |dock: &DockState<DockTab>| {
+            let mut tabs: Vec<(usize, u64)> = dock
+                .iter_all_tabs()
+                .map(|(path, t)| (path.surface.0, t.id()))
+                .collect();
+            tabs.sort_unstable();
+            tabs
+        };
+        let area = Rect::from_min_size(Pos2::ZERO, egui::vec2(1000.0, 800.0));
+        let mut dock = DockState::new(vec![browser(1), browser(2)]);
+        // A floating window of other tabs isn't joined.
+        dock.detach_tab(
+            dock.find_tab_from(|t| t.id() == 2).unwrap(),
+            Rect::from_min_size(Pos2::ZERO, egui::vec2(100.0, 100.0)),
+        );
+        float_properties(&mut dock, properties(3), area);
+        assert_eq!(surfaces(&dock), [(0, 1), (1, 2), (2, 3)]);
+        float_properties(&mut dock, properties(4), area);
+        assert_eq!(surfaces(&dock), [(0, 1), (1, 2), (2, 3), (2, 4)]);
     }
 
     /// Right-clicking a tab bar's empty part opens the add menu for the

@@ -18,7 +18,7 @@ use std::{
     time::SystemTime,
 };
 
-use egui::{Id, Ui};
+use egui::Ui;
 use egui_phosphor::regular as icon;
 use serde::{Deserialize, Serialize};
 
@@ -157,21 +157,10 @@ impl PropertiesTab {
     }
 }
 
-/// A floating window inside the main one. ("A separate window" opens a
-/// properties tab in a window of its own; see `tab_windows`.)
-struct Window {
-    id: u64,
-    view: View,
-    /// Bring it to the front this frame.
-    raise: bool,
-}
-
-/// Properties windows, and the preview pane's properties.
+/// Properties settings, and the preview pane's properties.
 #[derive(Default)]
 pub struct Properties {
     pub prefs: Prefs,
-    windows: Vec<Window>,
-    next_window: u64,
     preview: Option<View>,
 }
 
@@ -181,29 +170,6 @@ impl Properties {
             prefs,
             ..Self::default()
         }
-    }
-
-    /// Opens a window for `source`, or raises the one already showing it.
-    pub fn open_window(&mut self, source: Source) {
-        if let Some(window) = self.windows.iter_mut().find(|w| w.view.source == source) {
-            window.raise = true;
-            return;
-        }
-        self.next_window += 1;
-        self.windows.push(Window {
-            id: self.next_window,
-            view: View::new(source, false),
-            raise: true,
-        });
-    }
-
-    /// Draws the open windows.
-    pub fn windows_ui(ctx: &egui::Context, shared: &mut Shared) {
-        let mut windows = std::mem::take(&mut shared.properties.windows);
-        windows.retain_mut(|window| window_ui(ctx, window, shared));
-        // Windows opened while drawing these go after them.
-        windows.append(&mut shared.properties.windows);
-        shared.properties.windows = windows;
     }
 
     /// The preview pane's properties for `path`, the same as elsewhere but
@@ -229,33 +195,4 @@ impl Properties {
         }
         shared.properties.preview = Some(view);
     }
-}
-
-/// Draws one window; false once it's closed.
-fn window_ui(ctx: &egui::Context, window: &mut Window, shared: &mut Shared) -> bool {
-    let title = format!("{} Properties", window.view.source.title());
-    let raise = std::mem::take(&mut window.raise);
-    let id = Id::new(("properties-window", window.id));
-    if raise {
-        ctx.move_to_top(egui::LayerId::new(egui::Order::Middle, id));
-    }
-    let mut open = true;
-    let mut closed = false;
-    egui::Window::new(title)
-        .id(id)
-        .open(&mut open)
-        .collapsible(false)
-        .resizable(true)
-        .default_size([440.0, 560.0])
-        .min_size([300.0, 200.0])
-        .show(ctx, |ui| {
-            window.view.ui(
-                ui,
-                shared,
-                Host::Window {
-                    closed: &mut closed,
-                },
-            )
-        });
-    open && !closed
 }
