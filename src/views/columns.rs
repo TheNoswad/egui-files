@@ -222,6 +222,7 @@ fn current_column(
             |(index, rect): (usize, egui::Rect)| super::marquee::Layout {
                 content_origin: egui::pos2(rect.left(), rect.top() - index as f32 * row_height),
                 hits: &hits,
+                item_at: None,
             },
         );
         super::marquee::update(ui, tab, visible, drag_select, &output, layout, actions);

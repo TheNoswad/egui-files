@@ -1563,7 +1563,7 @@ impl FilesApp {
                     );
                     ui.checkbox(&mut self.shared.show_thumbnails, "Show thumbnails");
                     ui.add(
-                        egui::Slider::new(&mut self.shared.icon_size, 32.0..=192.0)
+                        egui::Slider::new(&mut self.shared.icon_size, crate::views::ICON_SIZES)
                             .text("Icon size"),
                     );
                     ui.separator();
@@ -2770,7 +2770,10 @@ impl FilesApp {
             self.long_press.hook(ctx, raw_input);
         }
         #[cfg(target_os = "android")]
-        self.insets.hook(ctx, raw_input);
+        {
+            self.insets.hook(ctx, raw_input);
+            self.mobile.keyboard = self.insets.keyboard();
+        }
         if let Some(theme) = self.system_theme.get() {
             raw_input.system_theme = Some(theme);
             // Tab windows get their input from winit without this hook, and

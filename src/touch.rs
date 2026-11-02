@@ -1,13 +1,16 @@
 //! Touch gestures for the mobile layout, from a mouse as from a finger:
 //! a drag scrolls, a tap opens, and holding still for a moment (a long
 //! press) opens the context menu when let go, or with a drag after it,
-//! selects what it passes over.
+//! selects what it passes over, or drags the selection if pressed on it.
 //!
 //! egui only tells long presses from real touches, and only for context
 //! menus, so the press is followed here in the raw input, and a long press
 //! let go without moving becomes a right click.
 
-use std::time::{Duration, Instant};
+use std::{
+    ops::RangeInclusive,
+    time::{Duration, Instant},
+};
 
 use egui::{Event, Id, PointerButton, Pos2, RawInput, scroll_area::ScrollSource, style::Style};
 
@@ -94,6 +97,13 @@ impl LongPress {
                         && press.pos.distance(*pos) > SLOP
                     {
                         if press.long {
+                            if !press.dragged {
+                                // On a touchscreen egui opened the item's
+                                // menu at the long press; dragging (to
+                                // select, or to move the selection) isn't
+                                // asking for it.
+                                egui::Popup::close_all(ctx);
+                            }
                             press.dragged = true;
                         } else {
                             press.moved = true;
@@ -221,6 +231,29 @@ pub fn item_sense(ctx: &egui::Context) -> egui::Sense {
     } else {
         egui::Sense::click_and_drag()
     }
+}
+
+/// Scales `value` by a pinch (or Ctrl and the scroll wheel, on the
+/// desktop) over `rect` in the mobile layout, keeping it within `range`.
+/// Returns whether it changed.
+pub fn pinch(ui: &egui::Ui, rect: egui::Rect, value: &mut f32, range: RangeInclusive<f32>) -> bool {
+    if !is_touch(ui.ctx()) {
+        return false;
+    }
+    let (zoom, at) = ui.input(|i| {
+        let at = i
+            .multi_touch()
+            .map(|touch| touch.center_pos)
+            .or(i.pointer.latest_pos());
+        (i.zoom_delta(), at)
+    });
+    if zoom == 1.0 || !at.is_some_and(|at| rect.contains(at)) {
+        return false;
+    }
+    let scaled = (*value * zoom).clamp(*range.start(), *range.end());
+    let changed = scaled != *value;
+    *value = scaled;
+    changed
 }
 
 #[cfg(test)]

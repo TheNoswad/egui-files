@@ -226,6 +226,14 @@ pub fn watched_dir() -> Option<PathBuf> {
 }
 
 impl TrashTab {
+    /// Clears the selection, for Android's back; whether there was one.
+    pub fn clear_selection(&mut self) -> bool {
+        self.anchor = None;
+        let had = !self.selection.is_empty();
+        self.selection.clear();
+        had
+    }
+
     pub fn new(id: u64) -> Self {
         Self {
             id,
@@ -577,7 +585,13 @@ impl TrashTab {
 
                     let response = row.response();
                     if response.clicked() {
-                        let modifiers = response.ctx.input(|i| i.modifiers);
+                        // A tap adds or removes the item, for the toolbar's
+                        // restore and delete: trashed items don't open.
+                        let modifiers = if crate::touch::is_touch(&response.ctx) {
+                            Modifiers::COMMAND
+                        } else {
+                            response.ctx.input(|i| i.modifiers)
+                        };
                         actions.push(Action::Select { index, modifiers });
                     }
                     if response.secondary_clicked() && !selected {

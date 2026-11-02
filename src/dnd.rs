@@ -74,18 +74,22 @@ pub enum DropTarget {
 /// Starts dragging `paths` if the user began dragging `response` this frame.
 pub fn source(response: &Response, paths: impl FnOnce() -> Vec<PathBuf>) {
     if response.drag_started() {
-        let paths = paths();
-        if !paths.is_empty() {
-            DragAndDrop::set_payload(
-                &response.ctx,
-                FileDrag {
-                    paths,
-                    external: false,
-                    archive: None,
-                    link_only: false,
-                },
-            );
-        }
+        start(&response.ctx, paths());
+    }
+}
+
+/// Starts dragging `paths`, if there are any.
+pub fn start(ctx: &Context, paths: Vec<PathBuf>) {
+    if !paths.is_empty() {
+        DragAndDrop::set_payload(
+            ctx,
+            FileDrag {
+                paths,
+                external: false,
+                archive: None,
+                link_only: false,
+            },
+        );
     }
 }
 

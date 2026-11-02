@@ -176,6 +176,7 @@ pub fn show(
     let layout = first_row.map(|(index, rect)| super::marquee::Layout {
         content_origin: Pos2::new(rect.left(), rect.top() - index as f32 * stride),
         hits: &hits,
+        item_at: None,
     });
     super::marquee::update(ui, tab, visible, drag_select, &output, layout, actions);
 }

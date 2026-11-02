@@ -162,7 +162,7 @@ fn general(ui: &mut Ui, app: &mut Access) {
              not on network drives or FUSE mounts (a disk usage tab still can)",
         );
     crate::dates::checkbox(ui);
-    ui.add(egui::Slider::new(&mut shared.icon_size, 32.0..=192.0).text("Icon size"));
+    ui.add(egui::Slider::new(&mut shared.icon_size, crate::views::ICON_SIZES).text("Icon size"));
 
     group(ui, "New tabs");
     new_tabs(ui, app.new_tabs);

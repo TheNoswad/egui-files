@@ -51,6 +51,8 @@ pub enum Sheet {
 pub struct Mobile {
     pub enabled: bool,
     pub sheet: Option<Sheet>,
+    /// The on-screen keyboard is up, which the bottom bar makes way for.
+    pub keyboard: bool,
     /// The window's size before switching to the mobile layout, to go back to.
     desktop_size: Option<Vec2>,
     /// The tab each tab was opened or shown from, which going back from it
@@ -200,6 +202,18 @@ impl FilesApp {
                 }
                 true
             }
+            Some(DockTab::Trash(trash)) => {
+                if trash.clear_selection() {
+                    return;
+                }
+                false
+            }
+            Some(DockTab::Archive(archive)) => {
+                if archive.clear_selection() {
+                    return;
+                }
+                false
+            }
             Some(_) => false,
             None => return,
         };
@@ -331,10 +345,14 @@ pub fn show(
         .iter_all_tabs()
         .filter(|(_, t)| t.pane().is_none())
         .count();
-    Panel::bottom("mobile_bar")
-        .exact_size(BAR_HEIGHT)
-        .resizable(false)
-        .show(ui, |ui| bar(ui, mobile, tabs, &mut requests));
+    // Typing needs the room, and the keyboard covers where the bar would go
+    // once it's let go of.
+    if !mobile.keyboard {
+        Panel::bottom("mobile_bar")
+            .exact_size(BAR_HEIGHT)
+            .resizable(false)
+            .show(ui, |ui| bar(ui, mobile, tabs, &mut requests));
+    }
     if !viewer.shared.jobs.is_empty() {
         Panel::bottom("jobs").show(ui, |ui| viewer.shared.jobs.ui(ui));
     }

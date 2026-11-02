@@ -294,6 +294,9 @@ pub fn display_name(path: &Path) -> String {
 // Operations
 
 pub fn open(path: &Path) -> io::Result<()> {
+    #[cfg(target_os = "android")]
+    return crate::android::open(path, false);
+    #[cfg(not(target_os = "android"))]
     open::that_detached(path)
 }
 

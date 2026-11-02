@@ -8,12 +8,17 @@
 //!
 //! In the mobile layout a drag scrolls instead, and a long press starts the
 //! selection: it selects the item pressed, and with a drag after it, the
-//! items passed over, adding to what's selected. No rectangle shows there.
+//! items passed over, adding to what's selected. No rectangle shows there,
+//! and in a grid, the items selected are those between the two in reading
+//! order, as text is selected, rather than those in a rectangle.
+//! A long press on an item already selected drags the selection instead
+//! (see `item_interaction`).
 
 use std::{collections::HashSet, path::PathBuf, sync::Arc};
 
 use egui::{
-    Id, PointerButton, Pos2, Rect, Stroke, StrokeKind, Ui, Vec2, scroll_area::ScrollAreaOutput,
+    DragAndDrop, Id, PointerButton, Pos2, Rect, Stroke, StrokeKind, Ui, Vec2,
+    scroll_area::ScrollAreaOutput,
 };
 
 use crate::tab::{Action, BrowserTab};
@@ -36,6 +41,9 @@ pub(crate) struct Layout<'a> {
     /// Which items (indices into the visible list) a rectangle touches,
     /// in content coordinates.
     pub hits: &'a dyn Fn(Rect) -> Vec<usize>,
+    /// For a grid: the item at, or nearest in reading order to, a point in
+    /// content coordinates. Touch selects the run of items between two.
+    pub item_at: Option<&'a dyn Fn(Pos2) -> Option<usize>>,
 }
 
 /// Starts, continues or ends a drag selection in a view's scroll area.
@@ -69,7 +77,8 @@ pub(crate) fn update<R>(
 
     let touch = crate::touch::is_touch(ctx);
     let start = if touch {
-        crate::touch::long_press_started(ctx)
+        // Unless the long press picked the selection up to drag it.
+        crate::touch::long_press_started(ctx) && !DragAndDrop::has_any_payload(ctx)
     } else {
         start
     };
@@ -104,7 +113,16 @@ pub(crate) fn update<R>(
     };
 
     let rect = Rect::from_two_pos(layout.content_origin + state.origin, pointer);
-    let hits = (layout.hits)(rect.translate(-layout.content_origin.to_vec2()));
+    let hits = match layout.item_at {
+        Some(item_at) if touch => {
+            let content = |pos: Pos2| pos - layout.content_origin.to_vec2();
+            match (item_at(state.origin.to_pos2()), item_at(content(pointer))) {
+                (Some(a), Some(b)) => (a.min(b)..=a.max(b)).collect(),
+                _ => Vec::new(),
+            }
+        }
+        _ => (layout.hits)(rect.translate(-layout.content_origin.to_vec2())),
+    };
     if state.hits.as_ref() != Some(&hits) {
         let mut selection = (*state.base).clone();
         for &index in &hits {
@@ -162,6 +180,32 @@ pub(crate) fn rows_hit(rect: Rect, stride: f32, height: f32, count: usize) -> Ve
     (first..=last).collect()
 }
 
+/// The item at `pos` in a grid of `items` (in reading order, at content
+/// rectangles): in the row `pos` is level with, or the nearest row, the item
+/// it's over or nearest to across. Past the end of a short last row, that's
+/// its last item.
+pub(crate) fn grid_item_at(pos: Pos2, items: &[(usize, Rect)]) -> Option<usize> {
+    let row_distance = |rect: &Rect| {
+        if pos.y < rect.top() {
+            rect.top() - pos.y
+        } else {
+            (pos.y - rect.bottom()).max(0.0)
+        }
+    };
+    let row = items
+        .iter()
+        .map(|(_, rect)| row_distance(rect))
+        .min_by(f32::total_cmp)?;
+    items
+        .iter()
+        .filter(|(_, rect)| row_distance(rect) == row)
+        .min_by(|(_, a), (_, b)| {
+            let across = |rect: &Rect| (pos.x - pos.x.clamp(rect.left(), rect.right())).abs();
+            across(a).total_cmp(&across(b))
+        })
+        .map(|&(index, _)| index)
+}
+
 /// Hits for items laid out at the given content rectangles.
 pub(crate) fn rects_hit(rect: Rect, items: &[(usize, Rect)]) -> Vec<usize> {
     items
@@ -175,10 +219,32 @@ pub(crate) fn rects_hit(rect: Rect, items: &[(usize, Rect)]) -> Vec<usize> {
 mod tests {
     use egui::{Rect, pos2};
 
-    use super::rows_hit;
+    use super::{grid_item_at, rows_hit};
 
     fn span(top: f32, bottom: f32) -> Rect {
         Rect::from_min_max(pos2(0.0, top), pos2(10.0, bottom))
+    }
+
+    #[test]
+    fn grid_items() {
+        // Three to a row, 10 wide and tall with 2 between; a last row of two.
+        let items: Vec<_> = (0..5)
+            .map(|i| {
+                let (x, y) = ((i % 3) as f32 * 12.0, (i / 3) as f32 * 12.0);
+                (i, Rect::from_min_size(pos2(x, y), egui::vec2(10.0, 10.0)))
+            })
+            .collect();
+        assert_eq!(grid_item_at(pos2(5.0, 5.0), &items), Some(0));
+        assert_eq!(grid_item_at(pos2(17.0, 5.0), &items), Some(1));
+        // In the gap between two: either neighbour.
+        assert!(matches!(grid_item_at(pos2(11.0, 5.0), &items), Some(0 | 1)));
+        // Past a row's end, and past the short last row's end.
+        assert_eq!(grid_item_at(pos2(80.0, 5.0), &items), Some(2));
+        assert_eq!(grid_item_at(pos2(80.0, 17.0), &items), Some(4));
+        // Above and below the content.
+        assert_eq!(grid_item_at(pos2(30.0, -40.0), &items), Some(2));
+        assert_eq!(grid_item_at(pos2(1.0, 200.0), &items), Some(3));
+        assert_eq!(grid_item_at(pos2(1.0, 1.0), &[]), None);
     }
 
     #[test]

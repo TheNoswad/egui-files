@@ -1,7 +1,7 @@
 //! "Open with": the apps registered for a file's type in a submenu, and a
 //! dialog listing every app (plus, if enabled, custom commands).
 //!
-//! The platform part (`linux.rs`, `windows.rs`) finds the apps and starts
+//! The platform part (`linux.rs`, `windows.rs`, `android.rs`) finds the apps and starts
 //! them; the app list is loaded once on a background thread and reloaded
 //! when the system's associations change.
 
@@ -13,7 +13,10 @@ mod platform;
 #[cfg(windows)]
 #[path = "windows.rs"]
 mod platform;
-#[cfg(not(any(target_os = "linux", windows)))]
+#[cfg(target_os = "android")]
+#[path = "android.rs"]
+mod platform;
+#[cfg(not(any(target_os = "linux", windows, target_os = "android")))]
 #[path = "other.rs"]
 mod platform;
 
@@ -485,7 +488,16 @@ fn submenu_contents(ui: &mut Ui, subjects: &[Subject]) -> Option<Choice> {
     };
     let mut choice = None;
     if let Some(app) = &handlers.default
-        && app_button(ui, app, "default").clicked()
+        && app_button(
+            ui,
+            app,
+            if cfg!(target_os = "android") {
+                ""
+            } else {
+                "default"
+            },
+        )
+        .clicked()
     {
         choice = Some(Choice::Open(Target::App(app.clone())));
     }
@@ -504,6 +516,10 @@ fn submenu_contents(ui: &mut Ui, subjects: &[Subject]) -> Option<Choice> {
         });
     if handlers.default.is_none() && handlers.others.is_empty() {
         ui.label(RichText::new("No apps for this type").weak());
+    }
+    // Android lists its apps itself, and has no commands to type.
+    if cfg!(target_os = "android") {
+        return choice;
     }
     ui.separator();
     if ui

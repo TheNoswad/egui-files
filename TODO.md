@@ -19,18 +19,18 @@
     - [x] Build for Android, with a phone's file access ("All files access"): `cargo apk build --release` in `android/` (Pixel 7a, Android 16)
     - [ ] iOS
     - [x] Touch: drag scrolls, a tap opens, a long press opens the context menu, and a long press then a drag selects (`src/touch.rs`)
-    - [ ] Touch in the trash and archive tabs: they scroll by dragging, but a tap still selects and a double tap opens, as on the desktop
-    - [ ] Touch drag selection in the icon grid selects a rectangle; a phone would select in reading order between the two items
-    - [ ] Moving files by touch: dragging items onto folders is gone in the mobile layout (cut and paste works)
-    - [ ] Pinch to zoom: icon size in the grid, text size in the terminal
-    - [ ] Open files in other apps (Android intents with a `content://` URI from a FileProvider); "Open with" too
+    - [x] Touch in the trash and archive tabs: a tap opens (archive) or adds to the selection (trash, or the archive while selecting); back clears it
+    - [x] Touch drag selection in the icon grid selects in reading order between the two items
+    - [x] Moving files by touch: while selecting, a long press on a selected item drags the selection onto a folder
+    - [x] Pinch to zoom: icon size in the grid, text size in the terminal (Ctrl+scroll in the mobile layout on the desktop)
+    - [x] Open files in other apps: `ACTION_VIEW` with the file's media store `content://` URI (no FileProvider: the APK has no Java code); "Open with" shows Android's chooser. Files from archives extract to `Android/media/<package>` so they can be shared. Checked on the Pixel: a PDF in Firefox, text through the chooser, an image from a zip in Files by Google
     - [x] Trash tab's toolbar overflows at phone width
-    - [ ] Hide the bottom bar while the on-screen keyboard is up
+    - [x] Hide the bottom bar while the on-screen keyboard is up
     - [ ] Terminal good enough to develop on (on hold: researching first). Today it runs Android's own `sh` with toybox, so no git, compilers or package manager. Needs a Linux userland, and since Android 10 apps can't execute files they download into their own storage. Options:
         - proot + a downloaded distro rootfs (Debian, Alpine) in app storage, exec routed through proot's loader shipped as a native library (how UserLAnd and AnLinux do it). Real `apt`/`apk`; ptrace overhead on syscalls; a few hundred MB and a first-run setup
         - Termux's packages: fastest, but built for Termux's prefix (`/data/data/com.termux/files/usr`), so they'd need rebuilding and hosting ourselves
         - Hand off to an installed Termux (`RUN_COMMAND` intent): little work, but needs Termux and integrates shallowly
-    - [ ] Predictive back: opt in (`enableOnBackInvokedCallback`) once the manifest can say so, then target API 36; targets 35 until then
+    - [ ] Predictive back: opt in (`enableOnBackInvokedCallback`) once the manifest can say so, then target API 36; targets 35 until then. cargo-apk 0.10 still can't write it, and opting in needs an `OnBackInvokedCallback`, which needs Java code in the APK
     - [x] Check on a real touchscreen that egui's own long touch and ours don't both fire
     - [x] Dialogs, the theme editor and the About window sized for a phone
 

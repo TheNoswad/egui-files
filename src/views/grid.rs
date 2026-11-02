@@ -8,6 +8,9 @@ use crate::{
     video,
 };
 
+/// The icon sizes to choose from, by the slider or a pinch.
+pub const ICON_SIZES: std::ops::RangeInclusive<f32> = 32.0..=192.0;
+
 pub fn show(
     ui: &mut Ui,
     tab: &BrowserTab,
@@ -16,6 +19,9 @@ pub fn show(
     drag_select: bool,
     actions: &mut Vec<Action>,
 ) {
+    // A pinch over the grid resizes the icons, as the slider in the menu does.
+    let area = ui.available_rect_before_wrap();
+    crate::touch::pinch(ui, area, &mut shared.icon_size, ICON_SIZES);
     let icon_size = shared.icon_size;
     let cell = vec2(icon_size + 32.0, icon_size + 40.0);
     let colors = crate::theme::colors(ui.ctx());
@@ -146,9 +152,11 @@ pub fn show(
         }
     }
     let hits = |rect| super::marquee::rects_hit(rect, &cells);
+    let item_at = |pos| super::marquee::grid_item_at(pos, &cells);
     let layout = origin.map(|origin| super::marquee::Layout {
         content_origin: origin,
         hits: &hits,
+        item_at: Some(&item_at),
     });
     super::marquee::update(ui, tab, visible, drag_select, &output, layout, actions);
 }

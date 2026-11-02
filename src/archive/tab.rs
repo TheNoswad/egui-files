@@ -239,6 +239,14 @@ pub struct ArchiveTab {
 }
 
 impl ArchiveTab {
+    /// Clears the selection, for Android's back; whether there was one.
+    pub fn clear_selection(&mut self) -> bool {
+        self.anchor = None;
+        let had = !self.selection.is_empty();
+        self.selection.clear();
+        had
+    }
+
     pub fn new(id: u64, archive: PathBuf) -> Self {
         Self {
             id,
@@ -686,7 +694,21 @@ impl ArchiveTab {
                         .interact_pointer_pos()
                         .zip(caret_rect)
                         .is_some_and(|(pos, rect)| rect.contains(pos));
-                    if response.double_clicked() {
+                    if crate::touch::is_touch(&response.ctx) {
+                        // A tap opens a file and opens or closes a folder,
+                        // or while items are selected (a long press selects
+                        // the item it opens the menu for), adds or removes it.
+                        if response.clicked() {
+                            if self.selection.is_empty() {
+                                actions.push(Action::Activate(index));
+                            } else {
+                                actions.push(Action::Select {
+                                    index,
+                                    modifiers: Modifiers::COMMAND,
+                                });
+                            }
+                        }
+                    } else if response.double_clicked() {
                         actions.push(Action::Activate(index));
                     } else if response.clicked() && on_caret && n.is_dir {
                         actions.push(Action::Toggle(node));

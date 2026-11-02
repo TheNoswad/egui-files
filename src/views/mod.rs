@@ -6,6 +6,8 @@ mod details;
 mod grid;
 mod marquee;
 
+pub(crate) use grid::ICON_SIZES;
+
 use egui::{Modifiers, Response, Ui};
 use egui_phosphor::regular as icon;
 use serde::{Deserialize, Serialize};
@@ -108,6 +110,15 @@ pub(crate) fn item_interaction(
     }
 
     if crate::touch::is_touch(&response.ctx) {
+        // A long press on a selected item, while selecting, picks the
+        // selection up to drag onto a folder, rather than selecting more.
+        if selected
+            && tab.selecting
+            && crate::touch::long_press_started(&response.ctx)
+            && response.contains_pointer()
+        {
+            dnd::start(&response.ctx, tab.selected_paths());
+        }
         // A tap opens a folder and previews a file (with buttons there to
         // open it), or while selecting, adds or removes the item.
         if response.clicked() {

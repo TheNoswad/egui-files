@@ -368,6 +368,11 @@ impl ExtractJob {
 
 /// Where files opened from archives are extracted to.
 fn open_dir() -> PathBuf {
+    // Other apps can only be handed files in shared storage.
+    #[cfg(target_os = "android")]
+    if let Some(dir) = crate::android::media_dir() {
+        return dir.join("opened");
+    }
     directories::BaseDirs::new()
         .map_or_else(std::env::temp_dir, |dirs| dirs.cache_dir().to_path_buf())
         .join("egui-files")

@@ -186,10 +186,6 @@ impl Terminal {
         follow: FollowState,
     ) -> TerminalResponse {
         let mut response = TerminalResponse::default();
-        let font = TextStyle::Monospace.resolve(ui.style());
-        let cell = ui
-            .ctx()
-            .fonts_mut(|f| vec2(f.glyph_width(&font, 'M'), f.row_height(&font)));
         let mut rect = ui.available_rect_before_wrap();
         // Phone keyboards lack Esc, Ctrl, the arrows and so on: a row of
         // them goes under the terminal.
@@ -199,6 +195,17 @@ impl Terminal {
             rect.max.y = keys.top();
             keys
         });
+        // A pinch sizes the text, for every terminal.
+        let scale_id = Id::new("terminal_text_scale");
+        let mut scale = ui.data_mut(|d| *d.get_persisted_mut_or(scale_id, 1.0_f32));
+        if crate::touch::pinch(ui, rect, &mut scale, 0.5..=3.0) {
+            ui.data_mut(|d| d.insert_persisted(scale_id, scale));
+        }
+        let mut font = TextStyle::Monospace.resolve(ui.style());
+        font.size *= scale;
+        let cell = ui
+            .ctx()
+            .fonts_mut(|f| vec2(f.glyph_width(&font, 'M'), f.row_height(&font)));
         let size = TermSize {
             columns: ((rect.width() / cell.x) as usize).max(2),
             lines: ((rect.height() / cell.y) as usize).max(1),
