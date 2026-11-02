@@ -148,3 +148,81 @@ pub fn ensure_row_visible_once<R>(
         ensure_row_visible(ui, output, row, row_height);
     }
 }
+
+/// Rows dragged by their handle into a different order.
+pub fn reorderable<T>(
+    ui: &mut Ui,
+    salt: &str,
+    items: &mut Vec<T>,
+    mut row: impl FnMut(&mut Ui, &mut T),
+) {
+    let list = egui::Id::new(salt);
+    let mut moved = None;
+    for (i, item) in items.iter_mut().enumerate() {
+        let response = ui
+            .horizontal(|ui| {
+                ui.dnd_drag_source(list.with(i), DragRow { list, index: i }, |ui| {
+                    ui.label(RichText::new(egui_phosphor::regular::DOTS_SIX_VERTICAL).weak());
+                })
+                .response
+                .on_hover_cursor(egui::CursorIcon::Grab);
+                row(ui, item);
+            })
+            .response;
+        let ours = |row: Option<std::sync::Arc<DragRow>>| row.filter(|r| r.list == list);
+        if let Some(pointer) = ui.ctx().pointer_interact_pos()
+            && ours(response.dnd_hover_payload()).is_some()
+        {
+            // Dropped onto the top half of a row goes before it, the
+            // bottom half after.
+            let rect = response.rect;
+            let below = pointer.y > rect.center().y;
+            let y = if below { rect.bottom() } else { rect.top() };
+            ui.painter()
+                .hline(rect.x_range(), y, ui.visuals().selection.stroke);
+            if let Some(from) = ours(response.dnd_release_payload()) {
+                moved = Some((from.index, i + usize::from(below)));
+            }
+        }
+    }
+    if let Some((from, to)) = moved {
+        move_item(items, from, to);
+    }
+}
+
+/// What a row of a [`reorderable`] list carries while dragged.
+struct DragRow {
+    list: egui::Id,
+    index: usize,
+}
+
+/// Moves `items[from]` to just before what was `items[to]` (or to the end
+/// for `items.len()`).
+pub fn move_item<T>(items: &mut Vec<T>, from: usize, to: usize) {
+    if from >= items.len() || to > items.len() {
+        return;
+    }
+    let item = items.remove(from);
+    let to = if to > from { to - 1 } else { to };
+    items.insert(to, item);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn moves_items() {
+        let moved = |from, to| {
+            let mut v = vec!['a', 'b', 'c', 'd'];
+            move_item(&mut v, from, to);
+            v.into_iter().collect::<String>()
+        };
+        assert_eq!(moved(0, 2), "bacd");
+        assert_eq!(moved(0, 4), "bcda");
+        assert_eq!(moved(3, 0), "dabc");
+        assert_eq!(moved(2, 2), "abcd");
+        assert_eq!(moved(2, 3), "abcd");
+        assert_eq!(moved(1, 9), "abcd");
+    }
+}

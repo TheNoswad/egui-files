@@ -34,6 +34,8 @@ impl ViewMode {
     ];
 }
 
+pub use details::COLUMNS as DETAILS_COLUMNS;
+
 pub fn show(
     ui: &mut Ui,
     tab: &BrowserTab,

@@ -34,7 +34,7 @@ const LOCATION: usize = 1;
 const DELETED: usize = 2;
 const SIZE: usize = 3;
 
-static COLUMNS: list_columns::Table = list_columns::Table {
+pub static COLUMNS: list_columns::Table = list_columns::Table {
     key: "trash",
     columns: &[
         Spec {
@@ -506,12 +506,11 @@ impl TrashTab {
                     SortKey::Deleted,
                     SortKey::Size,
                 ];
-                for (column, key) in keys.into_iter().enumerate() {
-                    if !columns.shown(column) {
-                        continue;
-                    }
+                for column in columns.order() {
+                    let key = keys[column];
                     let mut button = None;
                     let (_, cell) = header.col(|ui| {
+                        columns.header_drag(ui, column);
                         let arrow = match (self.sort.0 == key, self.sort.1) {
                             (false, _) => "",
                             (true, true) => icon::CARET_UP,
@@ -542,25 +541,15 @@ impl TrashTab {
                             .flatten();
                         crate::widgets::icon_label(ui, glyph, color, &item.name);
                     });
-                    if columns.shown(LOCATION) {
-                        row.col(|ui| {
-                            ui.label(
-                                item.original
-                                    .parent()
-                                    .unwrap_or(&item.original)
-                                    .display()
-                                    .to_string(),
-                            );
-                        });
-                    }
-                    if columns.shown(DELETED) {
-                        row.col(|ui| {
-                            crate::dates::label(ui, item.deleted, false);
-                        });
-                    }
-                    if columns.shown(SIZE) {
-                        row.col(|ui| {
-                            ui.label(item.size_text());
+                    for column in columns.order().into_iter().skip(1) {
+                        row.col(|ui| match column {
+                            LOCATION => {
+                                let parent = item.original.parent().unwrap_or(&item.original);
+                                ui.label(parent.display().to_string());
+                            }
+                            DELETED => _ = crate::dates::label(ui, item.deleted, false),
+                            SIZE => _ = ui.label(item.size_text()),
+                            _ => {}
                         });
                     }
 

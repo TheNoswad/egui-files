@@ -16,7 +16,7 @@ const MODIFIED: usize = 2;
 const CREATED: usize = 3;
 const KIND: usize = 4;
 
-static COLUMNS: list_columns::Table = list_columns::Table {
+pub static COLUMNS: list_columns::Table = list_columns::Table {
     key: "details",
     columns: &[
         Spec {
@@ -80,21 +80,18 @@ pub fn show(
 
     let output = table
         .header(row_height, |mut header| {
-            for (column, key) in [
+            let keys = [
                 SortKey::Name,
                 SortKey::Size,
                 SortKey::Modified,
                 SortKey::Created,
                 SortKey::Kind,
-            ]
-            .into_iter()
-            .enumerate()
-            {
-                if !columns.shown(column) {
-                    continue;
-                }
+            ];
+            for column in columns.order() {
+                let key = keys[column];
                 let mut button = None;
                 let (_, cell) = header.col(|ui| {
+                    columns.header_drag(ui, column);
                     let arrow = match (tab.sort.key == key, tab.sort.ascending) {
                         (false, _) => "",
                         (true, true) => icon::CARET_UP,
@@ -133,33 +130,24 @@ pub fn show(
                     ui.spacing_mut().item_spacing.x = 4.0;
                     name_rect = ui.label(icon).rect.union(ui.label(name).rect);
                 });
-                if columns.shown(SIZE) {
-                    row.col(|ui| {
-                        if !entry.is_dir {
-                            ui.label(fs::human_size(entry.size));
-                        } else if let Some(sizes) = folder_sizes
-                            && let Some(size) = sizes.get(&entry.path)
-                        {
-                            // From a disk usage tab; still growing while it scans.
-                            let text = RichText::new(fs::human_size(size)).weak();
-                            let text = if sizes.partial { text.italics() } else { text };
-                            ui.label(text);
+                for column in columns.order().into_iter().skip(1) {
+                    row.col(|ui| match column {
+                        SIZE => {
+                            if !entry.is_dir {
+                                ui.label(fs::human_size(entry.size));
+                            } else if let Some(sizes) = folder_sizes
+                                && let Some(size) = sizes.get(&entry.path)
+                            {
+                                // From a disk usage tab; still growing while it scans.
+                                let text = RichText::new(fs::human_size(size)).weak();
+                                let text = if sizes.partial { text.italics() } else { text };
+                                ui.label(text);
+                            }
                         }
-                    });
-                }
-                if columns.shown(MODIFIED) {
-                    row.col(|ui| {
-                        crate::dates::label(ui, entry.modified, false);
-                    });
-                }
-                if columns.shown(CREATED) {
-                    row.col(|ui| {
-                        crate::dates::label(ui, entry.created, false);
-                    });
-                }
-                if columns.shown(KIND) {
-                    row.col(|ui| {
-                        ui.label(entry.kind());
+                        MODIFIED => _ = crate::dates::label(ui, entry.modified, false),
+                        CREATED => _ = crate::dates::label(ui, entry.created, false),
+                        KIND => _ = ui.label(entry.kind()),
+                        _ => {}
                     });
                 }
                 let response = row.response();

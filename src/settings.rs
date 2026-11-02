@@ -22,17 +22,25 @@ pub enum Page {
     General,
     Appearance,
     Places,
+    Columns,
     Files,
 }
 
 impl Page {
-    pub const ALL: [Self; 4] = [Self::General, Self::Appearance, Self::Places, Self::Files];
+    pub const ALL: [Self; 5] = [
+        Self::General,
+        Self::Appearance,
+        Self::Places,
+        Self::Columns,
+        Self::Files,
+    ];
 
     fn label(self) -> &'static str {
         match self {
             Self::General => "General",
             Self::Appearance => "Appearance",
             Self::Places => "Places",
+            Self::Columns => "Columns",
             Self::Files => "Files and apps",
         }
     }
@@ -42,6 +50,7 @@ impl Page {
             Self::General => icon::SLIDERS_HORIZONTAL,
             Self::Appearance => icon::PAINT_BRUSH,
             Self::Places => icon::COMPASS,
+            Self::Columns => icon::COLUMNS,
             Self::Files => icon::APP_WINDOW,
         }
     }
@@ -119,6 +128,7 @@ pub fn ui(ui: &mut Ui, tab: &mut SettingsTab, app: &mut Access) {
                 Page::General => general(ui, app),
                 Page::Appearance => appearance(ui, app),
                 Page::Places => places(ui, app),
+                Page::Columns => columns(ui),
                 Page::Files => files(ui, app),
             }
             ui.add_space(12.0);
@@ -233,7 +243,7 @@ fn places(ui: &mut Ui, app: &mut Access) {
         .map(|p| (p.label.clone(), layout.place_shown(&p.label)))
         .collect();
     let mut sections = layout.sections.clone();
-    reorderable(ui, "settings-places", &mut sections, |ui, (section, on)| {
+    crate::widgets::reorderable(ui, "settings-places", &mut sections, |ui, (section, on)| {
         ui.vertical(|ui| {
             ui.checkbox(on, section.label());
             if *section == Section::Places {
@@ -264,62 +274,19 @@ fn places(ui: &mut Ui, app: &mut Access) {
     }
 }
 
-/// Rows dragged by their handle into a different order.
-fn reorderable<T>(
-    ui: &mut Ui,
-    salt: &str,
-    items: &mut Vec<T>,
-    mut row: impl FnMut(&mut Ui, &mut T),
-) {
-    let list = egui::Id::new(salt);
-    let mut moved = None;
-    for (i, item) in items.iter_mut().enumerate() {
-        let response = ui
-            .horizontal(|ui| {
-                ui.dnd_drag_source(list.with(i), DragRow { list, index: i }, |ui| {
-                    ui.label(RichText::new(icon::DOTS_SIX_VERTICAL).weak());
-                })
-                .response
-                .on_hover_cursor(egui::CursorIcon::Grab);
-                row(ui, item);
-            })
-            .response;
-        let ours = |row: Option<std::sync::Arc<DragRow>>| row.filter(|r| r.list == list);
-        if let Some(pointer) = ui.ctx().pointer_interact_pos()
-            && ours(response.dnd_hover_payload()).is_some()
-        {
-            // Dropped onto the top half of a row goes before it, the
-            // bottom half after.
-            let rect = response.rect;
-            let below = pointer.y > rect.center().y;
-            let y = if below { rect.bottom() } else { rect.top() };
-            ui.painter()
-                .hline(rect.x_range(), y, ui.visuals().selection.stroke);
-            if let Some(from) = ours(response.dnd_release_payload()) {
-                moved = Some((from.index, i + usize::from(below)));
-            }
-        }
+fn columns(ui: &mut Ui) {
+    ui.weak("Drag to reorder, or drag a column's header in the list itself; untick to hide.");
+    let tables = [
+        ("Details view", &crate::views::DETAILS_COLUMNS),
+        ("Trash", &crate::trash::COLUMNS),
+        ("Archives", &crate::archive::COLUMNS),
+    ];
+    for (title, table) in tables {
+        group(ui, title);
+        ui.push_id(table.key, |ui| crate::list_columns::settings_ui(ui, table));
     }
-    if let Some((from, to)) = moved {
-        move_item(items, from, to);
-    }
-}
-
-/// What a row of a [`reorderable`] list carries while dragged.
-struct DragRow {
-    list: egui::Id,
-    index: usize,
-}
-
-/// Moves `items[from]` to just before what was `items[to]` (or to the end
-/// for `items.len()`).
-fn move_item<T>(items: &mut Vec<T>, from: usize, to: usize) {
-    if from >= items.len() || to > items.len() {
-        return;
-    }
-    let item = items.remove(from);
-    let to = if to > from { to - 1 } else { to };
-    items.insert(to, item);
+    group(ui, "Dates");
+    crate::dates::checkbox(ui);
 }
 
 fn files(ui: &mut Ui, app: &mut Access) {
@@ -362,24 +329,4 @@ fn files(ui: &mut Ui, app: &mut Access) {
     ui.menu_button(format!("{} Terminal folder", icon::LINK_SIMPLE), |ui| {
         app.terminal.follow_menu(ui);
     });
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn moves_items() {
-        let moved = |from, to| {
-            let mut v = vec!['a', 'b', 'c', 'd'];
-            move_item(&mut v, from, to);
-            v.into_iter().collect::<String>()
-        };
-        assert_eq!(moved(0, 2), "bacd");
-        assert_eq!(moved(0, 4), "bcda");
-        assert_eq!(moved(3, 0), "dabc");
-        assert_eq!(moved(2, 2), "abcd");
-        assert_eq!(moved(2, 3), "abcd");
-        assert_eq!(moved(1, 9), "abcd");
-    }
 }

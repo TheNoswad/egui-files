@@ -35,6 +35,9 @@ struct Prefs {
     /// Widths the user chose; index 0 (the name column) is unused.
     widths: Vec<f32>,
     hidden: Vec<bool>,
+    /// The columns after the name column, in the order shown.
+    #[serde(default)]
+    order: Vec<usize>,
 }
 
 impl Prefs {
@@ -44,7 +47,59 @@ impl Prefs {
             hidden: (0..table.columns.len())
                 .map(|i| table.hidden.contains(&i))
                 .collect(),
+            order: (1..table.columns.len()).collect(),
         }
+    }
+
+    /// The saved prefs for `table`, or its defaults. Widths are kept at
+    /// least at their minimum, and an order that doesn't name each column
+    /// once (from before columns could move) is the table's own.
+    fn load(ctx: &egui::Context, table: &Table) -> Self {
+        let n = table.columns.len();
+        let mut prefs = ctx
+            .data_mut(|d| d.get_persisted::<Self>(prefs_id(table)))
+            .filter(|p| p.widths.len() == n && p.hidden.len() == n)
+            .unwrap_or_else(|| Self::new(table));
+        prefs.hidden[0] = false;
+        for (width, spec) in prefs.widths.iter_mut().zip(table.columns) {
+            *width = width.max(spec.min);
+        }
+        let mut sorted = prefs.order.clone();
+        sorted.sort_unstable();
+        if !sorted.iter().copied().eq(1..n) {
+            prefs.order = (1..n).collect();
+        }
+        prefs
+    }
+
+    fn store(self, ctx: &egui::Context, table: &Table) {
+        ctx.data_mut(|d| d.insert_persisted(prefs_id(table), self));
+    }
+}
+
+fn prefs_id(table: &Table) -> Id {
+    Id::new(("list-columns", table.key))
+}
+
+/// Which columns of `table` show and in what order, for the settings.
+pub fn settings_ui(ui: &mut Ui, table: &Table) {
+    let ctx = ui.ctx().clone();
+    let mut prefs = Prefs::load(&ctx, table);
+    let before = prefs.clone();
+    ui.add_enabled(false, Checkbox::new(&mut true, table.columns[0].label));
+    let mut rows: Vec<(usize, bool)> = prefs.order.iter().map(|&i| (i, !prefs.hidden[i])).collect();
+    crate::widgets::reorderable(ui, table.key, &mut rows, |ui, (column, shown)| {
+        ui.checkbox(shown, table.columns[*column].label);
+    });
+    prefs.order = rows.iter().map(|&(i, _)| i).collect();
+    for (i, shown) in rows {
+        prefs.hidden[i] = !shown;
+    }
+    if ui.button("Reset columns").clicked() {
+        prefs = Prefs::new(table);
+    }
+    if prefs != before {
+        prefs.store(&ctx, table);
     }
 }
 
@@ -66,15 +121,11 @@ impl Layout {
     /// Lays out the columns for the space left in `ui`. Call it right before
     /// building the table.
     pub fn new(ui: &Ui, table: &'static Table) -> Self {
-        let prefs_id = Id::new(("list-columns", table.key));
-        let n = table.columns.len();
-        let mut prefs = ui
-            .data_mut(|d| d.get_persisted::<Prefs>(prefs_id))
-            .filter(|p| p.widths.len() == n && p.hidden.len() == n)
-            .unwrap_or_else(|| Prefs::new(table));
-        prefs.hidden[0] = false;
-        for (width, spec) in prefs.widths.iter_mut().zip(table.columns) {
-            *width = width.max(spec.min);
+        let prefs_id = prefs_id(table);
+        let prefs = Prefs::load(ui.ctx(), table);
+        // A header drag ends on the pointer's release, seen by every cell.
+        if !ui.input(|i| i.pointer.any_down() || i.pointer.any_released()) {
+            ui.data_mut(|d| d.remove::<HeaderDrag>(prefs_id));
         }
         let rect = ui.available_rect_before_wrap();
         // The table leaves room for its scroll bar.
@@ -95,6 +146,56 @@ impl Layout {
         self.widths[column].is_some()
     }
 
+    /// The shown columns, in the order shown: the name column, then the
+    /// others in the order the user put them.
+    pub fn order(&self) -> Vec<usize> {
+        std::iter::once(0)
+            .chain(self.prefs.order.iter().copied())
+            .filter(|&i| self.shown(i))
+            .collect()
+    }
+
+    /// Makes `column`'s header cell, the one `ui` draws, draggable onto
+    /// another cell to move the column there. Call it inside the cell; a
+    /// click still reaches what's in it.
+    pub fn header_drag(&self, ui: &mut Ui, column: usize) {
+        let rect = ui.max_rect();
+        let id = self.prefs_id.with(("header-drag", column));
+        let dragging = ui.data(|d| d.get_temp::<HeaderDrag>(self.prefs_id));
+        if column > 0 {
+            let response = ui.interact(rect, id, Sense::drag());
+            if response.drag_started() {
+                ui.data_mut(|d| d.insert_temp(self.prefs_id, HeaderDrag(column)));
+            }
+            if response.dragged() {
+                ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+                let fill = ui.visuals().selection.bg_fill.gamma_multiply(0.4);
+                ui.painter().rect_filled(rect, 2.0, fill);
+            }
+        }
+        let Some(HeaderDrag(from)) = dragging else {
+            return;
+        };
+        let Some(pointer) = ui.ctx().pointer_latest_pos() else {
+            return;
+        };
+        if from == column || !rect.contains(pointer) {
+            return;
+        }
+        // Onto the left half of a cell goes before its column, the right
+        // half after; nothing goes before the name column.
+        let after = column == 0 || pointer.x > rect.center().x;
+        let x = if after { rect.right() } else { rect.left() };
+        let stroke = egui::Stroke::new(2.0, ui.visuals().selection.stroke.color);
+        ui.painter().vline(x, rect.y_range(), stroke);
+        if ui.input(|i| i.pointer.any_released()) {
+            let mut prefs = self.prefs.clone();
+            move_column(&mut prefs.order, from, column, after);
+            self.store(ui, prefs);
+            ui.data_mut(|d| d.remove::<HeaderDrag>(self.prefs_id));
+        }
+    }
+
     /// Adds the shown columns to `builder`.
     pub fn columns<'a>(&self, mut builder: TableBuilder<'a>) -> TableBuilder<'a> {
         let name = &self.table.columns[0];
@@ -104,8 +205,10 @@ impl Layout {
                 .clip(true)
                 .resizable(false),
         );
-        for width in self.widths.iter().skip(1).flatten() {
-            builder = builder.column(Column::exact(*width));
+        for &i in &self.prefs.order {
+            if let Some(width) = self.widths[i] {
+                builder = builder.column(Column::exact(width));
+            }
         }
         builder
     }
@@ -135,7 +238,7 @@ impl Layout {
     /// The edge right of the name column resizes the column after it, and
     /// double-clicking an edge resets its column's width.
     pub fn resize_handles(&self, ui: &Ui, bottom: f32) {
-        let shown: Vec<usize> = (1..self.widths.len()).filter(|&i| self.shown(i)).collect();
+        let shown: Vec<usize> = self.order().into_iter().skip(1).collect();
         let Some(&first) = shown.first() else {
             return;
         };
@@ -197,6 +300,27 @@ impl Layout {
             ui.data_mut(|d| d.insert_persisted(self.prefs_id, prefs));
         }
     }
+}
+
+/// The column being dragged by its header, in a table's temp data.
+#[derive(Clone, Copy)]
+struct HeaderDrag(usize);
+
+/// Moves `from` in `order` next to `target`: after it if `after`, else
+/// before. The name column (0) isn't in `order`; after it is the front.
+fn move_column(order: &mut Vec<usize>, from: usize, target: usize, after: bool) {
+    let Some(at) = order.iter().position(|&c| c == from) else {
+        return;
+    };
+    let to = if target == 0 {
+        0
+    } else {
+        match order.iter().position(|&c| c == target) {
+            Some(t) => t + usize::from(after),
+            None => return,
+        }
+    };
+    crate::widgets::move_item(order, at, to);
 }
 
 /// Displayed widths of the columns after the name column, which gets the rest.
@@ -306,6 +430,35 @@ mod tests {
     }
 
     #[test]
+    fn columns_move_next_to_where_they_are_dropped() {
+        let moved = |from, target, after| {
+            let mut order = vec![1, 2, 3, 4];
+            move_column(&mut order, from, target, after);
+            order
+        };
+        assert_eq!(moved(1, 3, true), [2, 3, 1, 4]);
+        assert_eq!(moved(1, 3, false), [2, 1, 3, 4]);
+        assert_eq!(moved(4, 2, false), [1, 4, 2, 3]);
+        assert_eq!(moved(4, 0, true), [4, 1, 2, 3]);
+        assert_eq!(moved(2, 2, true), [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn prefs_from_before_column_order_load() {
+        let ctx = egui::Context::default();
+        let old = Prefs {
+            widths: vec![0.0, 100.0, 150.0, 120.0],
+            hidden: vec![false, false, true, false],
+            order: Vec::new(),
+        };
+        old.store(&ctx, &TABLE);
+        let loaded = Prefs::load(&ctx, &TABLE);
+        assert_eq!(loaded.order, [1, 2, 3]);
+        assert_eq!(loaded.widths[2], 150.0);
+        assert!(loaded.hidden[2]);
+    }
+
+    #[test]
     fn user_hidden_columns_stay_hidden() {
         let mut prefs = Prefs::new(&TABLE);
         prefs.hidden[2] = true;
@@ -330,10 +483,12 @@ mod tests {
             let output = columns
                 .columns(TableBuilder::new(ui).sense(Sense::click()))
                 .header(20.0, |mut header| {
-                    for column in 0..TABLE.columns.len() {
-                        if columns.shown(column) {
-                            rights.push(header.col(|ui| _ = ui.label("x")).1.rect.right());
-                        }
+                    for column in columns.order() {
+                        let cell = header.col(|ui| {
+                            columns.header_drag(ui, column);
+                            ui.label("x");
+                        });
+                        rights.push(cell.1.rect.right());
                     }
                 })
                 .body(|_| {});
@@ -361,6 +516,40 @@ mod tests {
                 assert_eq!(rights.len(), 4, "{width}: {rights:?}");
             }
         }
+    }
+
+    #[test]
+    fn dragging_a_header_moves_its_column() {
+        let ctx = egui::Context::default();
+        draw(&ctx, 1000.0, Vec::new());
+        let rights = draw(&ctx, 1000.0, Vec::new());
+        // Size's header, dragged onto the right half of Kind's.
+        let size = (rights[0] + rights[1]) / 2.0;
+        let kind = rights[3] - 10.0;
+        let y = 10.0;
+        let pointer = |x: f32, pressed: Option<bool>| {
+            let pos = pos2(x, y);
+            let mut events = vec![egui::Event::PointerMoved(pos)];
+            if let Some(pressed) = pressed {
+                events.push(egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: Default::default(),
+                });
+            }
+            events
+        };
+        draw(&ctx, 1000.0, pointer(size, None));
+        draw(&ctx, 1000.0, pointer(size, Some(true)));
+        for step in 1..=10 {
+            let x = size + (kind - size) * step as f32 / 10.0;
+            draw(&ctx, 1000.0, pointer(x, None));
+        }
+        draw(&ctx, 1000.0, pointer(kind, Some(false)));
+        draw(&ctx, 1000.0, Vec::new());
+        let prefs = Prefs::load(&ctx, &TABLE);
+        assert_eq!(prefs.order, [2, 3, 1]);
     }
 
     #[test]

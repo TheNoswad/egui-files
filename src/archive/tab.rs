@@ -33,7 +33,7 @@ const SIZE: usize = 1;
 const PACKED: usize = 2;
 const MODIFIED: usize = 3;
 
-static COLUMNS: list_columns::Table = list_columns::Table {
+pub static COLUMNS: list_columns::Table = list_columns::Table {
     key: "archive",
     columns: &[
         Spec {
@@ -589,13 +589,12 @@ impl ArchiveTab {
         }
         let output = table
             .header(row_height, |mut header| {
-                for (column, spec) in COLUMNS.columns.iter().enumerate() {
-                    if columns.shown(column) {
-                        let (_, cell) = header.col(|ui| {
-                            ui.strong(spec.label);
-                        });
-                        columns.context_menu(&cell);
-                    }
+                for column in columns.order() {
+                    let (_, cell) = header.col(|ui| {
+                        columns.header_drag(ui, column);
+                        ui.strong(COLUMNS.columns[column].label);
+                    });
+                    columns.context_menu(&cell);
                 }
             })
             .body(|body| {
@@ -642,19 +641,12 @@ impl ArchiveTab {
                             ui.weak(icon::LOCK).on_hover_text("Encrypted");
                         }
                     });
-                    if columns.shown(SIZE) {
-                        row.col(|ui| {
-                            ui.label(human_size(n.size));
-                        });
-                    }
-                    if columns.shown(PACKED) {
-                        row.col(|ui| {
-                            ui.label(n.packed.map(human_size).unwrap_or_default());
-                        });
-                    }
-                    if columns.shown(MODIFIED) {
-                        row.col(|ui| {
-                            crate::dates::label(ui, n.modified, false);
+                    for column in columns.order().into_iter().skip(1) {
+                        row.col(|ui| match column {
+                            SIZE => _ = ui.label(human_size(n.size)),
+                            PACKED => _ = ui.label(n.packed.map(human_size).unwrap_or_default()),
+                            MODIFIED => _ = crate::dates::label(ui, n.modified, false),
+                            _ => {}
                         });
                     }
 
