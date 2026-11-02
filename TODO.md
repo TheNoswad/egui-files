@@ -24,7 +24,7 @@
     - [ ] Moving files by touch: dragging items onto folders is gone in the mobile layout (cut and paste works)
     - [ ] Pinch to zoom: icon size in the grid, text size in the terminal
     - [ ] Open files in other apps (Android intents with a `content://` URI from a FileProvider); "Open with" too
-    - [ ] Trash tab's toolbar overflows at phone width
+    - [x] Trash tab's toolbar overflows at phone width
     - [ ] Hide the bottom bar while the on-screen keyboard is up
     - [ ] Terminal good enough to develop on (on hold: researching first). Today it runs Android's own `sh` with toybox, so no git, compilers or package manager. Needs a Linux userland, and since Android 10 apps can't execute files they download into their own storage. Options:
         - proot + a downloaded distro rootfs (Debian, Alpine) in app storage, exec routed through proot's loader shipped as a native library (how UserLAnd and AnLinux do it). Real `apt`/`apk`; ptrace overhead on syscalls; a few hundred MB and a first-run setup
@@ -32,7 +32,7 @@
         - Hand off to an installed Termux (`RUN_COMMAND` intent): little work, but needs Termux and integrates shallowly
     - [ ] Predictive back: opt in (`enableOnBackInvokedCallback`) once the manifest can say so, then target API 36; targets 35 until then
     - [x] Check on a real touchscreen that egui's own long touch and ours don't both fire
-    - [ ] Dialogs, the theme editor and the About window sized for a phone
+    - [x] Dialogs, the theme editor and the About window sized for a phone
 
 ## Proton Drive
 
