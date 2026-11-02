@@ -1,6 +1,6 @@
 //! Sortable table with name, size, modified, created and kind columns.
 
-use egui::{Align, Button, Layout, PointerButton, Pos2, Rect, RichText, Sense, TextStyle, Ui};
+use egui::{Align, Button, Layout, PointerButton, Pos2, Rect, RichText, Ui};
 use egui_extras::TableBuilder;
 use egui_phosphor::regular as icon;
 
@@ -58,7 +58,11 @@ pub fn show(
     drag_select: bool,
     actions: &mut Vec<Action>,
 ) {
-    let row_height = ui.text_style_height(&TextStyle::Body) + 6.0;
+    if crate::touch::is_touch(ui.ctx()) {
+        // No gaps between rows that a tap would fall into.
+        ui.spacing_mut().item_spacing.y = 0.0;
+    }
+    let row_height = crate::widgets::row_height(ui);
     let stride = row_height + ui.spacing().item_spacing.y;
     // Dragging a row from outside its name selects, like dragging empty space.
     let mut drag_select = drag_select;
@@ -68,10 +72,13 @@ pub fn show(
     let colors = crate::theme::colors(ui.ctx());
     colors.apply_to_list(ui.visuals_mut());
     let columns = list_columns::Layout::new(ui, &COLUMNS);
+    let drag_scroll = crate::touch::drag_scroll(ui.ctx());
+    let sense = crate::touch::item_sense(ui.ctx());
     let mut table = TableBuilder::new(ui)
+        .drag_to_scroll(drag_scroll)
         .id_salt(("details", tab.id))
         .striped(true)
-        .sense(Sense::click_and_drag())
+        .sense(sense)
         .cell_layout(Layout::left_to_right(Align::Center));
     table = columns.columns(table);
     if let Some(row) = tab.scroll_to {
@@ -90,8 +97,9 @@ pub fn show(
             for column in columns.order() {
                 let key = keys[column];
                 let mut button = None;
+                let mut area = None;
                 let (_, cell) = header.col(|ui| {
-                    columns.header_drag(ui, column);
+                    area = Some(columns.header_drag(ui, column));
                     let arrow = match (tab.sort.key == key, tab.sort.ascending) {
                         (false, _) => "",
                         (true, true) => icon::CARET_UP,
@@ -101,7 +109,10 @@ pub fn show(
                     let text = RichText::new(format!("{label} {arrow}")).strong();
                     button = Some(ui.add(Button::new(text).frame(false)));
                 });
-                let response = button.map_or(cell.clone(), |button| cell.union(button));
+                let response = [button, area]
+                    .into_iter()
+                    .flatten()
+                    .fold(cell, |response, other| response.union(other));
                 if response.clicked() {
                     actions.push(Action::SortBy(key));
                 }

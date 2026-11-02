@@ -14,7 +14,7 @@ use std::{
 
 use egui::{
     Align, Button, CentralPanel, Context, Id, Layout, Modal, Modifiers, Panel, RichText, Sense,
-    TextEdit, TextStyle, Ui,
+    TextEdit, Ui,
 };
 use egui_extras::TableBuilder;
 use egui_phosphor::regular as icon;
@@ -495,11 +495,13 @@ impl TrashTab {
     }
 
     fn table(&self, ui: &mut Ui, visible: &[usize], actions: &mut Vec<Action>) {
-        let row_height = ui.text_style_height(&TextStyle::Body) + 6.0;
+        let row_height = crate::widgets::row_height(ui);
         let colors = crate::theme::colors(ui.ctx());
         colors.apply_to_list(ui.visuals_mut());
         let columns = list_columns::Layout::new(ui, &COLUMNS);
+        let drag_scroll = crate::touch::drag_scroll(ui.ctx());
         let table = TableBuilder::new(ui)
+            .drag_to_scroll(drag_scroll)
             .id_salt(("trash", self.id))
             .striped(true)
             .sense(Sense::click())
@@ -516,8 +518,9 @@ impl TrashTab {
                 for column in columns.order() {
                     let key = keys[column];
                     let mut button = None;
+                    let mut area = None;
                     let (_, cell) = header.col(|ui| {
-                        columns.header_drag(ui, column);
+                        area = Some(columns.header_drag(ui, column));
                         let arrow = match (self.sort.0 == key, self.sort.1) {
                             (false, _) => "",
                             (true, true) => icon::CARET_UP,
@@ -527,7 +530,10 @@ impl TrashTab {
                         let text = RichText::new(format!("{label} {arrow}")).strong();
                         button = Some(ui.add(Button::new(text).frame(false)));
                     });
-                    let response = button.map_or(cell.clone(), |button| cell.union(button));
+                    let response = [button, area]
+                        .into_iter()
+                        .flatten()
+                        .fold(cell, |response, other| response.union(other));
                     if response.clicked() {
                         actions.push(Action::SortBy(key));
                     }

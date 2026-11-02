@@ -8,9 +8,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use egui::{
-    Align, Button, Color32, CornerRadius, Layout, Rect, RichText, Sense, TextStyle, Ui, vec2,
-};
+use egui::{Align, Button, Color32, CornerRadius, Layout, Rect, RichText, Sense, Ui, vec2};
 use egui_extras::TableBuilder;
 use egui_phosphor::regular as icon;
 
@@ -22,7 +20,7 @@ use super::{
 use crate::list_columns::{self, Spec};
 
 fn row_height(ui: &Ui) -> f32 {
-    ui.text_style_height(&TextStyle::Body) + 6.0
+    crate::widgets::row_height(ui)
 }
 
 fn time(seconds: i64) -> Option<SystemTime> {
@@ -125,7 +123,9 @@ pub fn tree_table(
     let columns = list_columns::Layout::new(ui, &TREE_COLUMNS);
     let colors = crate::theme::colors(ui.ctx());
     colors.apply_to_list(ui.visuals_mut());
+    let drag_scroll = crate::touch::drag_scroll(ui.ctx());
     let mut table = TableBuilder::new(ui)
+        .drag_to_scroll(drag_scroll)
         .id_salt(("usage-tree", salt))
         .striped(true)
         .sense(Sense::click())
@@ -369,7 +369,9 @@ pub fn types(
         }
     }
     let mut toggle = None;
+    let drag_scroll = crate::touch::drag_scroll(ui.ctx());
     TableBuilder::new(ui)
+        .drag_to_scroll(drag_scroll)
         .id_salt("usage-types")
         .striped(true)
         .sense(Sense::click())
@@ -468,7 +470,9 @@ pub fn largest(
     let base = tree.path(focus);
     let colors = crate::theme::colors(ui.ctx());
     colors.apply_to_list(ui.visuals_mut());
+    let drag_scroll = crate::touch::drag_scroll(ui.ctx());
     TableBuilder::new(ui)
+        .drag_to_scroll(drag_scroll)
         .id_salt("usage-largest")
         .striped(true)
         .sense(Sense::click())

@@ -5,6 +5,10 @@
 //!
 //! The rectangle's start is kept relative to the content, not the screen, so
 //! it stays put while the list scrolls under it.
+//!
+//! In the mobile layout a drag scrolls instead, and a long press starts the
+//! selection: it selects the item pressed, and with a drag after it, the
+//! items passed over, adding to what's selected. No rectangle shows there.
 
 use std::{collections::HashSet, path::PathBuf, sync::Arc};
 
@@ -63,12 +67,23 @@ pub(crate) fn update<R>(
     });
     let viewport = scroll.inner_rect;
 
+    let touch = crate::touch::is_touch(ctx);
+    let start = if touch {
+        crate::touch::long_press_started(ctx)
+    } else {
+        start
+    };
     let mut state = ctx.data(|d| d.get_temp::<State>(id));
     if start
         && let Some(press) = press
         && viewport.contains(press)
     {
-        let keep = modifiers.command || modifiers.shift;
+        if touch {
+            actions.push(Action::StartSelecting);
+        }
+        // A long press adds to a touch selection under way, but otherwise
+        // starts afresh: a file only tapped to preview it stays out.
+        let keep = modifiers.command || modifiers.shift || touch && tab.selecting;
         state = Some(State {
             origin: press - layout.content_origin,
             base: Arc::new(if keep {
@@ -105,10 +120,12 @@ pub(crate) fn update<R>(
         state.hits = Some(hits);
     }
 
-    let color = crate::theme::colors(ctx).files.selection;
-    let painter = ui.painter_at(viewport);
-    painter.rect_filled(rect, 2.0, color.gamma_multiply(0.25));
-    painter.rect_stroke(rect, 2.0, Stroke::new(1.0, color), StrokeKind::Inside);
+    if !touch {
+        let color = crate::theme::colors(ctx).files.selection;
+        let painter = ui.painter_at(viewport);
+        painter.rect_filled(rect, 2.0, color.gamma_multiply(0.25));
+        painter.rect_stroke(rect, 2.0, Stroke::new(1.0, color), StrokeKind::Inside);
+    }
 
     // Scroll faster the further past the edge the pointer is.
     let past = if pointer.y < viewport.top() {

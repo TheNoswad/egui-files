@@ -343,6 +343,7 @@ impl View {
                     }
                     ui.with_layout(Layout::top_down(Align::Min), |ui| {
                         ScrollArea::vertical()
+                            .scroll_source(crate::touch::scroll_source(ui.ctx()))
                             .id_salt("properties-body")
                             .auto_shrink(false)
                             .show(ui, |ui| {

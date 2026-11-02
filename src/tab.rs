@@ -64,6 +64,8 @@ pub enum AppAction {
     /// Sort new browser tabs this way.
     SetDefaultSort(Sort),
     TogglePreview,
+    /// Show the preview, opening it if it's closed.
+    ShowPreview,
     /// Show an archive's contents in a tab.
     OpenArchive(PathBuf),
     /// Open files with an app, or ask which when `None`.
@@ -101,6 +103,8 @@ pub enum Action {
     SelectAll,
     /// Replace the selection (drag-to-select).
     SetSelection(HashSet<PathBuf>),
+    /// A long press began a touch selection; see `BrowserTab::selecting`.
+    StartSelecting,
     MoveCursor {
         delta: isize,
         extend: bool,
@@ -152,6 +156,8 @@ pub enum Action {
     StartJob(JobKind),
     ToggleHidden,
     TogglePreview,
+    /// Show the preview of the selection, opening it if it's closed.
+    ShowPreview,
     /// Open the selection with an app, or ask which when `None`.
     OpenWith(Option<open_with::Target>),
     /// Open the selected files in editor tabs.
@@ -204,6 +210,10 @@ pub struct BrowserTab {
     error: Option<String>,
     #[serde(skip)]
     pub selection: HashSet<PathBuf>,
+    /// Selecting by touch, after a long press: taps add and remove items
+    /// rather than open them, until nothing is selected.
+    #[serde(skip)]
+    pub selecting: bool,
     #[serde(skip)]
     anchor: Option<usize>,
     #[serde(skip)]
@@ -223,6 +233,9 @@ pub struct BrowserTab {
     /// Widths of a toolbar button and separator, with spacing, last frame.
     #[serde(skip)]
     toolbar_metrics: [f32; 2],
+    /// The toolbar's height last frame.
+    #[serde(skip)]
+    toolbar_height: f32,
     #[serde(skip)]
     rename: Option<Rename>,
     /// Listings of the extra folders shown by the columns view.
@@ -256,6 +269,8 @@ impl BrowserTab {
             stale: false,
             error: None,
             selection: HashSet::new(),
+            toolbar_height: 0.0,
+            selecting: false,
             anchor: None,
             cursor: None,
             scroll_to: None,
@@ -439,6 +454,7 @@ impl BrowserTab {
         self.column_cache.clear();
         self.error = None;
         self.selection.clear();
+        self.selecting = false;
         self.anchor = None;
         self.cursor = None;
         self.filter.clear();
@@ -519,8 +535,20 @@ impl BrowserTab {
         }
         self.mouse_history(ui, &mut actions);
 
-        Panel::top(Id::new(("toolbar", self.id)))
-            .show(ui, |ui| self.toolbar(ui, shared, &mut actions));
+        if self.selection.is_empty() {
+            self.selecting = false;
+        }
+        Panel::top(Id::new(("toolbar", self.id))).show(ui, |ui| {
+            // A touch selection's bar takes the toolbar's place, as tall,
+            // so the items don't move under the finger.
+            if self.selecting {
+                ui.set_min_height(self.toolbar_height);
+                self.selecting_bar(ui, &mut actions);
+            } else {
+                self.toolbar(ui, shared, &mut actions);
+                self.toolbar_height = ui.min_rect().height();
+            }
+        });
         if self.view == ViewMode::Columns {
             self.prepare_columns();
         }
@@ -1159,6 +1187,35 @@ impl BrowserTab {
             });
     }
 
+    /// Says how many items a touch selection has, with buttons to select
+    /// them all or stop selecting; long-pressing them opens their menu.
+    fn selecting_bar(&self, ui: &mut Ui, actions: &mut Vec<Action>) {
+        ui.horizontal_centered(|ui| {
+            if ui
+                .add(Button::new(icon::X).frame_when_inactive(false))
+                .on_hover_text("Stop selecting")
+                .clicked()
+            {
+                actions.push(Action::ClearSelection);
+            }
+            let count = self.selection.len();
+            ui.label(if count == 1 {
+                "1 selected".to_owned()
+            } else {
+                format!("{count} selected")
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add(Button::new(format!("{} All", icon::CHECKS)).frame_when_inactive(false))
+                    .on_hover_text("Select all")
+                    .clicked()
+                {
+                    actions.push(Action::SelectAll);
+                }
+            });
+        });
+    }
+
     fn status_bar(&self, ui: &mut Ui, visible: &[usize]) {
         ui.horizontal(|ui| {
             ui.label(format!("{} items", visible.len()));
@@ -1505,6 +1562,7 @@ impl BrowserTab {
                 self.selection = selection;
                 self.anchor = None;
             }
+            Action::StartSelecting => self.selecting = true,
             Action::ClearSelection => {
                 self.selection.clear();
                 self.anchor = None;
@@ -1520,6 +1578,7 @@ impl BrowserTab {
             }
             Action::ToggleHidden => shared.show_hidden = !shared.show_hidden,
             Action::TogglePreview => shared.app_actions.push(AppAction::TogglePreview),
+            Action::ShowPreview => shared.app_actions.push(AppAction::ShowPreview),
         }
     }
 

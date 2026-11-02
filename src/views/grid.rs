@@ -1,6 +1,6 @@
 //! Large-icon grid view with optional image thumbnails; hovered videos play inline.
 
-use egui::{Align, Color32, FontId, Id, Rect, ScrollArea, Sense, Ui, pos2, text::LayoutJob, vec2};
+use egui::{Align, Color32, FontId, Id, Rect, ScrollArea, Ui, pos2, text::LayoutJob, vec2};
 
 use crate::{
     images, preview,
@@ -22,6 +22,7 @@ pub fn show(
     // Every cell's rectangle on screen, for drag selection.
     let mut cells = Vec::with_capacity(visible.len());
     let output = ScrollArea::vertical()
+        .scroll_source(crate::touch::scroll_source(ui.ctx()))
         .id_salt(("grid", tab.id))
         .auto_shrink(false)
         .show(ui, |ui| {
@@ -30,7 +31,8 @@ pub fn show(
                 for (index, &entry_index) in visible.iter().enumerate() {
                     let entry = &tab.entries()[entry_index];
                     let selected = tab.selection.contains(&entry.path);
-                    let (rect, response) = ui.allocate_exact_size(cell, Sense::click_and_drag());
+                    let sense = crate::touch::item_sense(ui.ctx());
+                    let (rect, response) = ui.allocate_exact_size(cell, sense);
                     cells.push((index, rect));
                     if tab.scroll_to == Some(index) {
                         response.scroll_to_me(None);

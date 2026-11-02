@@ -124,6 +124,7 @@ pub fn ui(ui: &mut Ui, tab: &mut SettingsTab, app: &mut Access) {
         ui.separator();
     }
     ScrollArea::vertical()
+        .scroll_source(crate::touch::scroll_source(ui.ctx()))
         .auto_shrink(false)
         .id_salt(("settings", tab.id))
         .show(ui, |ui| {

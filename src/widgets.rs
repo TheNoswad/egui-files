@@ -1,8 +1,8 @@
 //! Small reusable widgets for virtualized, fixed-height row lists.
 
 use egui::{
-    Align2, Color32, FontId, Response, RichText, Sense, TextStyle, Ui,
-    scroll_area::ScrollAreaOutput, text::LayoutJob, vec2,
+    Align2, Color32, FontId, Response, RichText, TextStyle, Ui, scroll_area::ScrollAreaOutput,
+    text::LayoutJob, vec2,
 };
 
 /// An icon in its theme color, then a name.
@@ -16,9 +16,18 @@ pub fn icon_label(ui: &mut Ui, icon: &str, color: Option<Color32>, name: impl In
     ui.label(name.into());
 }
 
+/// How tall a list row is: tall enough to tap in the mobile layout.
 pub fn row_height(ui: &Ui) -> f32 {
-    ui.text_style_height(&TextStyle::Body) + 6.0
+    let text = ui.text_style_height(&TextStyle::Body) + 6.0;
+    if crate::touch::is_touch(ui.ctx()) {
+        text.max(TOUCH_ROW_HEIGHT)
+    } else {
+        text
+    }
 }
+
+/// The least height of a list row in the mobile layout.
+const TOUCH_ROW_HEIGHT: f32 = 36.0;
 
 pub struct ListRow<'a> {
     pub icon: &'a str,
@@ -42,7 +51,8 @@ impl ListRow<'_> {
     /// Allocates a full-width clickable row. Expects `item_spacing.y == 0`.
     pub fn show(self, ui: &mut Ui) -> Response {
         let size = vec2(ui.available_width(), row_height(ui));
-        let (rect, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
+        let sense = crate::touch::item_sense(ui.ctx());
+        let (rect, response) = ui.allocate_exact_size(size, sense);
         if !ui.is_rect_visible(rect) {
             return response;
         }

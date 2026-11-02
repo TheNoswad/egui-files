@@ -312,8 +312,10 @@ pub struct Themes {
     watcher: Option<notify::RecommendedWatcher>,
     changed: Arc<AtomicBool>,
     pub prefs: Prefs,
-    /// The prefs and generation last installed into egui.
-    installed: Option<(Prefs, u64)>,
+    /// The prefs, generation and touch sizing last installed into egui.
+    installed: Option<(Prefs, u64, bool)>,
+    /// Sizes everything for touch, for the mobile layout.
+    pub touch: bool,
     /// A theme hovered in a theme menu, shown in place of the current mode's
     /// theme until the pointer leaves it.
     preview: Option<String>,
@@ -342,6 +344,7 @@ impl Themes {
             changed: Arc::default(),
             prefs,
             installed: None,
+            touch: false,
             preview: None,
             hovered: None,
             generation: 0,
@@ -518,12 +521,19 @@ impl Themes {
         if let Some(name) = &self.preview {
             *prefs.name_mut(ctx.theme()) = name.clone();
         }
-        let current = (prefs, self.generation + self.editor.generation());
+        let current = (
+            prefs,
+            self.generation + self.editor.generation(),
+            self.touch,
+        );
         if self.installed.as_ref() != Some(&current) {
             let mut colors = Vec::new();
             for theme in [Theme::Dark, Theme::Light] {
                 let name = current.0.name(theme).to_owned();
-                let resolved = self.resolve(&name, self.editor.edited(&name));
+                let mut resolved = self.resolve(&name, self.editor.edited(&name));
+                if self.touch {
+                    crate::touch::touch_style(&mut resolved.style);
+                }
                 ctx.set_style_of(theme, resolved.style);
                 colors.push(Arc::new(resolved.app));
                 self.theme_fonts[theme as usize] = resolved.fonts;

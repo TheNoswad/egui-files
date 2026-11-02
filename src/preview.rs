@@ -131,6 +131,7 @@ fn read_text(path: &Path) -> Option<(String, bool)> {
 /// The preview pane, showing the selection of the tab files were last browsed in.
 pub fn pane(ui: &mut Ui, entry: Option<&Entry>, shared: &mut Shared, actions: &mut Vec<Action>) {
     egui::ScrollArea::vertical()
+        .scroll_source(crate::touch::scroll_source(ui.ctx()))
         .id_salt("preview-pane")
         .auto_shrink(false)
         .show(ui, |ui| match entry {

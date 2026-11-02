@@ -107,7 +107,26 @@ pub(crate) fn item_interaction(
         actions.push(Action::StartJob(job));
     }
 
-    if response.double_clicked() {
+    if crate::touch::is_touch(&response.ctx) {
+        // A tap opens a folder and previews a file (with buttons there to
+        // open it), or while selecting, adds or removes the item.
+        if response.clicked() {
+            if tab.selecting {
+                actions.push(Action::Select {
+                    index,
+                    modifiers: Modifiers::COMMAND,
+                });
+            } else if entry.is_dir {
+                actions.push(Action::Activate(entry.path.clone()));
+            } else {
+                actions.push(Action::Select {
+                    index,
+                    modifiers: Modifiers::NONE,
+                });
+                actions.push(Action::ShowPreview);
+            }
+        }
+    } else if response.double_clicked() {
         actions.push(Action::Activate(entry.path.clone()));
     } else if response.clicked() {
         let modifiers = response.ctx.input(|i| i.modifiers);

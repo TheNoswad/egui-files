@@ -32,6 +32,7 @@ mod terminal_panel;
 mod theme;
 mod thumbnails;
 mod titlebar;
+mod touch;
 mod trash;
 mod tree;
 mod usage;
@@ -58,13 +59,19 @@ fn main() -> eframe::Result {
     if let Some(code) = usage::run_helper() {
         std::process::exit(code);
     }
+    // The mobile layout keeps the system's frame and goes narrower.
+    let mobile = app::saved_mobile("egui-files");
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("egui-files")
             .with_app_id("egui-files")
             .with_inner_size([1100.0, 700.0])
-            .with_min_inner_size([480.0, 320.0])
-            .with_decorations(!titlebar::saved_enabled("egui-files")),
+            .with_min_inner_size(if mobile {
+                app::MOBILE_MIN_SIZE
+            } else {
+                app::DESKTOP_MIN_SIZE
+            })
+            .with_decorations(mobile || !titlebar::saved_enabled("egui-files")),
         wgpu_options: wgpu_options(),
         ..Default::default()
     };

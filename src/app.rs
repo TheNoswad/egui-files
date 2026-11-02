@@ -1,4 +1,9 @@
-//! Top-level application: menu bar and the dock of tabs and panes.
+//! Top-level application: menu bar and the dock of tabs and panes, or the
+//! mobile layout.
+
+mod mobile;
+
+pub use mobile::{DESKTOP_MIN_SIZE, MIN_SIZE as MOBILE_MIN_SIZE, saved_enabled as saved_mobile};
 
 use std::{
     collections::{HashMap, HashSet},
@@ -114,6 +119,9 @@ struct Persisted {
     /// The sizes the user dragged the panes to.
     #[serde(default)]
     pane_sizes: PaneSizes,
+    /// Showing the mobile layout.
+    #[serde(default)]
+    mobile: bool,
 }
 
 fn default_true() -> bool {
@@ -155,6 +163,7 @@ struct PersistedRef<'a> {
     keymap: &'a crate::keymap::Keymap,
     titlebar: &'a crate::titlebar::Prefs,
     pane_sizes: &'a PaneSizes,
+    mobile: bool,
 }
 
 /// The panes a fresh layout starts with.
@@ -418,6 +427,8 @@ pub struct FilesApp {
     focused_window: Option<u64>,
     /// Tabs just dropped outside their window, which may be over another.
     pending_drop: Option<tab_windows::Pending>,
+    mobile: mobile::Mobile,
+    long_press: crate::touch::LongPress,
     ctx: egui::Context,
 }
 
@@ -463,6 +474,7 @@ impl FilesApp {
                 keymap: Default::default(),
                 titlebar: Default::default(),
                 pane_sizes: PaneSizes::default(),
+                mobile: false,
             });
         let Persisted {
             dock,
@@ -492,6 +504,7 @@ impl FilesApp {
             keymap,
             titlebar,
             pane_sizes,
+            mobile,
         } = persisted;
         crate::keymap::set(&cc.egui_ctx, keymap);
         editor::highlight::preload();
@@ -592,6 +605,8 @@ impl FilesApp {
             titlebar,
             focused_window: None,
             pending_drop: None,
+            mobile: mobile::Mobile::new(mobile),
+            long_press: Default::default(),
             ctx: cc.egui_ctx.clone(),
         }
     }
@@ -880,7 +895,11 @@ impl FilesApp {
         if source.is_empty() {
             return;
         }
-        let open_in = self.shared.properties.prefs.open_in;
+        let open_in = if self.mobile.enabled {
+            OpenIn::Tab
+        } else {
+            self.shared.properties.prefs.open_in
+        };
         if let Some(id) = self.find_tab(|t| t.properties().is_some_and(|p| p.properties == source))
         {
             self.focus_tab(id);
@@ -1133,9 +1152,34 @@ impl FilesApp {
         }
     }
 
+    /// Opens a pane, or brings it to the front; in the mobile layout, as
+    /// its sheet.
+    fn show_pane(&mut self, ctx: &egui::Context, pane: Pane) {
+        if self.mobile.enabled {
+            if self.mobile.sheet != Some(mobile::Sheet::Pane(pane)) {
+                self.show_or_toggle_pane(ctx, pane);
+            }
+        } else if !self.has_pane(pane) {
+            self.toggle_pane(ctx, pane);
+        } else {
+            self.focus_pane(pane);
+        }
+    }
+
     /// Like `toggle_pane`, but brings a pane hidden behind another tab to the
     /// front instead of closing it.
     fn show_or_toggle_pane(&mut self, ctx: &egui::Context, pane: Pane) {
+        if self.mobile.enabled {
+            self.mobile.toggle(mobile::Sheet::Pane(pane));
+            if pane == Pane::Terminal {
+                if self.mobile.sheet.is_some() {
+                    self.terminal.focus();
+                } else {
+                    self.terminal.surrender_focus(ctx);
+                }
+            }
+            return;
+        }
         let hidden = self
             .dock
             .find_tab_from(|t| t.pane() == Some(pane))
@@ -1567,6 +1611,14 @@ impl FilesApp {
                         self.terminal.follow_menu(ui);
                     });
                     if ui
+                        .button(format!("{} Mobile layout", icon::DEVICE_MOBILE))
+                        .on_hover_text("One tab at a time, with a bar along the bottom")
+                        .clicked()
+                    {
+                        self.set_mobile(&ctx, true);
+                        ui.close();
+                    }
+                    if ui
                         .button("Reset layout")
                         .on_hover_text("Put the panes back where they started; tabs stay open")
                         .clicked()
@@ -1652,6 +1704,8 @@ struct Viewer<'a> {
     pinned: &'a HashSet<u64>,
     /// Drawing a tab window rather than the main one.
     in_window: bool,
+    /// Drawing the mobile layout, which has no tab windows.
+    mobile: bool,
     /// Tabs in the window being drawn.
     tabs: usize,
     themes: &'a mut Themes,
@@ -1747,7 +1801,7 @@ impl TabViewer for Viewer<'_> {
             ui.close();
         }
         // Tabs can't be dragged from one window to another.
-        if tab.pane().is_none() {
+        if tab.pane().is_none() && !self.mobile {
             let (label, action) = if self.in_window {
                 (
                     format!("{} Move to main window", icon::ARROW_SQUARE_IN),
@@ -1986,6 +2040,7 @@ impl FilesApp {
                     browser_count: usize::MAX,
                     pinned: &self.pinned,
                     in_window: true,
+                    mobile: false,
                     tabs: window.dock.iter_all_tabs().count(),
                     themes: &mut self.themes,
                     new_tabs: &mut self.new_tabs,
@@ -2197,8 +2252,10 @@ impl FilesApp {
                 self.dock.remove_tab(path);
             }
             self.terminal.reset();
-        } else if !self.has_pane(Pane::Terminal) {
-            // Closed with its tab's button; the shells keep running.
+        } else if !self.has_pane(Pane::Terminal)
+            && self.mobile.sheet != Some(mobile::Sheet::Pane(Pane::Terminal))
+        {
+            // Closed with its tab's button (or its sheet); the shells keep running.
             self.terminal.surrender_focus(ctx);
         }
     }
@@ -2358,6 +2415,7 @@ impl FilesApp {
             AppAction::FocusTab(id) => self.focus_tab(id),
             AppAction::SetDefaultSort(sort) => self.new_tabs.sort = sort,
             AppAction::TogglePreview => self.show_or_toggle_pane(ctx, Pane::Preview),
+            AppAction::ShowPreview => self.show_pane(ctx, Pane::Preview),
             AppAction::OpenArchive(path) => self.open_archive(window, path),
             AppAction::OpenWith(request, Some(target)) => {
                 self.open_with(ctx, request, target);
@@ -2370,6 +2428,8 @@ impl FilesApp {
             AppAction::Reveal(path) => self.reveal(window, path),
             AppAction::DiskUsage(path) => self.open_usage(window, path),
             AppAction::Properties(source) => self.open_properties(source),
+            // The mobile layout has one window.
+            AppAction::MoveToNewWindow(_) if self.mobile.enabled => {}
             AppAction::MoveToNewWindow(id) => self.move_tab_to(id, true),
             AppAction::MoveToMainWindow(id) => self.move_tab_to(id, false),
         }
@@ -2377,8 +2437,33 @@ impl FilesApp {
 }
 
 impl eframe::App for FilesApp {
+    /// Lays the app out clear of a phone's status and navigation bars, with
+    /// the panels' color behind them.
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        let safe = ui.ctx().content_rect();
+        if safe == ui.max_rect() {
+            self.window_ui(ui);
+        } else {
+            ui.painter()
+                .rect_filled(ui.max_rect(), 0.0, ui.visuals().panel_fill);
+            let mut inner = ui.new_child(egui::UiBuilder::new().max_rect(safe));
+            self.window_ui(&mut inner);
+        }
+    }
+
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        self.input_hook(ctx, raw_input);
+    }
+
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        self.save_state(storage);
+    }
+}
+
+impl FilesApp {
+    fn window_ui(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
+        self.themes.touch = self.mobile.enabled;
         self.themes.update(&ctx);
         self.shared.images.begin_frame();
         self.shared.videos.begin_frame();
@@ -2392,6 +2477,16 @@ impl eframe::App for FilesApp {
         }
         self.quit_guard(&ctx);
         self.update_active_browser();
+        let mut mobile_tab = self.mobile.enabled.then(|| self.mobile_current()).flatten();
+        if self.mobile.enabled {
+            self.track_openers(mobile_tab);
+            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::BrowserBack)) {
+                self.mobile_back(&ctx, mobile_tab);
+                mobile_tab = self.mobile_current();
+            }
+        }
+        crate::touch::set_touch(&ctx, self.mobile.enabled);
+        self.long_press.wake(&ctx);
         crate::keymap::end_stale_capture(&ctx);
         self.global_shortcuts(&ctx);
         // Keys go to the focused tab; with a pane focused, to the browser tab
@@ -2407,15 +2502,22 @@ impl eframe::App for FilesApp {
         self.shared.focused_tab = match self.dock.find_active_focused() {
             _ if self.shared.open_with.is_asking() => None,
             _ if !self.confirm_close.is_empty() || self.confirm_quit => None,
+            // The tab is hidden behind a sheet.
+            _ if self.mobile.enabled && self.mobile.sheet.is_some() => None,
             _ if in_window.is_some() => in_window.flatten(),
             _ if self.terminal.has_focus(&ctx) => None,
             Some((_, tab)) if tab.pane().is_none() => Some(tab.id()),
             _ => self.active_browser,
         };
-        self.shared.preview_shown = self.has_pane(Pane::Preview);
+        self.shared.preview_shown = if self.mobile.enabled {
+            self.mobile.sheet == Some(mobile::Sheet::Pane(Pane::Preview))
+        } else {
+            self.has_pane(Pane::Preview)
+        };
         self.place_dropped(&ctx);
 
-        let custom = self.titlebar.enabled;
+        // The mobile layout keeps the system's frame on the desktop.
+        let custom = self.titlebar.enabled && !self.mobile.enabled;
         if self.decorated == custom {
             self.decorated = !custom;
             ctx.send_viewport_cmd_to(
@@ -2459,14 +2561,15 @@ impl eframe::App for FilesApp {
                 self.toggle_pane(&ctx, pane);
             }
             crate::titlebar::resize_edges(&ctx);
-        } else {
+        } else if !self.mobile.enabled {
             Panel::top("menu_bar").show(ui, |ui| self.menu_bar(ui));
         }
         self.about.ui(&ctx);
         if self.themes.editor.open {
             self.themes.editor_ui(&ctx);
         }
-        if !self.shared.jobs.is_empty() {
+        // The mobile layout shows them above its bar.
+        if !self.shared.jobs.is_empty() && !self.mobile.enabled {
             Panel::bottom("jobs").show(ui, |ui| self.shared.jobs.ui(ui));
         }
 
@@ -2496,44 +2599,56 @@ impl eframe::App for FilesApp {
             browser_count,
             pinned: &self.pinned,
             in_window: false,
+            mobile: self.mobile.enabled,
             tabs: self.dock.iter_all_tabs().count(),
             themes: &mut self.themes,
             new_tabs: &mut self.new_tabs,
             titlebar: &mut self.titlebar,
         };
         let mut before = None;
-        CentralPanel::default()
-            .frame(egui::Frame::NONE)
-            .show(ui, |ui| {
-                self.dock_size = ui.available_size();
-                for pane in std::mem::take(&mut self.pending_panes) {
-                    dock_pane(&mut self.dock, &mut self.pane_sizes, pane, self.dock_size);
-                }
-                self.pane_sizes
-                    .fit(self.dock.main_surface_mut(), self.dock_size, None);
-                let fractions = PaneSizes::before(self.dock.main_surface());
-                before = Some(tab_windows::Before::of(
-                    ui.ctx(),
-                    &self.dock,
-                    Id::new("dock"),
-                ));
-                DockArea::new(&mut self.dock)
-                    .id(Id::new("dock"))
-                    .style(Style::from_egui(ui.style()))
-                    .show_add_buttons(true)
-                    // `add_button_rect` assumes these.
-                    .show_leaf_collapse_buttons(false)
-                    .show_leaf_close_all_buttons(true)
-                    .show_inside(ui, &mut viewer);
-                self.pane_sizes.note_drags(
-                    self.dock.main_surface_mut(),
-                    &fractions,
-                    self.dock_size,
-                );
-                if self.add_menu.is_none() {
-                    add_button_hints(ui, &self.dock, &Style::from_egui(ui.style()));
-                }
-            });
+        let mut mobile_requests = Vec::new();
+        if self.mobile.enabled {
+            mobile_requests = mobile::show(
+                ui,
+                &mut self.dock,
+                &mut self.mobile,
+                &mut viewer,
+                mobile_tab,
+            );
+        } else {
+            CentralPanel::default()
+                .frame(egui::Frame::NONE)
+                .show(ui, |ui| {
+                    self.dock_size = ui.available_size();
+                    for pane in std::mem::take(&mut self.pending_panes) {
+                        dock_pane(&mut self.dock, &mut self.pane_sizes, pane, self.dock_size);
+                    }
+                    self.pane_sizes
+                        .fit(self.dock.main_surface_mut(), self.dock_size, None);
+                    let fractions = PaneSizes::before(self.dock.main_surface());
+                    before = Some(tab_windows::Before::of(
+                        ui.ctx(),
+                        &self.dock,
+                        Id::new("dock"),
+                    ));
+                    DockArea::new(&mut self.dock)
+                        .id(Id::new("dock"))
+                        .style(Style::from_egui(ui.style()))
+                        .show_add_buttons(true)
+                        // `add_button_rect` assumes these.
+                        .show_leaf_collapse_buttons(false)
+                        .show_leaf_close_all_buttons(true)
+                        .show_inside(ui, &mut viewer);
+                    self.pane_sizes.note_drags(
+                        self.dock.main_surface_mut(),
+                        &fractions,
+                        self.dock_size,
+                    );
+                    if self.add_menu.is_none() {
+                        add_button_hints(ui, &self.dock, &Style::from_egui(ui.style()));
+                    }
+                });
+        }
         let Panes {
             sidebar_response,
             preview_actions,
@@ -2544,6 +2659,14 @@ impl eframe::App for FilesApp {
             self.pop_out(&ctx, &before);
         }
 
+        // Picking a place goes back to the tab it shows.
+        if sidebar_response.target.is_some()
+            || sidebar_response.open_trash
+            || sidebar_response.analyze.is_some()
+            || sidebar_response.properties.is_some()
+        {
+            self.mobile.sheet = None;
+        }
         if let Some((path, new_tab)) = sidebar_response.target {
             self.go_to(path, new_tab);
         }
@@ -2576,20 +2699,25 @@ impl eframe::App for FilesApp {
         for leaf in add_requests {
             self.add_to_leaf(None, leaf, NewTab::Browser);
         }
+        for request in mobile_requests {
+            self.mobile_request(&ctx, request);
+        }
         let window_actions = self.tab_windows_ui(&ctx);
-        let trash_open = self.all_tabs().any(DockTab::is_trash);
-        if let Some((leaf, kind)) = self.add_menu_ui(&ctx, None, trash_open) {
-            self.add_to_leaf(None, leaf, kind);
+        if !self.mobile.enabled {
+            let trash_open = self.all_tabs().any(DockTab::is_trash);
+            if let Some((leaf, kind)) = self.add_menu_ui(&ctx, None, trash_open) {
+                self.add_to_leaf(None, leaf, kind);
+            }
+            let style = Style::from_egui(&ctx.global_style());
+            let (menu, folders) = tab_bar_ui(&ctx, &self.dock, &tab_buttons, None, &style);
+            if menu.is_some() {
+                self.add_menu = menu;
+            }
+            if let Some((leaf, folders)) = folders {
+                self.open_folders(None, leaf, folders);
+            }
+            self.place_split_ui(&ctx);
         }
-        let style = Style::from_egui(&ctx.global_style());
-        let (menu, folders) = tab_bar_ui(&ctx, &self.dock, &tab_buttons, None, &style);
-        if menu.is_some() {
-            self.add_menu = menu;
-        }
-        if let Some((leaf, folders)) = folders {
-            self.open_folders(None, leaf, folders);
-        }
-        self.place_split_ui(&ctx);
         let actions = std::mem::take(&mut self.shared.app_actions);
         let actions = actions.into_iter().map(|action| (None, action));
         for (window, action) in actions.chain(window_actions) {
@@ -2626,7 +2754,10 @@ impl eframe::App for FilesApp {
         dnd::paint_preview(&ctx);
     }
 
-    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+    fn input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        if self.mobile.enabled {
+            self.long_press.hook(ctx, raw_input);
+        }
         if let Some(theme) = self.system_theme.get() {
             raw_input.system_theme = Some(theme);
             // Tab windows get their input from winit without this hook, and
@@ -2696,7 +2827,7 @@ impl eframe::App for FilesApp {
         );
     }
 
-    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+    fn save_state(&mut self, storage: &mut dyn eframe::Storage) {
         self.terminal.remember_dirs();
         let keymap = crate::keymap::get(&self.ctx);
         let state = PersistedRef {
@@ -2725,6 +2856,7 @@ impl eframe::App for FilesApp {
             keymap: &keymap,
             titlebar: &self.titlebar,
             pane_sizes: &self.pane_sizes,
+            mobile: self.mobile.enabled,
         };
         eframe::set_value(storage, eframe::APP_KEY, &state);
     }

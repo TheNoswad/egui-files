@@ -14,8 +14,16 @@
 - [ ] sftp etc
 - [ ] google drive
 - [ ] proton drive
-- [ ] mobile support
-    - [ ] tabs like a mobile browser
+- [ ] mobile support (the layout runs on the desktop: View → Mobile layout; `src/app/mobile.rs`)
+    - [ ] Build for Android (and iOS?), with a phone's file access
+    - [x] tabs like a mobile browser
+    - [x] Touch: drag scrolls, a tap opens, a long press opens the context menu, and a long press then a drag selects (`src/touch.rs`)
+    - [ ] Touch in the trash and archive tabs: they scroll by dragging, but a tap still selects and a double tap opens, as on the desktop
+    - [ ] Touch drag selection in the icon grid selects a rectangle; a phone would select in reading order between the two items
+    - [ ] Moving files by touch: dragging items onto folders is gone in the mobile layout (cut and paste works)
+    - [ ] Pinch to zoom: icon size in the grid, text size in the terminal
+    - [ ] Trash tab's toolbar overflows at phone width
+    - [ ] Dialogs, the theme editor and the About window sized for a phone
 
 ## Proton Drive
 

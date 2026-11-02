@@ -10,7 +10,7 @@ use std::{
 
 use egui::{
     Align, Button, CentralPanel, Context, Id, Key, Layout, Modifiers, Panel, RichText, Sense,
-    TextEdit, TextStyle, Ui,
+    TextEdit, Ui,
 };
 use egui_extras::TableBuilder;
 use egui_phosphor::regular as icon;
@@ -587,13 +587,16 @@ impl ArchiveTab {
         let Some(tree) = &self.tree else {
             return;
         };
-        let row_height = ui.text_style_height(&TextStyle::Body) + 6.0;
+        let row_height = crate::widgets::row_height(ui);
         let password = shared.archives.password(&self.archive);
         let columns = list_columns::Layout::new(ui, &COLUMNS);
+        let drag_scroll = crate::touch::drag_scroll(ui.ctx());
+        let sense = crate::touch::item_sense(ui.ctx());
         let mut table = TableBuilder::new(ui)
+            .drag_to_scroll(drag_scroll)
             .id_salt(("archive", self.id))
             .striped(true)
-            .sense(Sense::click_and_drag())
+            .sense(sense)
             .cell_layout(Layout::left_to_right(Align::Center));
         table = columns.columns(table);
         if let Some(index) = self.scroll_to {
@@ -602,11 +605,12 @@ impl ArchiveTab {
         let output = table
             .header(row_height, |mut header| {
                 for column in columns.order() {
+                    let mut area = None;
                     let (_, cell) = header.col(|ui| {
-                        columns.header_drag(ui, column);
+                        area = Some(columns.header_drag(ui, column));
                         ui.strong(COLUMNS.columns[column].label);
                     });
-                    columns.context_menu(&cell);
+                    columns.context_menu(&area.map_or(cell.clone(), |area| cell.union(area)));
                 }
             })
             .body(|body| {

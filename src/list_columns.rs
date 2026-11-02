@@ -158,12 +158,20 @@ impl Layout {
     /// Makes `column`'s header cell, the one `ui` draws, draggable onto
     /// another cell to move the column there. Call it inside the cell; a
     /// click still reaches what's in it.
-    pub fn header_drag(&self, ui: &mut Ui, column: usize) {
+    /// Also returns the whole header cell's response, so a click (or a tap)
+    /// anywhere on it sorts, not only on its label.
+    pub fn header_drag(&self, ui: &mut Ui, column: usize) -> egui::Response {
         let rect = ui.max_rect();
         let id = self.prefs_id.with(("header-drag", column));
         let dragging = ui.data(|d| d.get_temp::<HeaderDrag>(self.prefs_id));
+        // The name column stays first, so it can't be dragged.
+        let sense = if column > 0 {
+            Sense::click_and_drag()
+        } else {
+            Sense::click()
+        };
+        let response = ui.interact(rect, id, sense);
         if column > 0 {
-            let response = ui.interact(rect, id, Sense::drag());
             if response.drag_started() {
                 ui.data_mut(|d| d.insert_temp(self.prefs_id, HeaderDrag(column)));
             }
@@ -174,13 +182,13 @@ impl Layout {
             }
         }
         let Some(HeaderDrag(from)) = dragging else {
-            return;
+            return response;
         };
         let Some(pointer) = ui.ctx().pointer_latest_pos() else {
-            return;
+            return response;
         };
         if from == column || !rect.contains(pointer) {
-            return;
+            return response;
         }
         // Onto the left half of a cell goes before its column, the right
         // half after; nothing goes before the name column.
@@ -194,6 +202,7 @@ impl Layout {
             self.store(ui, prefs);
             ui.data_mut(|d| d.remove::<HeaderDrag>(self.prefs_id));
         }
+        response
     }
 
     /// Adds the shown columns to `builder`.
@@ -485,7 +494,7 @@ mod tests {
                 .header(20.0, |mut header| {
                     for column in columns.order() {
                         let cell = header.col(|ui| {
-                            columns.header_drag(ui, column);
+                            let _ = columns.header_drag(ui, column);
                             ui.label("x");
                         });
                         rights.push(cell.1.rect.right());

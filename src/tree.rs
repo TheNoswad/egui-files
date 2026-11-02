@@ -216,6 +216,7 @@ impl FolderTree {
         ui.spacing_mut().item_spacing.y = 0.0;
         let folder_color = crate::theme::colors(ui.ctx()).icon(crate::theme::IconKind::Folder);
         let output = ScrollArea::vertical()
+            .scroll_source(crate::touch::scroll_source(ui.ctx()))
             .id_salt("folder_tree")
             .auto_shrink(false)
             .show_rows(ui, row_height, rows.len(), |ui, range| {

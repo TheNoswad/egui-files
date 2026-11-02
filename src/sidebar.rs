@@ -189,7 +189,7 @@ impl Sidebar {
             let selected = current == Some(path);
             let response = ui
                 .add(Button::selectable(selected, format!("{glyph}  {label}")))
-                .interact(egui::Sense::click_and_drag())
+                .interact(crate::touch::item_sense(ui.ctx()))
                 .on_hover_text(path.display().to_string());
             if response.clicked() {
                 *target = Some((path.clone(), false));
@@ -225,115 +225,126 @@ impl Sidebar {
             response
         };
 
-        ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-            ui.with_layout(egui::Layout::top_down_justified(egui::Align::Min), |ui| {
-                ui.add_space(4.0);
-                let mut eject = None;
-                let mut previous: Option<Section> = None;
-                for section in self.layout.shown() {
-                    if previous.is_some_and(|p| p.headed() || section.headed()) {
-                        ui.add_space(8.0);
-                    }
-                    previous = Some(section);
-                    match section {
-                        Section::Places => {
-                            let shown = self
-                                .places
-                                .iter()
-                                .filter(|p| self.layout.place_shown(&p.label));
-                            for place in shown {
-                                place_button(
-                                    ui,
-                                    place.icon,
-                                    &place.label,
-                                    &place.path,
-                                    &mut |_| {},
-                                );
-                            }
+        ScrollArea::vertical()
+            .scroll_source(crate::touch::scroll_source(ui.ctx()))
+            .auto_shrink(false)
+            .show(ui, |ui| {
+                ui.with_layout(egui::Layout::top_down_justified(egui::Align::Min), |ui| {
+                    ui.add_space(4.0);
+                    let mut eject = None;
+                    let mut previous: Option<Section> = None;
+                    for section in self.layout.shown() {
+                        if previous.is_some_and(|p| p.headed() || section.headed()) {
+                            ui.add_space(8.0);
                         }
-                        Section::Trash => {
-                            let count = trash_count
-                                .get()
-                                .filter(|&n| n > 0)
-                                .map(|n| n.to_string())
-                                .unwrap_or_default();
-                            let trash = ui.add(
-                                Button::selectable(
-                                    trash_focused,
-                                    format!("{}  Trash", icon::TRASH),
-                                )
-                                .right_text(RichText::new(count).weak()),
-                            );
-                            response.open_trash = trash.clicked();
-                            trash_dropped = dnd::target(&trash, DropTarget::Trash);
-                        }
-                        Section::Bookmarks => {
-                            ui.label(RichText::new("Bookmarks").small().weak());
-                            for (i, path) in self.bookmarks.iter().enumerate() {
-                                let label = crate::fs::display_name(path);
-                                place_button(ui, icon::BOOKMARK_SIMPLE, &label, path, &mut |ui| {
-                                    if ui.button(format!("{}  Remove bookmark", icon::X)).clicked()
-                                    {
-                                        remove_bookmark = Some(i);
-                                        ui.close();
-                                    }
-                                });
-                            }
-                            if let Some(path) = current
-                                && !self.bookmarks.contains(path)
-                                && ui
-                                    .button(format!("{}  Bookmark this folder", icon::PLUS))
-                                    .clicked()
-                            {
-                                add_bookmark = Some(path.clone());
-                            }
-                        }
-                        Section::Drives => {
-                            ui.label(RichText::new("Drives").small().weak());
-                            for drive in self.drives.shown(self.hide_empty_drives) {
-                                let mut menu = |ui: &mut Ui| {
-                                    if drive.ejectable
-                                        && ui
-                                            .button(format!("{}  Eject", icon::EJECT_SIMPLE))
-                                            .clicked()
-                                    {
-                                        eject = Some((drive.path.clone(), drive.label.clone()));
-                                        ui.close();
-                                    }
-                                };
-                                let row = place_button(
-                                    ui,
-                                    drive.icon,
-                                    &drive.label,
-                                    &drive.path,
-                                    &mut menu,
-                                );
-                                if self.layout.space_bars
-                                    && let Some(space) = drive.space
-                                {
-                                    space_bar(ui, space);
-                                }
-                                if drive.ejectable {
-                                    let size = row.rect.height();
-                                    let rect = egui::Rect::from_min_size(
-                                        egui::pos2(row.rect.right() - size, row.rect.top()),
-                                        egui::vec2(size, size),
+                        previous = Some(section);
+                        match section {
+                            Section::Places => {
+                                let shown = self
+                                    .places
+                                    .iter()
+                                    .filter(|p| self.layout.place_shown(&p.label));
+                                for place in shown {
+                                    place_button(
+                                        ui,
+                                        place.icon,
+                                        &place.label,
+                                        &place.path,
+                                        &mut |_| {},
                                     );
-                                    if ui
-                                        .put(rect, Button::new(icon::EJECT_SIMPLE).frame(false))
-                                        .on_hover_text("Eject")
+                                }
+                            }
+                            Section::Trash => {
+                                let count = trash_count
+                                    .get()
+                                    .filter(|&n| n > 0)
+                                    .map(|n| n.to_string())
+                                    .unwrap_or_default();
+                                let trash = ui.add(
+                                    Button::selectable(
+                                        trash_focused,
+                                        format!("{}  Trash", icon::TRASH),
+                                    )
+                                    .right_text(RichText::new(count).weak()),
+                                );
+                                response.open_trash = trash.clicked();
+                                trash_dropped = dnd::target(&trash, DropTarget::Trash);
+                            }
+                            Section::Bookmarks => {
+                                ui.label(RichText::new("Bookmarks").small().weak());
+                                for (i, path) in self.bookmarks.iter().enumerate() {
+                                    let label = crate::fs::display_name(path);
+                                    place_button(
+                                        ui,
+                                        icon::BOOKMARK_SIMPLE,
+                                        &label,
+                                        path,
+                                        &mut |ui| {
+                                            if ui
+                                                .button(format!("{}  Remove bookmark", icon::X))
+                                                .clicked()
+                                            {
+                                                remove_bookmark = Some(i);
+                                                ui.close();
+                                            }
+                                        },
+                                    );
+                                }
+                                if let Some(path) = current
+                                    && !self.bookmarks.contains(path)
+                                    && ui
+                                        .button(format!("{}  Bookmark this folder", icon::PLUS))
                                         .clicked()
+                                {
+                                    add_bookmark = Some(path.clone());
+                                }
+                            }
+                            Section::Drives => {
+                                ui.label(RichText::new("Drives").small().weak());
+                                for drive in self.drives.shown(self.hide_empty_drives) {
+                                    let mut menu = |ui: &mut Ui| {
+                                        if drive.ejectable
+                                            && ui
+                                                .button(format!("{}  Eject", icon::EJECT_SIMPLE))
+                                                .clicked()
+                                        {
+                                            eject = Some((drive.path.clone(), drive.label.clone()));
+                                            ui.close();
+                                        }
+                                    };
+                                    let row = place_button(
+                                        ui,
+                                        drive.icon,
+                                        &drive.label,
+                                        &drive.path,
+                                        &mut menu,
+                                    );
+                                    if self.layout.space_bars
+                                        && let Some(space) = drive.space
                                     {
-                                        eject = Some((drive.path.clone(), drive.label.clone()));
+                                        space_bar(ui, space);
+                                    }
+                                    if drive.ejectable {
+                                        let size = row.rect.height();
+                                        let rect = egui::Rect::from_min_size(
+                                            egui::pos2(row.rect.right() - size, row.rect.top()),
+                                            egui::vec2(size, size),
+                                        );
+                                        if ui
+                                            .put(rect, Button::new(icon::EJECT_SIMPLE).frame(false))
+                                            .on_hover_text("Eject")
+                                            .clicked()
+                                        {
+                                            eject = Some((drive.path.clone(), drive.label.clone()));
+                                        }
                                     }
                                 }
                             }
                         }
                     }
-                }
-                response.eject = eject;
+                    response.eject = eject;
+                });
             });
-        });
 
         if let Some(i) = remove_bookmark {
             self.bookmarks.remove(i);

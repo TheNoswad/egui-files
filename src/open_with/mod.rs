@@ -492,6 +492,7 @@ fn submenu_contents(ui: &mut Ui, subjects: &[Subject]) -> Option<Choice> {
         ui.separator();
     }
     egui::ScrollArea::vertical()
+        .scroll_source(crate::touch::scroll_source(ui.ctx()))
         .max_height(ui.ctx().content_rect().height() * 0.6)
         .show(ui, |ui| {
             for app in &handlers.others {

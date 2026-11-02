@@ -35,6 +35,7 @@ pub fn show(
     let show_hidden = shared.show_hidden;
     let height = ui.available_height();
     ScrollArea::horizontal()
+        .scroll_source(crate::touch::scroll_source(ui.ctx()))
         .id_salt(("columns", tab.id))
         .auto_shrink(false)
         .stick_to_right(true)
@@ -92,6 +93,7 @@ fn entry_list(
     let row_height = widgets::row_height(ui);
     ui.spacing_mut().item_spacing.y = 0.0;
     let output = ScrollArea::vertical()
+        .scroll_source(crate::touch::scroll_source(ui.ctx()))
         .id_salt(id_salt)
         .auto_shrink(false)
         .show_rows(ui, row_height, count, |ui, range| {
@@ -255,6 +257,7 @@ fn preview_file(
     actions: &mut Vec<Action>,
 ) {
     ScrollArea::vertical()
+        .scroll_source(crate::touch::scroll_source(ui.ctx()))
         .id_salt(("column-preview", tab.id))
         .auto_shrink(false)
         .show(ui, |ui| {

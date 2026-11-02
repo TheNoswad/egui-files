@@ -109,6 +109,9 @@ pub struct Terminal {
     /// The last cell reported to a mouse-aware program while dragging.
     #[serde(skip)]
     last_mouse_cell: Option<(usize, usize)>,
+    /// Ctrl and Alt tapped on the extra keys, for the next key typed.
+    #[serde(skip)]
+    sticky: Modifiers,
 }
 
 impl Terminal {
@@ -187,7 +190,15 @@ impl Terminal {
         let cell = ui
             .ctx()
             .fonts_mut(|f| vec2(f.glyph_width(&font, 'M'), f.row_height(&font)));
-        let rect = ui.available_rect_before_wrap();
+        let mut rect = ui.available_rect_before_wrap();
+        // Phone keyboards lack Esc, Ctrl, the arrows and so on: a row of
+        // them goes under the terminal.
+        let touch = crate::touch::is_touch(ui.ctx());
+        let keys_rect = touch.then(|| {
+            let keys = rect.with_min_y(rect.bottom() - crate::touch::TOUCH_SIZE);
+            rect.max.y = keys.top();
+            keys
+        });
         let size = TermSize {
             columns: ((rect.width() / cell.x) as usize).max(2),
             lines: ((rect.height() / cell.y) as usize).max(1),
@@ -277,6 +288,32 @@ impl Terminal {
             return response;
         };
         paint(ui, session, &grid, &font, &palette, focused);
+        // Where the text cursor is, which brings up a phone's keyboard. Only
+        // in the mobile layout: on the desktop, an input method would then
+        // send typed text as IME events, which the terminal doesn't read.
+        if focused && touch {
+            let cursor = session.term.lock().grid().cursor.point;
+            let row = cursor.line.0.max(0) as usize;
+            let cursor_rect = grid.cell_rect(cursor.column.0, row, 1);
+            ui.ctx().output_mut(|o| {
+                o.ime = Some(egui::output::IMEOutput {
+                    purpose: egui::IMEPurpose::Terminal,
+                    rect,
+                    cursor_rect,
+                    should_interrupt_composition: false,
+                });
+            });
+        }
+        if let Some(keys_rect) = keys_rect {
+            let mut keys_ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(keys_rect)
+                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            );
+            if self.extra_keys(&mut keys_ui) {
+                ui.memory_mut(|m| m.request_focus(id));
+            }
+        }
 
         #[cfg(target_os = "linux")]
         if self.follow
@@ -336,11 +373,97 @@ impl Terminal {
 
     /// Sends typed keys, pastes and copies to the shell. Takes the events so
     /// the rest of the app doesn't act on them.
+    /// The keys phone keyboards lack, in a row. Returns whether one was
+    /// tapped, to keep the keyboard focus in the terminal.
+    fn extra_keys(&mut self, ui: &mut Ui) -> bool {
+        const KEYS: [(&str, ExtraKey); 16] = [
+            ("Esc", ExtraKey::Key(Key::Escape)),
+            ("Tab", ExtraKey::Key(Key::Tab)),
+            ("Ctrl", ExtraKey::Ctrl),
+            ("Alt", ExtraKey::Alt),
+            (
+                egui_phosphor::regular::ARROW_LEFT,
+                ExtraKey::Key(Key::ArrowLeft),
+            ),
+            (
+                egui_phosphor::regular::ARROW_DOWN,
+                ExtraKey::Key(Key::ArrowDown),
+            ),
+            (
+                egui_phosphor::regular::ARROW_UP,
+                ExtraKey::Key(Key::ArrowUp),
+            ),
+            (
+                egui_phosphor::regular::ARROW_RIGHT,
+                ExtraKey::Key(Key::ArrowRight),
+            ),
+            ("Home", ExtraKey::Key(Key::Home)),
+            ("End", ExtraKey::Key(Key::End)),
+            ("PgUp", ExtraKey::Key(Key::PageUp)),
+            ("PgDn", ExtraKey::Key(Key::PageDown)),
+            ("-", ExtraKey::Text("-")),
+            ("/", ExtraKey::Text("/")),
+            ("|", ExtraKey::Text("|")),
+            ("~", ExtraKey::Text("~")),
+        ];
+        let Some(session) = &self.session else {
+            return false;
+        };
+        let mode = *session.term.lock().mode();
+        let mut tapped = false;
+        egui::ScrollArea::horizontal()
+            .scroll_source(crate::touch::scroll_source(ui.ctx()))
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+            .show(ui, |ui| {
+                ui.horizontal_centered(|ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    for (label, key) in KEYS {
+                        let on = match key {
+                            ExtraKey::Ctrl => self.sticky.ctrl,
+                            ExtraKey::Alt => self.sticky.alt,
+                            _ => false,
+                        };
+                        let button = egui::Button::selectable(on, label)
+                            .min_size(vec2(44.0, crate::touch::TOUCH_SIZE - 6.0));
+                        if !ui.add(button).clicked() {
+                            continue;
+                        }
+                        tapped = true;
+                        let bytes = match key {
+                            ExtraKey::Ctrl => {
+                                self.sticky.ctrl = !self.sticky.ctrl;
+                                None
+                            }
+                            ExtraKey::Alt => {
+                                self.sticky.alt = !self.sticky.alt;
+                                None
+                            }
+                            ExtraKey::Key(key) => {
+                                key_bytes(key, std::mem::take(&mut self.sticky), mode)
+                            }
+                            ExtraKey::Text(text) => {
+                                Some(sticky_text(text, std::mem::take(&mut self.sticky)))
+                            }
+                        };
+                        if let Some(bytes) = bytes {
+                            let mut term = session.term.lock();
+                            term.scroll_display(Scroll::Bottom);
+                            term.selection = None;
+                            drop(term);
+                            session.write(bytes);
+                        }
+                    }
+                });
+            });
+        tapped
+    }
+
     fn keyboard(&mut self, ctx: &Context) {
         let Some(session) = &self.session else {
             return;
         };
         let mode = *session.term.lock().mode();
+        let sticky = &mut self.sticky;
         let mut out = Vec::new();
         let mut copy = false;
         let mut scroll = None;
@@ -350,7 +473,8 @@ impl Terminal {
                 match event {
                     egui::Event::Text(text) => {
                         if !std::mem::take(&mut self.skip_text) {
-                            out.extend_from_slice(text.as_bytes());
+                            // Ctrl or Alt tapped on the extra keys.
+                            out.extend(sticky_text(text, std::mem::take(sticky)));
                         }
                     }
                     egui::Event::Key {
@@ -362,6 +486,14 @@ impl Terminal {
                         if !pressed {
                             return false;
                         }
+                        // Ctrl or Alt tapped on the extra keys, for keys
+                        // that don't type text (Enter, Backspace…).
+                        let modifiers = if sticky.any() && !key_types_text(*key) {
+                            *modifiers | std::mem::take(sticky)
+                        } else {
+                            *modifiers
+                        };
+                        let modifiers = &modifiers;
                         if let Some(lines) = scrollback_key(*key, *modifiers) {
                             scroll = Some(lines);
                         } else if let Some(bytes) = key_bytes(*key, *modifiers, mode) {
@@ -418,7 +550,14 @@ impl Terminal {
         let reporting = mode.intersects(TermMode::MOUSE_MODE) && !shift;
         let mut out = Vec::new();
 
-        if widget.hovered() {
+        let touch = crate::touch::is_touch(ui.ctx());
+        let holding = crate::touch::holding(ui.ctx());
+        if widget.hovered() || widget.dragged() {
+            // In the mobile layout a drag scrolls, as the wheel does,
+            // unless it follows a long press, which selects.
+            if touch && widget.dragged() && !holding {
+                self.scroll_acc += widget.drag_delta().y;
+            }
             self.scroll_acc += ui.input(|i| {
                 i.events
                     .iter()
@@ -507,9 +646,13 @@ impl Terminal {
                 term.selection = select(SelectionType::Lines);
             } else if widget.double_clicked() {
                 term.selection = select(SelectionType::Semantic);
-            } else if widget.drag_started_by(PointerButton::Primary) {
+            } else if if touch {
+                crate::touch::long_press_started(ui.ctx())
+            } else {
+                widget.drag_started_by(PointerButton::Primary)
+            } {
                 term.selection = select(SelectionType::Simple);
-            } else if widget.dragged_by(PointerButton::Primary) {
+            } else if widget.dragged_by(PointerButton::Primary) && (!touch || holding) {
                 if let Some(selection) = &mut term.selection {
                     selection.update(point, side);
                 }
@@ -884,6 +1027,56 @@ fn key_bytes(key: Key, m: Modifiers, mode: TermMode) -> Option<Vec<u8>> {
     })
 }
 
+/// A key on the terminal's row of extra keys.
+#[derive(Clone, Copy)]
+enum ExtraKey {
+    Key(Key),
+    Ctrl,
+    Alt,
+    Text(&'static str),
+}
+
+/// Whether a key types text, which arrives as its own event that the
+/// sticky modifiers apply to instead.
+fn key_types_text(key: Key) -> bool {
+    key.name().chars().count() == 1 || key == Key::Space
+}
+
+/// Typed text with Ctrl or Alt from the extra keys: Ctrl turns a letter
+/// (and a few symbols) into its control character, Alt adds ESC before it.
+fn sticky_text(text: &str, m: Modifiers) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut chars = text.chars();
+    if let (Some(c), None) = (chars.next(), chars.next())
+        && (m.ctrl || m.alt)
+    {
+        if m.alt {
+            out.push(0x1b);
+        }
+        let ctrl = m
+            .ctrl
+            .then(|| match c.to_ascii_lowercase() {
+                c @ 'a'..='z' => Some(c as u8 - b'a' + 1),
+                ' ' | '@' | '2' => Some(0),
+                '[' | '3' => Some(0x1b),
+                '\\' | '4' => Some(0x1c),
+                ']' | '5' => Some(0x1d),
+                '^' | '6' => Some(0x1e),
+                '_' | '/' | '-' | '7' => Some(0x1f),
+                '?' | '8' => Some(0x7f),
+                _ => None,
+            })
+            .flatten();
+        match ctrl {
+            Some(byte) => out.push(byte),
+            None => out.extend_from_slice(text.as_bytes()),
+        }
+        return out;
+    }
+    out.extend_from_slice(text.as_bytes());
+    out
+}
+
 fn key_char(key: Key) -> Option<u8> {
     let name = key.name();
     match name.as_bytes() {
@@ -1219,6 +1412,21 @@ fn paint(ui: &Ui, session: &Session, grid: &Grid, font: &FontId, palette: &Palet
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sticky_modifiers_apply_to_typed_text() {
+        let ctrl = Modifiers::CTRL;
+        assert_eq!(sticky_text("c", ctrl), [0x03]);
+        assert_eq!(sticky_text("C", ctrl), [0x03]);
+        assert_eq!(sticky_text("[", ctrl), [0x1b]);
+        assert_eq!(sticky_text("x", Modifiers::ALT), [0x1b, b'x']);
+        assert_eq!(sticky_text("d", Modifiers::ALT | ctrl), [0x1b, 0x04]);
+        // Nothing to apply, or more than one character: as typed.
+        assert_eq!(sticky_text("c", Modifiers::NONE), b"c");
+        assert_eq!(sticky_text("ab", ctrl), b"ab");
+        assert!(key_types_text(Key::A));
+        assert!(!key_types_text(Key::Enter));
+    }
 
     #[test]
     fn encodes_keys() {
