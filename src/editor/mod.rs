@@ -1509,8 +1509,12 @@ mod tests {
             output.textures_delta.clear();
         }
 
+        /// Runs frames until `done`. Waits by the clock, not a count of
+        /// frames: the first highlight loads the syntaxes, which takes
+        /// seconds in a debug build with the other tests running.
         fn until(&mut self, done: impl Fn(&Self) -> bool) {
-            for _ in 0..400 {
+            let start = std::time::Instant::now();
+            while start.elapsed() < Duration::from_secs(30) {
                 self.frame(Vec::new());
                 if done(self) {
                     return;
@@ -1715,7 +1719,11 @@ mod tests {
     #[test]
     fn highlights_while_editing() {
         let mut h = Harness::new("colors", CODE);
-        h.until(|h| !h.buffer().view.spans.is_empty());
+        // Colored, not just the empty placeholders lines get until then.
+        h.until(|h| {
+            let spans = &h.buffer().view.spans;
+            spans.len() == 3 && spans.iter().all(|line| !line.is_empty())
+        });
         let before = h.buffer().view.spans.clone();
         h.select(0..0);
         h.key(Modifiers::NONE, Key::Enter);
