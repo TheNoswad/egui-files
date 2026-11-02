@@ -1504,6 +1504,8 @@ struct Viewer<'a> {
     pinned: &'a HashSet<u64>,
     /// Drawing a tab window rather than the main one.
     in_window: bool,
+    /// Tabs in the window being drawn.
+    tabs: usize,
 }
 
 impl Viewer<'_> {
@@ -1652,6 +1654,10 @@ impl TabViewer for Viewer<'_> {
     /// Pinned tabs can't be closed, nor can the leaf holding them.
     fn is_closeable(&self, tab: &DockTab) -> bool {
         !self.pinned.contains(&tab.id()) && (tab.browser().is_none() || self.browser_count > 1)
+    }
+
+    fn allowed_in_windows(&self, _tab: &mut DockTab) -> bool {
+        tab_windows::may_float(self.in_window, self.tabs)
     }
 
     fn scroll_bars(&self, _tab: &DockTab) -> [bool; 2] {
@@ -1804,6 +1810,7 @@ impl FilesApp {
                     browser_count: usize::MAX,
                     pinned: &self.pinned,
                     in_window: true,
+                    tabs: window.dock.iter_all_tabs().count(),
                 };
                 let before =
                     tab_windows::Before::of(ui.ctx(), &window.dock, Id::new(("dock", window.id)));
@@ -2215,6 +2222,7 @@ impl eframe::App for FilesApp {
             browser_count,
             pinned: &self.pinned,
             in_window: false,
+            tabs: self.dock.iter_all_tabs().count(),
         };
         let mut before = None;
         CentralPanel::default()

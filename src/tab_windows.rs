@@ -92,6 +92,12 @@ pub fn plain_title(title: &str) -> String {
         .to_string()
 }
 
+/// Whether a tab may float over its window. Not the only tab of a tab
+/// window: it would float over nothing; let go inside the window, it stays.
+pub fn may_float(in_tab_window: bool, tabs: usize) -> bool {
+    !in_tab_window || tabs > 1
+}
+
 /// Whether a drop at `pointer` (`None`: gone) is outside `screen`, the
 /// window it was dragged in.
 pub fn outside(screen: Rect, pointer: Option<Pos2>) -> bool {
@@ -319,11 +325,13 @@ mod tests {
         dock: DockState<DockTab>,
         popped: Vec<DockState<DockTab>>,
         time: f64,
+        /// Tabs may float (egui_dock's floating windows).
+        float: bool,
     }
 
     impl Drive {
         fn frame(&mut self, events: Vec<egui::Event>) {
-            struct Blank;
+            struct Blank(bool);
             impl egui_dock::TabViewer for Blank {
                 type Tab = DockTab;
                 fn title(&mut self, tab: &mut DockTab) -> egui::WidgetText {
@@ -333,6 +341,9 @@ mod tests {
                 fn id(&mut self, tab: &mut DockTab) -> egui::Id {
                     egui::Id::new(tab.id())
                 }
+                fn allowed_in_windows(&self, _tab: &mut DockTab) -> bool {
+                    self.0
+                }
             }
             self.time += 0.1;
             let input = egui::RawInput {
@@ -341,12 +352,12 @@ mod tests {
                 events,
                 ..Default::default()
             };
-            let (dock, popped) = (&mut self.dock, &mut self.popped);
+            let (dock, popped, float) = (&mut self.dock, &mut self.popped, self.float);
             let mut output = self.ctx.run_ui(input, |ui| {
                 let before = Before::of(ui.ctx(), dock, egui::Id::new("dock"));
                 egui_dock::DockArea::new(dock)
                     .id(egui::Id::new("dock"))
-                    .show_inside(ui, &mut Blank);
+                    .show_inside(ui, &mut Blank(float));
                 popped.extend(pop_out(ui.ctx(), dock, &before).into_iter().map(|(d, _)| d));
             });
             output.textures_delta.clear();
@@ -381,6 +392,7 @@ mod tests {
             dock,
             popped: Vec::new(),
             time: 0.0,
+            float: true,
         };
         drive.frame(Vec::new());
         drive.frame(Vec::new());
@@ -404,11 +416,19 @@ mod tests {
 
     #[test]
     fn dragging_a_tab_out_of_the_window() {
+        // A tab that may not float (a tab window's only one) still pops out.
+        for float in [true, false] {
+            drag_a_tab_out(float);
+        }
+    }
+
+    fn drag_a_tab_out(float: bool) {
         let mut drive = Drive {
             ctx: egui::Context::default(),
             dock: DockState::new(vec![browser(1), browser(2), browser(3)]),
             popped: Vec::new(),
             time: 0.0,
+            float,
         };
         drive.frame(Vec::new());
         // The first tab's title in the tab bar.
@@ -442,6 +462,7 @@ mod tests {
             dock,
             popped: Vec::new(),
             time: 0.0,
+            float: true,
         };
         drive.frame(Vec::new());
         let dropped = vec![
@@ -456,6 +477,14 @@ mod tests {
             .find(|(_, leaf)| leaf.tabs.iter().any(|t| t.id() == 2))
             .map(|(_, leaf)| leaf.tabs.iter().map(DockTab::id).collect::<Vec<_>>());
         assert_eq!(right, Some(vec![2, 3, 4, 5]));
+    }
+
+    #[test]
+    fn a_tab_windows_only_tab_doesnt_float() {
+        assert!(!may_float(true, 1));
+        assert!(may_float(true, 2));
+        // The main window's panes are tabs too, so it always has others.
+        assert!(may_float(false, 1));
     }
 
     #[test]
