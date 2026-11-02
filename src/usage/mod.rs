@@ -73,9 +73,6 @@ impl View {
         }
     }
 
-    fn is_chart(self) -> bool {
-        matches!(self, Self::Treemap | Self::Sunburst | Self::Icicle)
-    }
 }
 
 /// What a chart or list asked for, applied once drawing is done (and the
@@ -470,6 +467,12 @@ impl UsageTab {
     }
 
     pub fn ui(&mut self, ui: &mut Ui, shared: &mut Shared) {
+        // A minimized window on Windows still runs frames, with no room at
+        // all; laying out then would squeeze the tree panel to its minimum
+        // for good.
+        if ui.available_width() < 1.0 || ui.available_height() < 1.0 {
+            return;
+        }
         ui.style_mut().interaction.selectable_labels = false;
         if self.scan.is_none() && self.autostart {
             self.autostart = false;
@@ -548,14 +551,15 @@ impl UsageTab {
                         &mut acts,
                     );
                 });
-            if self.view.is_chart() {
-                Panel::bottom(Id::new(("usage-legend", self.id)))
-                    .show(ui, |ui| self.legend(ui, &painter, &mut acts));
-            }
             CentralPanel::default()
                 .frame(egui::Frame::NONE)
                 .show(ui, |ui| match self.view {
                     View::Treemap | View::Sunburst | View::Icicle => {
+                        // The legend goes under the chart, measured every
+                        // frame rather than kept in a panel: a panel remembers
+                        // its height, and on Windows it kept one far taller
+                        // than its row, squashing the chart above it.
+                        let ui = &mut self.legend_below(ui, &painter, &mut acts);
                         let output = match self.view {
                             View::Treemap => treemap::show(
                                 ui,
@@ -828,6 +832,44 @@ impl UsageTab {
             }
         });
         fast
+    }
+
+    /// Shows the legend along the bottom of `ui`, and returns a `Ui` for the
+    /// chart filling the space above it.
+    fn legend_below(&self, ui: &mut Ui, painter: &Painter, acts: &mut Vec<Act>) -> Ui {
+        let full = ui.available_rect_before_wrap();
+        let frame = egui::Frame::side_top_panel(ui.style());
+        let show = |ui: &mut Ui, acts: &mut Vec<Act>| {
+            frame
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    self.legend(ui, painter, acts);
+                })
+                .response
+                .rect
+                .height()
+        };
+        // Measured first, unseen, at the width it will have.
+        let height = ui
+            .scope_builder(
+                egui::UiBuilder::new()
+                    .id_salt("legend-measure")
+                    .max_rect(full)
+                    .sizing_pass()
+                    .invisible(),
+                |ui| show(ui, &mut Vec::new()),
+            )
+            .inner
+            .min(full.height());
+        let legend = Rect::from_min_max(egui::pos2(full.min.x, full.max.y - height), full.max);
+        ui.scope_builder(
+            egui::UiBuilder::new().id_salt("legend").max_rect(legend),
+            |ui| show(ui, acts),
+        );
+        let line = ui.visuals().widgets.noninteractive.bg_stroke;
+        ui.painter().hline(full.x_range(), legend.top(), line);
+        let chart = Rect::from_min_max(full.min, egui::pos2(full.max.x, legend.top() - line.width));
+        ui.new_child(egui::UiBuilder::new().id_salt("chart").max_rect(chart))
     }
 
     fn legend(&self, ui: &mut Ui, painter: &Painter, acts: &mut Vec<Act>) {
@@ -1380,6 +1422,38 @@ mod tests {
         fn focus_path(&self) -> PathBuf {
             self.tab.scan.as_ref().unwrap().tree().path(self.tab.focus)
         }
+    }
+
+    #[test]
+    fn chart_fills_down_to_the_legend() {
+        let root = fixture().join("big");
+        let ctx = Context::default();
+        let mut h = Harness {
+            shared: shared(&ctx),
+            ctx,
+            tab: UsageTab::new(1, root),
+            time: 0.0,
+        };
+        h.frame(Vec::new());
+        h.wait_for_scan();
+        let chart = |h: &Harness| h.tab.treemap.items[0].rect;
+        let before = chart(&h);
+        // Only a row of legend under it.
+        assert!(700.0 - before.bottom() < 60.0, "{before:?}");
+
+        // A minimized window's empty frames change nothing.
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::ZERO),
+            time: Some(h.time + 0.05),
+            ..Default::default()
+        };
+        let (tab, shared) = (&mut h.tab, &mut h.shared);
+        let mut output = h.ctx.run_ui(input, |ui| tab.ui(ui, shared));
+        output.textures_delta.clear();
+        h.time += 0.05;
+        h.frame(Vec::new());
+        h.frame(Vec::new());
+        assert_eq!(chart(&h), before);
     }
 
     #[test]

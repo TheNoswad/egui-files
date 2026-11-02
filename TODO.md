@@ -17,7 +17,6 @@
     - [ ] Windows: rounded corners and the shadow via DWM; the Win11 snap layouts flyout needs `HTMAXBUTTON` from `WM_NCHITTEST`, which winit doesn't give us
     - [ ] Settings section for all of the above, next to the settings screen
 - [ ] properties tab should be a tab style window?
-- [ ] scaling issues with the treemap view
 - [ ] sftp etc
 - [ ] google drive
 - [ ] proton drive
