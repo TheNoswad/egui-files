@@ -410,6 +410,8 @@ pub struct FilesApp {
     next_window_id: u64,
     /// The tab window with the keyboard focus, if not the main window.
     focused_window: Option<u64>,
+    /// Tabs just dropped outside their window, which may be over another.
+    pending_drop: Option<tab_windows::Pending>,
     ctx: egui::Context,
 }
 
@@ -558,6 +560,7 @@ impl FilesApp {
             windows,
             next_window_id,
             focused_window: None,
+            pending_drop: None,
             ctx: cc.egui_ctx.clone(),
         }
     }
@@ -1662,11 +1665,91 @@ impl FilesApp {
     /// this frame go into windows of their own, opened where they were
     /// dropped. `before` is the dock before it was drawn.
     fn pop_out(&mut self, ctx: &egui::Context, before: &tab_windows::Before) {
-        for (dock, position) in tab_windows::pop_out(ctx, &mut self.dock, before) {
+        let popped = tab_windows::pop_out(ctx, &mut self.dock, before);
+        self.drop_pending(ctx, popped, None);
+    }
+
+    /// Holds tabs dropped outside the window `source` (`None`: the main
+    /// one) until it's clear whether they landed on another of our windows.
+    fn drop_pending(
+        &mut self,
+        ctx: &egui::Context,
+        popped: Vec<(DockState<DockTab>, Option<Pos2>)>,
+        source: Option<u64>,
+    ) {
+        if popped.is_empty() {
+            return;
+        }
+        // An earlier drop still waiting gets a window of its own.
+        if let Some(earlier) = self.pending_drop.take() {
+            self.open_dropped(earlier.docks, earlier.screen);
+        }
+        let screen = popped[0].1;
+        self.pending_drop = Some(tab_windows::Pending {
+            docks: popped.into_iter().map(|(dock, _)| dock).collect(),
+            source,
+            screen,
+            since: ctx.input(|i| i.time),
+        });
+        ctx.request_repaint();
+    }
+
+    fn open_dropped(&mut self, docks: Vec<DockState<DockTab>>, screen: Option<Pos2>) {
+        for dock in docks {
             let id = self.next_window_id;
             self.next_window_id += 1;
             self.windows
-                .push(TabWindow::new(id, dock, position, tab_windows::NEW_SIZE));
+                .push(TabWindow::new(id, dock, screen, tab_windows::NEW_SIZE));
+        }
+    }
+
+    /// Puts dropped tabs into the window they landed on: the one whose
+    /// screen area holds the drop (X11, Windows), or else the one the
+    /// pointer entered once let go (Wayland). Failing that for a moment,
+    /// they open in a window of their own.
+    fn place_dropped(&mut self, ctx: &egui::Context) {
+        let Some(pending) = self.pending_drop.take() else {
+            return;
+        };
+        let targets: Vec<(Option<u64>, egui::ViewportId)> =
+            std::iter::once((None, egui::ViewportId::ROOT))
+                .chain(self.windows.iter().map(|w| (Some(w.id), w.viewport_id())))
+                .filter(|(target, _)| *target != pending.source)
+                .collect();
+        let at = |viewport| {
+            let (hover, inner) = ctx.input_for(viewport, |i| {
+                (i.pointer.hover_pos(), i.viewport().inner_rect)
+            });
+            let by_position = pending
+                .screen
+                .zip(inner)
+                .filter(|(screen, inner)| inner.contains(*screen))
+                .map(|(screen, inner)| screen - inner.min.to_vec2());
+            by_position.or(hover)
+        };
+        let landed = targets
+            .iter()
+            .find_map(|&(target, viewport)| at(viewport).map(|pos| (target, pos)));
+        match landed {
+            Some((None, pos)) => {
+                let ids = tab_windows::insert_at(&mut self.dock, pending.docks, Some(pos));
+                if let Some(&id) = ids.last() {
+                    self.focus_tab(id);
+                }
+            }
+            Some((Some(window_id), pos)) => {
+                if let Some(window) = self.windows.iter_mut().find(|w| w.id == window_id) {
+                    let ids = tab_windows::insert_at(&mut window.dock, pending.docks, Some(pos));
+                    if let Some(&id) = ids.last() {
+                        self.focus_tab(id);
+                    }
+                }
+            }
+            None if ctx.input(|i| i.time) - pending.since < tab_windows::PENDING_WAIT => {
+                self.pending_drop = Some(pending);
+                ctx.request_repaint();
+            }
+            None => self.open_dropped(pending.docks, pending.screen),
         }
     }
 
@@ -1737,7 +1820,10 @@ impl FilesApp {
                     });
                 add_requests.extend(requests.into_iter().map(|leaf| (window.id, leaf)));
 
-                popped.extend(tab_windows::pop_out(ui.ctx(), &mut window.dock, &before));
+                let dropped = tab_windows::pop_out(ui.ctx(), &mut window.dock, &before);
+                if !dropped.is_empty() {
+                    popped.push((window.id, dropped));
+                }
 
                 if close {
                     // Unsaved editors stay, and ask; the rest close.
@@ -1757,14 +1843,12 @@ impl FilesApp {
             });
         }
         windows.retain(|w| !w.is_empty());
-        for (dock, position) in popped {
-            let id = self.next_window_id;
-            self.next_window_id += 1;
-            windows.push(TabWindow::new(id, dock, position, tab_windows::NEW_SIZE));
-        }
         // Opened while these were drawn (none yet, but keep them).
         windows.append(&mut self.windows);
         self.windows = windows;
+        for (source, dropped) in popped {
+            self.drop_pending(ctx, dropped, Some(source));
+        }
         if focused.is_some_and(|id| !self.windows.iter().any(|w| w.id == id)) {
             focused = None;
         }
@@ -2093,6 +2177,7 @@ impl eframe::App for FilesApp {
             _ => self.active_browser,
         };
         self.shared.preview_shown = self.has_pane(Pane::Preview);
+        self.place_dropped(&ctx);
 
         Panel::top("menu_bar").show(ui, |ui| self.menu_bar(ui));
         self.about.ui(&ctx);

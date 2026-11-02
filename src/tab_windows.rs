@@ -124,6 +124,57 @@ pub fn pop_out(
         .collect()
 }
 
+/// Tabs dropped outside the window they were dragged in, waiting a moment
+/// to see whether another of the app's windows is under the pointer.
+///
+/// On Wayland windows don't know where they are on the screen, but once the
+/// button is let go, the window under the pointer gets it (it enters). On
+/// X11 and Windows the drop's screen position settles it right away.
+pub struct Pending {
+    pub docks: Vec<DockState<DockTab>>,
+    /// The tab window they came from; `None`: the main one.
+    pub source: Option<u64>,
+    /// Where they were dropped, on the screen, when the platform says.
+    pub screen: Option<Pos2>,
+    /// When they were dropped (egui's clock).
+    pub since: f64,
+}
+
+/// How long dropped tabs wait for a window to report the pointer before
+/// opening in a window of their own.
+pub const PENDING_WAIT: f64 = 0.4;
+
+/// The main surface's leaf at `pos`, from where leaves were last drawn.
+fn leaf_at(dock: &DockState<DockTab>, pos: Pos2) -> Option<egui_dock::NodePath> {
+    dock.iter_leaves()
+        .find(|(path, leaf)| path.surface.is_main() && leaf.rect.contains(pos))
+        .map(|(path, _)| path)
+}
+
+/// Moves every tab of `docks` into `dock`: into the pane at `pos`, or the
+/// focused one. Returns their ids.
+pub fn insert_at(
+    dock: &mut DockState<DockTab>,
+    docks: Vec<DockState<DockTab>>,
+    pos: Option<Pos2>,
+) -> Vec<u64> {
+    if let Some(leaf) = pos.and_then(|pos| leaf_at(dock, pos)) {
+        dock.set_focused_node_and_surface(leaf);
+    }
+    let mut ids = Vec::new();
+    for mut from in docks {
+        for (_, node) in from.iter_all_nodes_mut() {
+            if let Some(leaf) = node.get_leaf_mut() {
+                for tab in leaf.tabs.drain(..) {
+                    ids.push(tab.id());
+                    dock.push_to_focused_leaf(tab);
+                }
+            }
+        }
+    }
+    ids
+}
+
 /// Where every tab was before the dock was drawn, and which floating
 /// windows were being moved, to tell what a drop changed.
 pub struct Before {
@@ -378,6 +429,33 @@ mod tests {
         assert_eq!(drive.popped.len(), 1, "{:?}", ids(&drive.dock));
         assert_eq!(ids(&drive.popped[0]), [1]);
         assert_eq!(ids(&drive.dock), [2, 3]);
+    }
+
+    #[test]
+    fn tabs_dropped_in_join_the_pane_under_the_pointer() {
+        // Two panes side by side.
+        let mut dock = DockState::new(vec![browser(1)]);
+        dock.main_surface_mut()
+            .split_right(NodeIndex::root(), 0.5, vec![browser(2)]);
+        let mut drive = Drive {
+            ctx: egui::Context::default(),
+            dock,
+            popped: Vec::new(),
+            time: 0.0,
+        };
+        drive.frame(Vec::new());
+        let dropped = vec![
+            DockState::new(vec![browser(3), browser(4)]),
+            DockState::new(vec![browser(5)]),
+        ];
+        let ids = insert_at(&mut drive.dock, dropped, Some(Pos2::new(700.0, 300.0)));
+        assert_eq!(ids, [3, 4, 5]);
+        let right = drive
+            .dock
+            .iter_leaves()
+            .find(|(_, leaf)| leaf.tabs.iter().any(|t| t.id() == 2))
+            .map(|(_, leaf)| leaf.tabs.iter().map(DockTab::id).collect::<Vec<_>>());
+        assert_eq!(right, Some(vec![2, 3, 4, 5]));
     }
 
     #[test]

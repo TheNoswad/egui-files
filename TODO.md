@@ -15,11 +15,10 @@
     - [ ] Keep enough empty space to drag by, however much is turned on
     - [ ] Windows: rounded corners and the shadow via DWM; the Win11 snap layouts flyout needs `HTMAXBUTTON` from `WM_NCHITTEST`, which winit doesn't give us
     - [ ] Settings section for all of the above, next to the settings screen
-- [ ] Tab windows: drag tabs between windows (each window has its own egui_dock, so for now it's "Move to main window" / "Move to new window" in the tab's menu)
 - [ ] Tab windows: app shortcuts (Ctrl+T, Ctrl+W, …) and the tab bar's right-click menu only work in the main window
 - [ ] Upstream: egui-winit makes a smithay clipboard per viewport and drops it with the viewport, which kills the Wayland connection ("not a valid new object id … data_offer"); we patch it to share one (patches/README.md has a repro). Report it or send the PR, then drop the patch.
 - [ ] Tab windows: check they keep updating while the main window is hidden (another workspace, minimized). Their UI runs in the main window's frame, and on Wayland winit may hold that frame until the compositor sends the main window a frame callback
-- [ ] Tab windows: try dropping a tab outside the window by hand on Wayland, X11 and Windows (only unit-tested so far; the drop is told from the pointer, which egui may lose as it leaves)
+- [ ] Tab windows: try dropping a tab outside the window, and into another of the app's windows, by hand on Wayland, X11 and Windows (only unit-tested so far; the drop is told from the pointer, which egui may lose as it leaves)
 - [ ] sftp etc
 - [ ] google drive
 - [ ] proton drive
