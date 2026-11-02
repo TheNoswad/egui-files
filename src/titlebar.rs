@@ -174,7 +174,12 @@ pub fn apply(
 
 /// Least room left over to drag the window by, whatever else is on.
 const MIN_DRAG: f32 = 80.0;
-const GAP: f32 = 8.0;
+/// Space between groups of parts.
+const GAP: f32 = 12.0;
+/// Space between the pane buttons.
+const TOGGLE_SPACING: f32 = 2.0;
+/// Least space either side of the title.
+const TITLE_MARGIN: f32 = 16.0;
 const NAV_BUTTON: f32 = 28.0;
 const PATH_WIDTH: (f32, f32) = (140.0, 360.0);
 const FILTER_WIDTH: (f32, f32) = (100.0, 180.0);
@@ -261,7 +266,8 @@ fn bar(
     }
 
     let toggles = if prefs.pane_toggles { panes } else { &[] };
-    let right_width = 3.0 * BUTTON_WIDTH + toggles.len() as f32 * NAV_BUTTON + GAP;
+    let right_width =
+        3.0 * BUTTON_WIDTH + toggles.len() as f32 * (NAV_BUTTON + TOGGLE_SPACING) + GAP;
     let centred = egui::Layout::left_to_right(egui::Align::Center);
     let menus_end = ui
         .scope_builder(
@@ -364,6 +370,7 @@ fn bar(
                 buttons_left = minimize.rect.left();
                 if !toggles.is_empty() {
                     ui.add_space(GAP);
+                    ui.spacing_mut().item_spacing.x = TOGGLE_SPACING;
                     for &(pane, open) in toggles.iter().rev() {
                         let button =
                             Button::selectable(open, RichText::new(pane.icon()).size(15.0))
@@ -394,8 +401,23 @@ fn bar(
     requests
 }
 
+/// Where the title of `width` starts: centred on the window (`centre`) as
+/// system title bars have it, if that keeps it clear of the parts ending at
+/// `left` and starting at `right`; else centred between them; else nowhere.
+fn title_x(centre: f32, width: f32, left: f32, right: f32) -> Option<f32> {
+    let (left, right) = (left + TITLE_MARGIN, right - TITLE_MARGIN);
+    let on_window = centre - width / 2.0;
+    if on_window >= left && on_window + width <= right {
+        Some(on_window)
+    } else if width <= right - left {
+        Some((left + right - width) / 2.0)
+    } else {
+        None
+    }
+}
+
 /// The focused tab's title, centred on the window as system title bars
-/// have it, if that leaves it clear of what's on either side.
+/// have it, or in the space it has.
 fn title(
     ui: &Ui,
     background: &egui::Response,
@@ -415,10 +437,9 @@ fn title(
         .painter()
         .layout_no_wrap(focus.title.clone(), font, color);
     let size = galley.size();
-    let x = (rect.center().x - size.x / 2.0).max(left_end + 12.0);
-    if x + size.x + 12.0 > right_start {
+    let Some(x) = title_x(rect.center().x, size.x, left_end, right_start) else {
         return;
-    }
+    };
     let pos = pos2(x, rect.center().y - size.y / 2.0);
     let text_rect = Rect::from_min_size(pos, size);
     ui.painter().galley(pos, galley, color);
@@ -650,6 +671,17 @@ mod tests {
             path.rect
         );
         assert!(path.rect.width() >= PATH_WIDTH.0, "{:?}", path.rect);
+    }
+
+    #[test]
+    fn title_centres_on_the_window_or_in_its_space() {
+        // Room either side: on the window's centre.
+        assert_eq!(title_x(500.0, 100.0, 200.0, 800.0), Some(450.0));
+        // The left parts reach past where it would start: in the middle of
+        // what's free instead, not pushed against the right.
+        assert_eq!(title_x(500.0, 100.0, 440.0, 900.0), Some(620.0));
+        // No room at all.
+        assert_eq!(title_x(500.0, 100.0, 440.0, 560.0), None);
     }
 
     #[test]
