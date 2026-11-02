@@ -13,7 +13,7 @@ use std::{
     collections::{HashMap, HashSet},
     ffi::OsString,
     path::{Path, PathBuf},
-    sync::{Arc, Weak},
+    sync::{Arc, Mutex, Weak},
     time::{Duration, Instant},
 };
 
@@ -331,6 +331,21 @@ pub struct UsageTab {
     /// Asked for the fast scan as administrator: scanning again asks again.
     #[serde(skip)]
     fast: bool,
+    /// Where a finished scan goes when the tab closes, to be kept a while.
+    #[serde(skip)]
+    closed: Option<Arc<Mutex<Vec<ScanHandle>>>>,
+}
+
+impl Drop for UsageTab {
+    fn drop(&mut self) {
+        let (Some(scan), Some(closed)) = (self.scan.take(), &self.closed) else {
+            return;
+        };
+        // A running one stops: closing the tab is how to stop a scan.
+        if !scan.running() && !scan.cancelled() {
+            closed.lock().unwrap().push(scan);
+        }
+    }
 }
 
 impl UsageTab {
@@ -360,6 +375,7 @@ impl UsageTab {
             space: None,
             mft: None,
             fast: false,
+            closed: None,
         }
     }
 
@@ -371,18 +387,31 @@ impl UsageTab {
         )
     }
 
-    fn start(&mut self, ctx: &egui::Context, shared: &mut Shared) {
+    /// Scans the folder, or with `reuse`, takes over a scan of it that's
+    /// kept: from a tab of it that closed, or the browser's.
+    fn start(&mut self, ctx: &egui::Context, shared: &mut Shared, reuse: bool) {
         let root = self.usage.clone();
         self.mft = mft::access(&root);
-        let scan = match self.mft {
-            Some(mft::Access::Direct) => Scan::start_mft(ctx, root, mft::Access::Direct),
-            Some(mft::Access::Elevate) if self.fast => {
-                Scan::start_mft(ctx, root, mft::Access::Elevate)
-            }
-            _ => Scan::start(ctx, root),
+        // The master file table is faster than a running listing is to finish.
+        let kept = reuse
+            .then(|| {
+                let running = self.mft != Some(mft::Access::Direct);
+                shared.usage.take(&root, running)
+            })
+            .flatten();
+        let scan = match kept {
+            Some(kept) => kept,
+            None => ScanHandle(match self.mft {
+                Some(mft::Access::Direct) => Scan::start_mft(ctx, root, mft::Access::Direct),
+                Some(mft::Access::Elevate) if self.fast => {
+                    Scan::start_mft(ctx, root, mft::Access::Elevate)
+                }
+                _ => Scan::start(ctx, root),
+            }),
         };
         shared.usage.register(&scan);
-        self.scan = Some(ScanHandle(scan));
+        self.closed = Some(shared.usage.closed.clone());
+        self.scan = Some(scan);
         self.focus = ROOT;
         self.selected = None;
         self.menu = None;
@@ -476,7 +505,7 @@ impl UsageTab {
         ui.style_mut().interaction.selectable_labels = false;
         if self.scan.is_none() && self.autostart {
             self.autostart = false;
-            self.start(ui.ctx(), shared);
+            self.start(ui.ctx(), shared, true);
         }
         self.look_at_changes();
         let mut acts = Vec::new();
@@ -500,7 +529,7 @@ impl UsageTab {
                 });
             });
             if rescan {
-                self.start(ui.ctx(), shared);
+                self.start(ui.ctx(), shared, true);
             }
             return;
         };
@@ -609,7 +638,7 @@ impl UsageTab {
         }
 
         if rescan {
-            self.start(ui.ctx(), shared);
+            self.start(ui.ctx(), shared, false);
             return;
         }
         for act in acts {
@@ -1092,11 +1121,16 @@ pub struct Scans {
     /// Folders looked at for being on a network or FUSE mount, which the
     /// browser doesn't measure on its own.
     remote: HashMap<PathBuf, bool>,
+    /// Finished scans of disk usage tabs that closed, handed over to be kept
+    /// for a while (see [`UNUSED_CLOSED`]).
+    closed: Arc<Mutex<Vec<ScanHandle>>>,
 }
 
 struct Owned {
     handle: ScanHandle,
     used: Instant,
+    /// How long it's kept, finished, once nothing shows it.
+    keep: Duration,
     /// Folders that changed while it was scanning, looked at once it's done.
     changed: HashSet<PathBuf>,
 }
@@ -1115,6 +1149,9 @@ const UNUSED_RUNNING: Duration = Duration::from_secs(5);
 /// How long a finished browser scan nothing shows is kept, so going back to
 /// a folder shows its sizes right away.
 const UNUSED_FINISHED: Duration = Duration::from_secs(120);
+/// How long the scan of a disk usage tab that closed is kept, so opening
+/// the tab again shows it right away (and the browser its folder sizes).
+const UNUSED_CLOSED: Duration = Duration::from_secs(15 * 60);
 /// Finished browser scans kept at most, besides those in use.
 const KEPT_FINISHED: usize = 4;
 
@@ -1126,6 +1163,7 @@ impl Default for Scans {
             cache: Vec::new(),
             enabled: true,
             remote: HashMap::new(),
+            closed: Default::default(),
         }
     }
 }
@@ -1147,6 +1185,48 @@ impl Scans {
     fn register(&mut self, scan: &Arc<Scan>) {
         self.scans.retain(|s| s.strong_count() > 0);
         self.scans.push(Arc::downgrade(scan));
+    }
+
+    /// A kept scan of exactly `root` for a disk usage tab to take over: one
+    /// whose tab closed, or the browser's. A running one only when `running`
+    /// is allowed, and never one stopped early.
+    fn take(&mut self, root: &Path, running: bool) -> Option<ScanHandle> {
+        self.take_closed();
+        let at = self.own.iter().position(|o| {
+            !o.handle.cancelled()
+                && (running || !o.handle.running())
+                && o.handle.tree().root_path == root
+        })?;
+        let own = self.own.remove(at);
+        let handle = own.handle;
+        if !handle.running() {
+            let ids: Vec<u32> = {
+                let tree = handle.tree();
+                own.changed.iter().filter_map(|dir| tree.find(dir)).collect()
+            };
+            for id in ids {
+                handle.refresh(id);
+            }
+        }
+        Some(handle)
+    }
+
+    /// Takes in the scans of disk usage tabs that closed.
+    fn take_closed(&mut self) {
+        let closed = std::mem::take(&mut *self.closed.lock().unwrap());
+        let now = Instant::now();
+        for handle in closed {
+            let root = handle.tree().root_path.clone();
+            // The newer scan of a folder replaces an older one.
+            self.own
+                .retain(|o| o.handle.running() || o.handle.tree().root_path != root);
+            self.own.push(Owned {
+                handle,
+                used: now,
+                keep: UNUSED_CLOSED,
+                changed: HashSet::new(),
+            });
+        }
     }
 
     /// Sizes for the folders inside `dir`, from the innermost scan that
@@ -1190,6 +1270,7 @@ impl Scans {
                 self.own.push(Owned {
                     handle: ScanHandle(scan.clone()),
                     used: now,
+                    keep: UNUSED_FINISHED,
                     changed: HashSet::new(),
                 });
                 scan
@@ -1252,15 +1333,15 @@ impl Scans {
     pub fn tick(&mut self) {
         self.cache
             .retain(|c| c.used.elapsed() < Duration::from_secs(1));
+        self.take_closed();
         if !self.enabled {
-            self.own.clear();
-            return;
+            self.own.retain(|o| o.keep == UNUSED_CLOSED);
         }
         self.own.retain(|o| {
             let limit = if o.handle.running() {
                 UNUSED_RUNNING
             } else {
-                UNUSED_FINISHED
+                o.keep
             };
             o.used.elapsed() < limit
         });
@@ -1339,8 +1420,8 @@ mod tests {
     }
 
     /// `big/` holds most of the space, in a few files and a subfolder.
-    fn fixture() -> PathBuf {
-        let root = std::env::temp_dir().join(format!("egui-files-usage-ui-{}", std::process::id()));
+    fn fixture(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("egui-files-usage-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("big/inner")).unwrap();
         std::fs::create_dir_all(root.join("small")).unwrap();
@@ -1425,8 +1506,37 @@ mod tests {
     }
 
     #[test]
+    fn closed_tabs_scan_is_kept() {
+        let root = fixture("kept").join("big");
+        let ctx = Context::default();
+        let mut h = Harness {
+            shared: shared(&ctx),
+            ctx,
+            tab: UsageTab::new(1, root.clone()),
+            time: 0.0,
+        };
+        h.frame(Vec::new());
+        h.wait_for_scan();
+        let first = Arc::as_ptr(&h.tab.scan.as_ref().unwrap().0);
+
+        // Closing hands it over; a new tab of the folder takes it, unstopped.
+        h.tab = UsageTab::new(2, root.clone());
+        h.shared.usage.tick();
+        h.frame(Vec::new());
+        let scan = h.tab.scan.as_ref().unwrap();
+        assert_eq!(Arc::as_ptr(&scan.0), first);
+        assert!(!scan.cancelled());
+        // While the browser shows sizes from it.
+        assert!(h.shared.usage.folder_sizes(&h.ctx, &root).is_some());
+
+        // Scanning again doesn't.
+        h.tab.start(&h.ctx.clone(), &mut h.shared, false);
+        assert_ne!(Arc::as_ptr(&h.tab.scan.as_ref().unwrap().0), first);
+    }
+
+    #[test]
     fn chart_fills_down_to_the_legend() {
-        let root = fixture().join("big");
+        let root = fixture("legend").join("big");
         let ctx = Context::default();
         let mut h = Harness {
             shared: shared(&ctx),
@@ -1458,7 +1568,7 @@ mod tests {
 
     #[test]
     fn every_view_draws_and_zooms() {
-        let root = fixture();
+        let root = fixture("views");
         let ctx = Context::default();
         let mut h = Harness {
             shared: shared(&ctx),
