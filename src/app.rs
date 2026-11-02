@@ -31,6 +31,7 @@ use crate::{
     sidebar::{Sidebar, SidebarResponse},
     system_theme::SystemTheme,
     tab::{self, AppAction, BrowserTab, Shared},
+    tab_windows::{self, TabWindow},
     terminal_panel::{PanelResponse, TerminalPanel},
     theme::{self, Themes},
     trash::{self, TrashCount, TrashTab},
@@ -95,6 +96,9 @@ struct Persisted {
     /// How new browser tabs sort.
     #[serde(default)]
     default_sort: Sort,
+    /// Tabs in windows of their own.
+    #[serde(default)]
+    windows: Vec<TabWindow>,
 }
 
 fn default_true() -> bool {
@@ -130,6 +134,7 @@ struct PersistedRef<'a> {
     pinned: &'a HashSet<u64>,
     folder_sizes: bool,
     default_sort: Sort,
+    windows: &'a [TabWindow],
 }
 
 /// The panes a fresh layout starts with.
@@ -298,10 +303,8 @@ fn add_button_hints(ui: &mut Ui, dock: &DockState<DockTab>) {
 }
 
 /// Moves pinned tabs to the front of their tab bar, keeping their order and
-/// which tab is shown, and forgets pins of tabs that closed.
-fn pinned_first(dock: &mut DockState<DockTab>, pinned: &mut HashSet<u64>) {
-    let open: HashSet<u64> = dock.iter_all_tabs().map(|(_, t)| t.id()).collect();
-    pinned.retain(|id| open.contains(id));
+/// which tab is shown.
+fn pinned_first(dock: &mut DockState<DockTab>, pinned: &HashSet<u64>) {
     for (_, node) in dock.iter_all_nodes_mut() {
         let Some(leaf) = node.get_leaf_mut() else {
             continue;
@@ -402,6 +405,12 @@ pub struct FilesApp {
     about: About,
     system_theme: SystemTheme,
     themes: Themes,
+    /// Tabs in windows of their own.
+    windows: Vec<TabWindow>,
+    next_window_id: u64,
+    /// The tab window with the keyboard focus, if not the main window.
+    focused_window: Option<u64>,
+    ctx: egui::Context,
 }
 
 impl FilesApp {
@@ -440,6 +449,7 @@ impl FilesApp {
                 pinned: HashSet::new(),
                 folder_sizes: true,
                 default_sort: Sort::default(),
+                windows: Vec::new(),
             });
         let Persisted {
             dock,
@@ -463,6 +473,7 @@ impl FilesApp {
             pinned,
             folder_sizes,
             default_sort,
+            windows,
         } = persisted;
         editor::highlight::preload();
         let pending_panes = if panes_docked {
@@ -475,11 +486,13 @@ impl FilesApp {
         }
         let next_tab_id = dock
             .iter_all_tabs()
+            .chain(windows.iter().flat_map(|w| w.dock.iter_all_tabs()))
             .filter(|(_, t)| t.pane().is_none())
             .map(|(_, t)| t.id())
             .max()
             .unwrap_or(0)
             + 1;
+        let next_window_id = windows.iter().map(|w| w.id).max().unwrap_or(0) + 1;
 
         Self {
             dock,
@@ -542,6 +555,10 @@ impl FilesApp {
             about: About::new(cc),
             system_theme: SystemTheme::watch(&cc.egui_ctx),
             themes: Themes::new(&cc.egui_ctx, theme),
+            windows,
+            next_window_id,
+            focused_window: None,
+            ctx: cc.egui_ctx.clone(),
         }
     }
 
@@ -554,6 +571,45 @@ impl FilesApp {
         let mut tab = BrowserTab::new(self.next_id(), path);
         tab.sort = self.default_sort;
         DockTab::Browser(tab)
+    }
+
+    /// Every tab: the main window's, then the tab windows'.
+    fn all_tabs(&self) -> impl Iterator<Item = &DockTab> {
+        let windows = self.windows.iter().flat_map(|w| w.dock.iter_all_tabs());
+        self.dock.iter_all_tabs().chain(windows).map(|(_, t)| t)
+    }
+
+    fn all_tabs_mut(&mut self) -> impl Iterator<Item = &mut DockTab> {
+        let windows = self
+            .windows
+            .iter_mut()
+            .flat_map(|w| w.dock.iter_all_tabs_mut());
+        self.dock.iter_all_tabs_mut().chain(windows).map(|(_, t)| t)
+    }
+
+    /// The id of an open tab that `matches`, in any window.
+    fn find_tab(&self, matches: impl Fn(&DockTab) -> bool) -> Option<u64> {
+        self.all_tabs().find(|t| matches(t)).map(DockTab::id)
+    }
+
+    /// Takes a tab out of whichever window has it.
+    fn take_tab(&mut self, id: u64) -> Option<DockTab> {
+        if let Some(path) = self.dock.find_tab_from(|t| t.id() == id) {
+            return self.dock.remove_tab(path);
+        }
+        self.windows.iter_mut().find_map(|w| {
+            let path = w.dock.find_tab_from(|t| t.id() == id)?;
+            w.dock.remove_tab(path)
+        })
+    }
+
+    /// Opens a window holding `tab`.
+    fn new_window(&mut self, tab: DockTab, size: Vec2) -> &mut TabWindow {
+        let id = self.next_window_id;
+        self.next_window_id += 1;
+        self.windows
+            .push(TabWindow::new(id, DockState::new(vec![tab]), None, size));
+        self.windows.last_mut().expect("just pushed")
     }
 
     /// Keeps `active_browser` pointing at an open browser tab.
@@ -604,11 +660,25 @@ impl FilesApp {
         self.focused_folder().unwrap_or_else(places::home_dir)
     }
 
-    /// Brings the tab with this id to the front and gives it focus.
+    /// Brings the tab with this id to the front and gives it focus, and its
+    /// window too.
     fn focus_tab(&mut self, id: u64) {
         if let Some(path) = self.dock.find_tab_from(|t| t.id() == id) {
             let _ = self.dock.set_active_tab(path);
             self.dock.set_focused_node_and_surface(path.node_path());
+            if self.focused_window.is_some() {
+                self.ctx
+                    .send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
+            }
+            return;
+        }
+        for window in &mut self.windows {
+            if let Some(path) = window.dock.find_tab_from(|t| t.id() == id) {
+                let _ = window.dock.set_active_tab(path);
+                window.dock.set_focused_node_and_surface(path.node_path());
+                window.raise = true;
+                return;
+            }
         }
     }
 
@@ -648,7 +718,7 @@ impl FilesApp {
         }
         if changed {
             self.sidebar.tree.invalidate();
-            for (_, tab) in self.dock.iter_all_tabs_mut() {
+            for tab in self.all_tabs_mut() {
                 tab.mark_stale();
             }
         }
@@ -664,7 +734,7 @@ impl FilesApp {
     /// keeps a drive busy, then ejects it.
     fn eject(&mut self, drive: PathBuf, label: String) {
         let home = places::home_dir();
-        for (_, tab) in self.dock.iter_all_tabs_mut() {
+        for tab in self.all_tabs_mut() {
             if let Some(browser) = tab.browser_mut()
                 && browser.path.starts_with(&drive)
             {
@@ -677,11 +747,7 @@ impl FilesApp {
     }
 
     fn open_trash(&mut self) {
-        let trash_tab = self
-            .dock
-            .iter_all_tabs()
-            .find(|(_, t)| t.is_trash())
-            .map(|(_, t)| t.id());
+        let trash_tab = self.find_tab(DockTab::is_trash);
         if let Some(id) = trash_tab {
             self.focus_tab(id);
         } else {
@@ -709,11 +775,7 @@ impl FilesApp {
 
     /// Shows an archive's contents, in the tab already showing it if there is one.
     fn open_archive(&mut self, path: PathBuf) {
-        let existing = self
-            .dock
-            .iter_all_tabs()
-            .find(|(_, t)| t.archive() == Some(path.as_path()))
-            .map(|(_, t)| t.id());
+        let existing = self.find_tab(|t| t.archive() == Some(path.as_path()));
         if let Some(id) = existing {
             self.focus_tab(id);
         } else {
@@ -725,11 +787,7 @@ impl FilesApp {
     /// Shows a folder's disk usage, in the tab already showing it if there
     /// is one.
     fn open_usage(&mut self, path: PathBuf) {
-        let existing = self
-            .dock
-            .iter_all_tabs()
-            .find(|(_, t)| t.usage().is_some_and(|u| u.usage == path))
-            .map(|(_, t)| t.id());
+        let existing = self.find_tab(|t| t.usage().is_some_and(|u| u.usage == path));
         if let Some(id) = existing {
             self.focus_tab(id);
         } else {
@@ -744,22 +802,25 @@ impl FilesApp {
         if source.is_empty() {
             return;
         }
-        match self.shared.properties.prefs.open_in {
-            OpenIn::Tab => {
-                let existing = self
-                    .dock
-                    .iter_all_tabs()
-                    .find(|(_, t)| t.properties().is_some_and(|p| p.properties == source))
-                    .map(|(_, t)| t.id());
-                if let Some(id) = existing {
-                    self.focus_tab(id);
-                } else {
-                    let tab = DockTab::Properties(PropertiesTab::new(self.next_id(), source));
-                    self.push_tab(tab);
-                }
-            }
-            OpenIn::Window => self.shared.properties.open_window(source, false),
-            OpenIn::Native => self.shared.properties.open_window(source, true),
+        let open_in = self.shared.properties.prefs.open_in;
+        if open_in == OpenIn::Window {
+            self.shared.properties.open_window(source);
+            return;
+        }
+        if let Some(id) = self.find_tab(|t| t.properties().is_some_and(|p| p.properties == source))
+        {
+            self.focus_tab(id);
+            return;
+        }
+        let tab = DockTab::Properties(PropertiesTab::new(self.next_id(), source));
+        if open_in == OpenIn::Tab {
+            self.push_tab(tab);
+        } else if let Some(window) = self.windows.iter_mut().rev().find(|w| w.properties) {
+            // Properties opened in a window of their own join each other.
+            window.dock.push_to_focused_leaf(tab);
+            window.raise = true;
+        } else {
+            self.new_window(tab, Vec2::new(460.0, 600.0)).properties = true;
         }
     }
 
@@ -784,10 +845,9 @@ impl FilesApp {
         let id = tab.id();
         self.push_tab(tab);
         if let Some(browser) = self
-            .dock
-            .iter_all_tabs_mut()
-            .find(|(_, t)| t.id() == id)
-            .and_then(|(_, t)| t.browser_mut())
+            .all_tabs_mut()
+            .find(|t| t.id() == id)
+            .and_then(DockTab::browser_mut)
         {
             browser.reveal(path);
         }
@@ -795,11 +855,7 @@ impl FilesApp {
 
     /// Edits a file, in the tab already editing it if there is one.
     fn open_editor(&mut self, path: PathBuf) {
-        let existing = self
-            .dock
-            .iter_all_tabs()
-            .find(|(_, t)| t.editor().is_some_and(|e| e.edit == path))
-            .map(|(_, t)| t.id());
+        let existing = self.find_tab(|t| t.editor().is_some_and(|e| e.edit == path));
         if let Some(id) = existing {
             self.focus_tab(id);
         } else {
@@ -809,15 +865,24 @@ impl FilesApp {
     }
 
     fn editor_mut(&mut self, id: u64) -> Option<&mut EditorTab> {
-        self.dock
-            .iter_all_tabs_mut()
-            .find(|(_, t)| t.id() == id)
-            .and_then(|(_, t)| t.editor_mut())
+        self.all_tabs_mut()
+            .find(|t| t.id() == id)
+            .and_then(DockTab::editor_mut)
     }
 
     fn remove_tab(&mut self, id: u64) {
-        if let Some(path) = self.dock.find_tab_from(|t| t.id() == id) {
-            self.dock.remove_tab(path);
+        self.take_tab(id);
+    }
+
+    /// Moves a tab into a window of its own, or from one into the main
+    /// window, where it's focused.
+    fn move_tab_to(&mut self, id: u64, own_window: bool) {
+        let Some(tab) = self.take_tab(id) else { return };
+        if own_window {
+            self.new_window(tab, tab_windows::NEW_SIZE);
+        } else {
+            self.push_tab(tab);
+            self.focus_tab(id);
         }
     }
 
@@ -907,7 +972,12 @@ impl FilesApp {
     }
 
     fn keep_pinned_first(&mut self) {
-        pinned_first(&mut self.dock, &mut self.pinned);
+        let open: HashSet<u64> = self.all_tabs().map(DockTab::id).collect();
+        self.pinned.retain(|id| open.contains(id));
+        pinned_first(&mut self.dock, &self.pinned);
+        for window in &mut self.windows {
+            pinned_first(&mut window.dock, &self.pinned);
+        }
     }
 
     /// Shows `path` in the active browser tab, or a new one, and focuses it.
@@ -1001,6 +1071,19 @@ impl FilesApp {
     /// once, so if one already is, it moves there instead.
     fn add_to_leaf(&mut self, leaf: NodePath, kind: NewTab) {
         if self.dock.leaf(leaf).is_err() {
+            return;
+        }
+        // The trash in a window of its own comes over.
+        if kind == NewTab::Trash
+            && self.dock.find_tab_from(DockTab::is_trash).is_none()
+            && let Some(tab) = self
+                .find_tab(DockTab::is_trash)
+                .and_then(|id| self.take_tab(id))
+        {
+            let id = tab.id();
+            self.dock.set_focused_node_and_surface(leaf);
+            self.dock.push_to_focused_leaf(tab);
+            self.focus_tab(id);
             return;
         }
         let existing = self.dock.find_tab_from(|t| match kind {
@@ -1171,7 +1254,7 @@ impl FilesApp {
                                 ui,
                                 icon::TRASH,
                                 "Trash",
-                                self.dock.iter_all_tabs().any(|(_, t)| t.is_trash()),
+                                self.all_tabs().any(DockTab::is_trash),
                             ) {
                                 choice = Some(NewTab::Trash);
                             }
@@ -1416,6 +1499,8 @@ struct Viewer<'a> {
     /// to follow and never spread into the space it leaves.
     browser_count: usize,
     pinned: &'a HashSet<u64>,
+    /// Drawing a tab window rather than the main one.
+    in_window: bool,
 }
 
 impl Viewer<'_> {
@@ -1495,6 +1580,24 @@ impl TabViewer for Viewer<'_> {
                 .push(AppAction::NewTab(browser.path.clone()));
             ui.close();
         }
+        // Tabs can't be dragged from one window to another.
+        if tab.pane().is_none() {
+            let (label, action) = if self.in_window {
+                (
+                    format!("{} Move to main window", icon::ARROW_SQUARE_IN),
+                    AppAction::MoveToMainWindow(tab.id()),
+                )
+            } else {
+                (
+                    format!("{} Move to new window", icon::ARROW_SQUARE_OUT),
+                    AppAction::MoveToNewWindow(tab.id()),
+                )
+            };
+            if ui.button(label).clicked() {
+                self.shared.app_actions.push(action);
+                ui.close();
+            }
+        }
     }
 
     /// Tab titles are drop targets for their folder (or the trash).
@@ -1555,6 +1658,136 @@ impl TabViewer for Viewer<'_> {
 }
 
 impl FilesApp {
+    /// Tabs dropped outside the main window this frame go into windows of
+    /// their own, opened where they were dropped.
+    fn pop_out(&mut self, ctx: &egui::Context) {
+        let pointer = ctx.input(|i| i.pointer.hover_pos());
+        if !tab_windows::outside(ctx.content_rect(), pointer) {
+            return;
+        }
+        let origin = ctx.input(|i| i.viewport().inner_rect).map(|r| r.min);
+        for dock in tab_windows::take_new_floating(&mut self.dock) {
+            let position = origin.zip(pointer).map(|(o, p)| o + p.to_vec2());
+            let id = self.next_window_id;
+            self.next_window_id += 1;
+            self.windows
+                .push(TabWindow::new(id, dock, position, tab_windows::NEW_SIZE));
+        }
+    }
+
+    /// Draws the tab windows, each in a native window of its own with its
+    /// own tab bar. Closing one closes its tabs, asking first about unsaved
+    /// changes.
+    fn tab_windows_ui(&mut self, ctx: &egui::Context) {
+        let mut windows = std::mem::take(&mut self.windows);
+        let mut popped = Vec::new();
+        let mut add_requests: Vec<(u64, NodePath)> = Vec::new();
+        let mut focused = self.focused_window;
+        for window in &mut windows {
+            let viewport = window.viewport_id();
+            if std::mem::take(&mut window.raise) {
+                ctx.send_viewport_cmd_to(viewport, egui::ViewportCommand::Focus);
+            }
+            let builder = window.builder();
+            ctx.show_viewport_immediate(viewport, builder, |ui, _class| {
+                let (inner, outer, is_focused, close) = ui.input(|i| {
+                    let v = i.viewport();
+                    (v.inner_rect, v.outer_rect, v.focused, v.close_requested())
+                });
+                // Remembered, to open there again after a restart.
+                if let Some(inner) = inner {
+                    window.size = inner.size();
+                }
+                if let Some(outer) = outer {
+                    window.position = Some(outer.min);
+                }
+                if is_focused == Some(true) {
+                    focused = Some(window.id);
+                }
+
+                let mut requests = Vec::new();
+                let mut viewer = Viewer {
+                    shared: &mut self.shared,
+                    // Panes stay in the main window, so these go unused.
+                    panes: Panes {
+                        sidebar: &mut self.sidebar,
+                        trash_count: &self.trash_count,
+                        terminal: &mut self.terminal,
+                        folder: None,
+                        trash_focused: false,
+                        preview: None,
+                        sidebar_response: SidebarResponse::default(),
+                        preview_actions: Vec::new(),
+                        terminal_response: PanelResponse::default(),
+                    },
+                    add_requests: &mut requests,
+                    tab_buttons: &mut Vec::new(),
+                    // The main window keeps a browser tab for the panes.
+                    browser_count: usize::MAX,
+                    pinned: &self.pinned,
+                    in_window: true,
+                };
+                CentralPanel::default()
+                    .frame(egui::Frame::NONE)
+                    .show(ui, |ui| {
+                        DockArea::new(&mut window.dock)
+                            .id(Id::new(("dock", window.id)))
+                            .style(Style::from_egui(ui.style()))
+                            .show_add_buttons(true)
+                            .show_leaf_collapse_buttons(false)
+                            .show_leaf_close_all_buttons(true)
+                            .show_inside(ui, &mut viewer);
+                    });
+                add_requests.extend(requests.into_iter().map(|leaf| (window.id, leaf)));
+
+                let pointer = ui.input(|i| i.pointer.hover_pos());
+                if tab_windows::outside(ui.ctx().content_rect(), pointer) {
+                    for dock in tab_windows::take_new_floating(&mut window.dock) {
+                        let position = inner.zip(pointer).map(|(inner, p)| inner.min + p.to_vec2());
+                        popped.push((dock, position));
+                    }
+                }
+
+                if close {
+                    // Unsaved editors stay, and ask; the rest close.
+                    window
+                        .dock
+                        .retain_tabs(|t| t.editor().is_some_and(EditorTab::is_dirty));
+                    let unsaved: Vec<u64> =
+                        window.dock.iter_all_tabs().map(|(_, t)| t.id()).collect();
+                    if !unsaved.is_empty() {
+                        ui.ctx()
+                            .send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                        self.shared
+                            .app_actions
+                            .extend(unsaved.into_iter().map(AppAction::CloseTab));
+                    }
+                }
+            });
+        }
+        windows.retain(|w| !w.is_empty());
+        for (dock, position) in popped {
+            let id = self.next_window_id;
+            self.next_window_id += 1;
+            windows.push(TabWindow::new(id, dock, position, tab_windows::NEW_SIZE));
+        }
+        // Opened while these were drawn (none yet, but keep them).
+        windows.append(&mut self.windows);
+        self.windows = windows;
+        if focused.is_some_and(|id| !self.windows.iter().any(|w| w.id == id)) {
+            focused = None;
+        }
+        self.focused_window = focused;
+        for (window_id, leaf) in add_requests {
+            let path = self.focused_path();
+            let tab = self.make_tab(path);
+            if let Some(window) = self.windows.iter_mut().find(|w| w.id == window_id) {
+                window.dock.set_focused_node_and_surface(leaf);
+                window.dock.push_to_focused_leaf(tab);
+            }
+        }
+    }
+
     /// Hands an in-app drag to the platform once it leaves the window, so it
     /// can be dropped into other apps.
     fn drag_out(&mut self, ctx: &egui::Context) {
@@ -1608,7 +1841,7 @@ impl FilesApp {
         if !changed.is_empty() {
             self.shared.usage.dirs_changed(&changed);
             self.sidebar.tree.dirs_changed(&changed);
-            for (_, tab) in self.dock.iter_all_tabs_mut() {
+            for tab in self.all_tabs_mut() {
                 tab.dirs_changed(&changed);
             }
         }
@@ -1616,14 +1849,14 @@ impl FilesApp {
             self.shared.usage.invalidate();
             self.trash_count.request();
             self.sidebar.tree.invalidate();
-            for (_, tab) in self.dock.iter_all_tabs_mut() {
+            for tab in self.all_tabs_mut() {
                 tab.mark_stale();
             }
         }
         for outcome in self.shared.jobs.take_outcomes() {
             match outcome {
                 Outcome::Reveal(path) => {
-                    for (_, tab) in self.dock.iter_all_tabs_mut() {
+                    for tab in self.all_tabs_mut() {
                         if let Some(browser) = tab.browser_mut() {
                             browser.reveal(path.clone());
                         }
@@ -1746,9 +1979,8 @@ impl FilesApp {
     fn quit_guard(&mut self, ctx: &egui::Context) {
         let running = self.shared.jobs.running();
         let unsaved: Vec<String> = self
-            .dock
-            .iter_all_tabs()
-            .filter_map(|(_, t)| t.editor())
+            .all_tabs()
+            .filter_map(DockTab::editor)
             .filter(|e| e.is_dirty())
             .map(|e| crate::fs::display_name(&e.edit))
             .collect();
@@ -1807,9 +2039,8 @@ impl FilesApp {
         });
         if save_all {
             let errors: Vec<String> = self
-                .dock
-                .iter_all_tabs_mut()
-                .filter_map(|(_, t)| t.editor_mut())
+                .all_tabs_mut()
+                .filter_map(DockTab::editor_mut)
                 .filter(|e| e.is_dirty())
                 .filter_map(|e| {
                     e.save()
@@ -1853,11 +2084,20 @@ impl eframe::App for FilesApp {
         self.update_active_browser();
         self.global_shortcuts(&ctx);
         // Keys go to the focused tab; with a pane focused, to the browser tab
-        // it follows; and with a shell focused, to nobody else.
+        // it follows; and with a shell focused, to nobody else. In a tab
+        // window, to its focused tab.
+        if ctx.input(|i| i.viewport().focused) == Some(true) {
+            self.focused_window = None;
+        }
+        let in_window = self
+            .focused_window
+            .and_then(|id| self.windows.iter_mut().find(|w| w.id == id))
+            .map(|w| w.dock.find_active_focused().map(|(_, tab)| tab.id()));
         self.shared.focused_tab = match self.dock.find_active_focused() {
-            _ if self.terminal.has_focus(&ctx) => None,
             _ if self.shared.open_with.is_asking() => None,
             _ if !self.confirm_close.is_empty() || self.confirm_quit => None,
+            _ if in_window.is_some() => in_window.flatten(),
+            _ if self.terminal.has_focus(&ctx) => None,
             Some((_, tab)) if tab.pane().is_none() => Some(tab.id()),
             _ => self.active_browser,
         };
@@ -1898,6 +2138,7 @@ impl eframe::App for FilesApp {
             tab_buttons: &mut tab_buttons,
             browser_count,
             pinned: &self.pinned,
+            in_window: false,
         };
         CentralPanel::default()
             .frame(egui::Frame::NONE)
@@ -1924,6 +2165,7 @@ impl eframe::App for FilesApp {
             terminal_response,
             ..
         } = viewer.panes;
+        self.pop_out(&ctx);
 
         if let Some((path, new_tab)) = sidebar_response.target {
             self.go_to(path, new_tab);
@@ -1957,6 +2199,7 @@ impl eframe::App for FilesApp {
         for leaf in add_requests {
             self.add_to_leaf(leaf, NewTab::Browser);
         }
+        self.tab_windows_ui(&ctx);
         self.add_menu_ui(&ctx);
         self.tab_bars_ui(&ctx, &tab_buttons);
         self.place_split_ui(&ctx);
@@ -1978,6 +2221,8 @@ impl eframe::App for FilesApp {
                 AppAction::Reveal(path) => self.reveal(path),
                 AppAction::DiskUsage(path) => self.open_usage(path),
                 AppAction::Properties(source) => self.open_properties(source),
+                AppAction::MoveToNewWindow(id) => self.move_tab_to(id, true),
+                AppAction::MoveToMainWindow(id) => self.move_tab_to(id, false),
             }
         }
         self.confirm_close_ui(&ctx);
@@ -1986,9 +2231,8 @@ impl eframe::App for FilesApp {
         }
         let empty_drives = self.follow_media();
         let shown = self
-            .dock
-            .iter_all_tabs()
-            .flat_map(|(_, tab)| tab.shown_dirs())
+            .all_tabs()
+            .flat_map(DockTab::shown_dirs)
             .filter(|dir| !empty_drives.iter().any(|root| dir.starts_with(root)))
             // Always watched, to keep the sidebar's trash count current.
             .chain(trash::watched_dir())
@@ -2097,6 +2341,7 @@ impl eframe::App for FilesApp {
             pinned: &self.pinned,
             folder_sizes: self.shared.usage.enabled,
             default_sort: self.default_sort,
+            windows: &self.windows,
         };
         eframe::set_value(storage, eframe::APP_KEY, &state);
     }
@@ -2124,14 +2369,12 @@ mod tests {
         let mut dock = DockState::new(vec![browser(1), browser(2), browser(3), browser(4)]);
         let path = dock.find_tab_from(|t| t.id() == 2).unwrap();
         let _ = dock.set_active_tab(path);
-        // 9 isn't open any more.
-        let mut pinned = HashSet::from([3, 4, 9]);
-        pinned_first(&mut dock, &mut pinned);
+        let pinned = HashSet::from([3, 4]);
+        pinned_first(&mut dock, &pinned);
         let leaf = dock.leaf(NodePath::MAIN_ROOT).unwrap();
         let ids: Vec<u64> = leaf.tabs.iter().map(DockTab::id).collect();
         assert_eq!(ids, [3, 4, 1, 2]);
         assert_eq!(leaf.tabs[leaf.active.0].id(), 2);
-        assert_eq!(pinned, HashSet::from([3, 4]));
     }
 
     fn browser(id: u64) -> DockTab {

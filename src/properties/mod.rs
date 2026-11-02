@@ -18,7 +18,7 @@ use std::{
     time::SystemTime,
 };
 
-use egui::{Id, Ui, ViewportBuilder, ViewportId};
+use egui::{Id, Ui};
 use egui_phosphor::regular as icon;
 use serde::{Deserialize, Serialize};
 
@@ -157,9 +157,10 @@ impl PropertiesTab {
     }
 }
 
+/// A floating window inside the main one. ("A separate window" opens a
+/// properties tab in a window of its own; see `tab_windows`.)
 struct Window {
     id: u64,
-    native: bool,
     view: View,
     /// Bring it to the front this frame.
     raise: bool,
@@ -183,19 +184,14 @@ impl Properties {
     }
 
     /// Opens a window for `source`, or raises the one already showing it.
-    pub fn open_window(&mut self, source: Source, native: bool) {
-        if let Some(window) = self
-            .windows
-            .iter_mut()
-            .find(|w| w.view.source == source && w.native == native)
-        {
+    pub fn open_window(&mut self, source: Source) {
+        if let Some(window) = self.windows.iter_mut().find(|w| w.view.source == source) {
             window.raise = true;
             return;
         }
         self.next_window += 1;
         self.windows.push(Window {
             id: self.next_window,
-            native,
             view: View::new(source, false),
             raise: true,
         });
@@ -239,53 +235,27 @@ impl Properties {
 fn window_ui(ctx: &egui::Context, window: &mut Window, shared: &mut Shared) -> bool {
     let title = format!("{} Properties", window.view.source.title());
     let raise = std::mem::take(&mut window.raise);
-    if window.native {
-        let id = ViewportId::from_hash_of(("properties", window.id));
-        if raise {
-            ctx.send_viewport_cmd_to(id, egui::ViewportCommand::Focus);
-        }
-        let builder = ViewportBuilder::default()
-            .with_title(title)
-            .with_app_id("egui-files")
-            .with_inner_size([460.0, 600.0])
-            .with_min_inner_size([320.0, 240.0]);
-        ctx.show_viewport_immediate(id, builder, |ui, _class| {
-            let close = ui.input(|i| i.viewport().close_requested());
-            let mut closed = false;
-            egui::CentralPanel::default().show(ui, |ui| {
-                window.view.ui(
-                    ui,
-                    shared,
-                    Host::Window {
-                        closed: &mut closed,
-                    },
-                );
-            });
-            !(close || closed)
-        })
-    } else {
-        let id = Id::new(("properties-window", window.id));
-        if raise {
-            ctx.move_to_top(egui::LayerId::new(egui::Order::Middle, id));
-        }
-        let mut open = true;
-        let mut closed = false;
-        egui::Window::new(title)
-            .id(id)
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(true)
-            .default_size([440.0, 560.0])
-            .min_size([300.0, 200.0])
-            .show(ctx, |ui| {
-                window.view.ui(
-                    ui,
-                    shared,
-                    Host::Window {
-                        closed: &mut closed,
-                    },
-                )
-            });
-        open && !closed
+    let id = Id::new(("properties-window", window.id));
+    if raise {
+        ctx.move_to_top(egui::LayerId::new(egui::Order::Middle, id));
     }
+    let mut open = true;
+    let mut closed = false;
+    egui::Window::new(title)
+        .id(id)
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(true)
+        .default_size([440.0, 560.0])
+        .min_size([300.0, 200.0])
+        .show(ctx, |ui| {
+            window.view.ui(
+                ui,
+                shared,
+                Host::Window {
+                    closed: &mut closed,
+                },
+            )
+        });
+    open && !closed
 }

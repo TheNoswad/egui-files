@@ -23,6 +23,7 @@ mod properties;
 mod sidebar;
 mod system_theme;
 mod tab;
+mod tab_windows;
 mod terminal;
 mod terminal_panel;
 mod theme;

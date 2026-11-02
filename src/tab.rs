@@ -83,6 +83,10 @@ pub enum AppAction {
     DiskUsage(PathBuf),
     /// Show properties, where the user chose.
     Properties(crate::properties::Source),
+    /// Move a tab into a window of its own.
+    MoveToNewWindow(u64),
+    /// Move a tab from its own window back into the main one.
+    MoveToMainWindow(u64),
 }
 
 /// Everything a view or toolbar can ask the tab to do.

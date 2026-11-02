@@ -15,7 +15,9 @@
     - [ ] Keep enough empty space to drag by, however much is turned on
     - [ ] Windows: rounded corners and the shadow via DWM; the Win11 snap layouts flyout needs `HTMAXBUTTON` from `WM_NCHITTEST`, which winit doesn't give us
     - [ ] Settings section for all of the above, next to the settings screen
-- [ ] properties tab should be a tab style window?
+- [ ] Tab windows: drag tabs between windows (each window has its own egui_dock, so for now it's "Move to main window" / "Move to new window" in the tab's menu)
+- [ ] Tab windows: app shortcuts (Ctrl+T, Ctrl+W, …) and the tab bar's right-click menu only work in the main window
+- [ ] Tab windows: try dropping a tab outside the window by hand on Wayland, X11 and Windows (only unit-tested so far; the drop is told from the pointer, which egui may lose as it leaves)
 - [ ] sftp etc
 - [ ] google drive
 - [ ] proton drive
