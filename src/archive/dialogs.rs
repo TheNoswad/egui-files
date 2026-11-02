@@ -48,7 +48,9 @@ impl FolderPicker {
 
     fn ui(&mut self, ui: &mut Ui, show_hidden: bool) {
         ui.horizontal(|ui| {
-            let edit = ui.add(TextEdit::singleline(&mut self.text).desired_width(340.0));
+            // Room for the new folder button, in a dialog as narrow as a phone.
+            let width = (ui.available_width() - 48.0).clamp(80.0, 340.0);
+            let edit = ui.add(TextEdit::singleline(&mut self.text).desired_width(width));
             if edit.lost_focus() {
                 let typed = PathBuf::from(self.text.trim());
                 if typed.is_dir() {
@@ -72,8 +74,9 @@ impl FolderPicker {
             }
         });
         egui::Frame::group(ui.style()).show(ui, |ui| {
-            ui.set_min_size(vec2(400.0, 240.0));
-            ui.set_max_size(vec2(400.0, 240.0));
+            let size = vec2(ui.available_width().min(400.0), 240.0);
+            ui.set_min_size(size);
+            ui.set_max_size(size);
             let roots: Vec<&Place> = self.roots.iter().collect();
             if let Some(TreeAction::Navigate(path) | TreeAction::OpenInNewTab(path)) =
                 self.tree.ui(ui, &roots, Some(&self.current), show_hidden)
@@ -154,7 +157,11 @@ impl CompressDialog {
         let mut start = false;
         let mut cancel = false;
         let modal = Modal::new(self.id).show(ctx, |ui| {
-            ui.set_width(440.0);
+            let width = crate::widgets::modal_width(ui, 440.0);
+            ui.set_width(width);
+            // The text fields leave room for the labels and the buttons
+            // beside them, on a phone too.
+            let field = (width - 190.0).clamp(80.0, 220.0);
             ui.heading(format!("{} Compress", icon::FILE_ZIP));
             let what = match self.sources.as_slice() {
                 [single] => format!("“{}”", display_name(single)),
@@ -173,7 +180,7 @@ impl CompressDialog {
                     ui.label("Name:");
                     ui.horizontal(|ui| {
                         let edit =
-                            ui.add(TextEdit::singleline(&mut self.name).desired_width(220.0));
+                            ui.add(TextEdit::singleline(&mut self.name).desired_width(field));
                         if std::mem::take(&mut self.just_opened) {
                             edit.request_focus();
                         }
@@ -237,7 +244,7 @@ impl CompressDialog {
                         let edit = TextEdit::singleline(&mut self.password)
                             .password(!self.show_password)
                             .hint_text("None")
-                            .desired_width(220.0);
+                            .desired_width(field);
                         ui.add_enabled(can_encrypt, edit)
                             .on_disabled_hover_text(why_not);
                         let eye = if self.show_password {
@@ -259,7 +266,7 @@ impl CompressDialog {
                         ui.add(
                             TextEdit::singleline(&mut self.confirm)
                                 .password(!self.show_password)
-                                .desired_width(220.0),
+                                .desired_width(field),
                         );
                         ui.end_row();
                         ui.label("");
@@ -368,7 +375,7 @@ impl ExtractDialog {
         let mut start = false;
         let mut cancel = false;
         let modal = Modal::new(self.id).show(ctx, |ui| {
-            ui.set_width(420.0);
+            ui.set_width(crate::widgets::modal_width(ui, 420.0));
             ui.heading(format!("{} Extract to…", icon::ARCHIVE));
             let what = match (&self.selection, self.archives.as_slice()) {
                 (Some(selection), [archive]) => format!(

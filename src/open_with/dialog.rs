@@ -77,7 +77,7 @@ impl Dialog {
     pub fn show(&mut self, ctx: &Context, prefs: &mut Prefs) -> Outcome {
         let mut outcome = Outcome::Open;
         let modal = Modal::new(Id::new("open-with-dialog")).show(ctx, |ui| {
-            ui.set_width(460.0);
+            ui.set_width(crate::widgets::modal_width(ui, 460.0));
             outcome = self.contents(ui, prefs);
         });
         if modal.should_close() && matches!(outcome, Outcome::Open) {

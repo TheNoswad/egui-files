@@ -1022,6 +1022,7 @@ impl FilesApp {
         let name = crate::fs::display_name(&editor.edit);
         let mut answer = None;
         let modal = egui::Modal::new(Id::new("confirm_close")).show(ctx, |ui| {
+            ui.set_max_width(crate::widgets::modal_width(ui, f32::INFINITY));
             ui.heading(format!("Save changes to “{name}”?"));
             ui.label("Your changes are lost if you don't save them.");
             ui.add_space(8.0);
@@ -2343,6 +2344,7 @@ impl FilesApp {
         let mut quit = false;
         let mut save_all = false;
         let modal = egui::Modal::new(Id::new("confirm_quit")).show(ctx, |ui| {
+            ui.set_max_width(crate::widgets::modal_width(ui, f32::INFINITY));
             ui.heading("Quit egui-files?");
             if !unsaved.is_empty() {
                 ui.label(format!("{} file(s) have unsaved changes:", unsaved.len()));
@@ -2688,6 +2690,10 @@ impl FilesApp {
             self.open_properties(Source::Files(vec![path]));
         }
         let mut app_actions = Vec::new();
+        // Opening from the preview shows what it opened, not the preview.
+        if !preview_actions.is_empty() {
+            self.mobile.sheet = None;
+        }
         for action in preview_actions {
             match action {
                 tab::Action::Activate(path) => {

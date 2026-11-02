@@ -534,7 +534,7 @@ impl Jobs {
         let mut answer = None;
         let mut cancel = false;
         Modal::new(Id::new(("job-prompt", Arc::as_ptr(&p) as usize))).show(ctx, |ui| {
-            ui.set_max_width(440.0);
+            ui.set_max_width(crate::widgets::modal_width(ui, 440.0));
             match prompt {
                 Prompt::Password { archive, wrong } => {
                     ui.heading(format!("{} Password required", icon::LOCK));

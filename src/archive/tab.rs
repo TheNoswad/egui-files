@@ -452,48 +452,50 @@ impl ArchiveTab {
     }
 
     fn toolbar(&mut self, ui: &mut Ui, ready: bool, actions: &mut Vec<Action>) {
-        ui.horizontal(|ui| {
-            let has_selection = !self.selection.is_empty();
-            if ui
-                .add_enabled(
-                    ready,
-                    Button::new(format!("{} Extract here", icon::ARCHIVE)),
-                )
-                .on_hover_text(crate::keymap::hint(
-                    ui.ctx(),
-                    "Extract everything next to the archive",
-                    crate::keymap::Command::Extract,
-                ))
-                .clicked()
-            {
-                actions.push(Action::ExtractHere { selected: false });
+        crate::widgets::split_row(ui, |ui, side| match side {
+            crate::widgets::Side::Left => {
+                let has_selection = !self.selection.is_empty();
+                if ui
+                    .add_enabled(
+                        ready,
+                        Button::new(format!("{} Extract here", icon::ARCHIVE)),
+                    )
+                    .on_hover_text(crate::keymap::hint(
+                        ui.ctx(),
+                        "Extract everything next to the archive",
+                        crate::keymap::Command::Extract,
+                    ))
+                    .clicked()
+                {
+                    actions.push(Action::ExtractHere { selected: false });
+                }
+                if ui
+                    .add_enabled(
+                        ready,
+                        Button::new(format!("{} Extract to…", icon::FOLDER_OPEN)),
+                    )
+                    .on_hover_text(crate::keymap::hint(
+                        ui.ctx(),
+                        "Choose where to extract everything",
+                        crate::keymap::Command::ExtractTo,
+                    ))
+                    .clicked()
+                {
+                    actions.push(Action::ExtractTo { selected: false });
+                }
+                ui.separator();
+                if ui
+                    .add_enabled(
+                        has_selection,
+                        Button::new(format!("{} Extract selected…", icon::FILE_ARROW_DOWN)),
+                    )
+                    .on_hover_text("Or drag them to a folder")
+                    .clicked()
+                {
+                    actions.push(Action::ExtractTo { selected: true });
+                }
             }
-            if ui
-                .add_enabled(
-                    ready,
-                    Button::new(format!("{} Extract to…", icon::FOLDER_OPEN)),
-                )
-                .on_hover_text(crate::keymap::hint(
-                    ui.ctx(),
-                    "Choose where to extract everything",
-                    crate::keymap::Command::ExtractTo,
-                ))
-                .clicked()
-            {
-                actions.push(Action::ExtractTo { selected: false });
-            }
-            ui.separator();
-            if ui
-                .add_enabled(
-                    has_selection,
-                    Button::new(format!("{} Extract selected…", icon::FILE_ARROW_DOWN)),
-                )
-                .on_hover_text("Or drag them to a folder")
-                .clicked()
-            {
-                actions.push(Action::ExtractTo { selected: true });
-            }
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            crate::widgets::Side::Right => {
                 if ui
                     .add_enabled(ready, Button::new(icon::ARROWS_IN_SIMPLE))
                     .on_hover_text("Collapse all")
@@ -513,7 +515,7 @@ impl ArchiveTab {
                         .hint_text(format!("{} Filter", icon::MAGNIFYING_GLASS))
                         .desired_width(180.0),
                 );
-            });
+            }
         });
     }
 

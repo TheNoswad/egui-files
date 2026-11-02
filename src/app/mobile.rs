@@ -27,6 +27,9 @@ pub const DESKTOP_MIN_SIZE: Vec2 = vec2(480.0, 320.0);
 /// The window's size when switching back without one to return to.
 const DESKTOP_SIZE: Vec2 = vec2(1100.0, 700.0);
 
+/// How far content stays from the screen's sides.
+const EDGE_MARGIN: i8 = 4;
+
 /// How tall the bottom bar is.
 const BAR_HEIGHT: f32 = 56.0;
 /// Tab cards in the switcher.
@@ -335,8 +338,10 @@ pub fn show(
     if !viewer.shared.jobs.is_empty() {
         Panel::bottom("jobs").show(ui, |ui| viewer.shared.jobs.ui(ui));
     }
+    // Clear of the screen's edges, which phones round off.
+    let margin = egui::Margin::symmetric(EDGE_MARGIN, 0);
     CentralPanel::default()
-        .frame(egui::Frame::NONE)
+        .frame(egui::Frame::NONE.inner_margin(margin))
         .show(ui, |ui| match mobile.sheet {
             None => {
                 let tab = current.and_then(|id| {

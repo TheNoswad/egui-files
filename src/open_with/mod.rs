@@ -179,6 +179,7 @@ impl OpenWith {
         }
         if let Some(error) = &self.error {
             let modal = egui::Modal::new(egui::Id::new("open-with-error")).show(ctx, |ui| {
+                ui.set_max_width(crate::widgets::modal_width(ui, f32::INFINITY));
                 ui.heading("Couldn't open");
                 ui.label(error);
                 ui.add_space(8.0);

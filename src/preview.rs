@@ -200,6 +200,7 @@ pub fn show(
                 egui::Frame::group(ui.style())
                     .fill(colors.background)
                     .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
                         ui.with_layout(Layout::top_down(Align::Min), |ui| {
                             let job = highlight::layout_job(
                                 text,

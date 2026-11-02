@@ -18,8 +18,8 @@ use std::{
 };
 
 use egui::{
-    Align, Button, CentralPanel, CornerRadius, FontId, Id, Key, Layout, Modifiers, Panel, Rect,
-    Response, RichText, Sense, Ui, text::LayoutJob, vec2,
+    Button, CentralPanel, CornerRadius, FontId, Id, Key, Modifiers, Panel, Rect, Response,
+    RichText, Sense, Ui, text::LayoutJob, vec2,
 };
 use egui_phosphor::regular as icon;
 use serde::{Deserialize, Serialize};
@@ -699,51 +699,52 @@ impl UsageTab {
         acts: &mut Vec<Act>,
         rescan: &mut bool,
     ) {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
-            if scan.running() {
-                if ui
-                    .button(icon::STOP)
-                    .on_hover_text("Stop scanning")
+        crate::widgets::split_row(ui, |ui, side| match side {
+            crate::widgets::Side::Left => {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                if scan.running() {
+                    if ui
+                        .button(icon::STOP)
+                        .on_hover_text("Stop scanning")
+                        .clicked()
+                    {
+                        scan.cancel();
+                    }
+                } else if ui
+                    .button(icon::ARROW_CLOCKWISE)
+                    .on_hover_text("Scan again")
                     .clicked()
                 {
-                    scan.cancel();
+                    *rescan = true;
                 }
-            } else if ui
-                .button(icon::ARROW_CLOCKWISE)
-                .on_hover_text("Scan again")
-                .clicked()
-            {
-                *rescan = true;
-            }
-            if ui
-                .add_enabled(self.focus != ROOT, Button::new(icon::ARROW_UP))
-                .on_hover_text("Up a level (Backspace)")
-                .clicked()
-            {
-                acts.push(Act::Up);
-            }
-            ui.add_space(6.0);
-            // The path from the scanned folder to the focused one.
-            let chain = tree.ancestry(self.focus);
-            for (i, &id) in chain.iter().enumerate() {
-                if i > 0 {
-                    ui.label(RichText::new(icon::CARET_RIGHT).small().weak());
-                }
-                let name = if id == ROOT {
-                    self.usage.display().to_string()
-                } else {
-                    tree.name(id)
-                };
                 if ui
-                    .add(Button::selectable(id == self.focus, name).frame_when_inactive(false))
+                    .add_enabled(self.focus != ROOT, Button::new(icon::ARROW_UP))
+                    .on_hover_text("Up a level (Backspace)")
                     .clicked()
                 {
-                    acts.push(Act::Zoom(id));
+                    acts.push(Act::Up);
+                }
+                ui.add_space(6.0);
+                // The path from the scanned folder to the focused one.
+                let chain = tree.ancestry(self.focus);
+                for (i, &id) in chain.iter().enumerate() {
+                    if i > 0 {
+                        ui.label(RichText::new(icon::CARET_RIGHT).small().weak());
+                    }
+                    let name = if id == ROOT {
+                        self.usage.display().to_string()
+                    } else {
+                        tree.name(id)
+                    };
+                    if ui
+                        .add(Button::selectable(id == self.focus, name).frame_when_inactive(false))
+                        .clicked()
+                    {
+                        acts.push(Act::Zoom(id));
+                    }
                 }
             }
-
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            crate::widgets::Side::Right => {
                 ui.spacing_mut().item_spacing.x = 2.0;
                 egui::ComboBox::from_id_salt(("usage-metric", self.id))
                     .selected_text(self.metric.label())
@@ -777,7 +778,7 @@ impl UsageTab {
                         self.view = view;
                     }
                 }
-            });
+            }
         });
     }
 
@@ -794,61 +795,65 @@ impl UsageTab {
                 space
             }
         };
-        ui.horizontal(|ui| {
-            if running {
-                ui.spinner();
-            }
-            if scan.reading_mft() {
-                ui.label(format!(
-                    "Reading the drive's master file table… {:.1} s",
-                    scan.elapsed().as_secs_f32()
-                ));
-                return;
-            }
-            let mut text = format!(
-                "{} in {} files, {} folders",
-                crate::fs::human_size(root.size(self.metric)),
-                lists::count(root.totals.files),
-                lists::count(tree.dirs),
-            );
-            if scan.cancelled() && !running {
-                text.push_str(" — stopped early");
-            }
-            text.push_str(&format!(" · {:.1} s", scan.elapsed().as_secs_f32()));
-            ui.label(text);
-            if tree.unreadable > 0 {
-                ui.label(
-                    RichText::new(format!("{} {} unreadable", icon::WARNING, tree.unreadable))
-                        .color(ui.visuals().warn_fg_color),
-                )
-                .on_hover_text("Folders that couldn't be listed, usually for lack of permission");
-            }
-            if let Some(error) = scan.mft_error() {
-                // Declined or failed: scanning again lists folders.
-                self.fast = false;
-                ui.label(
-                    RichText::new(format!("{} Fast scan didn't work", icon::WARNING))
-                        .color(ui.visuals().warn_fg_color),
-                )
-                .on_hover_text(format!(
-                    "Couldn't read the drive's master file table ({error}), so its folders \
-                     were listed instead"
-                ));
-            } else if self.mft == Some(mft::Access::Elevate)
-                && !scan.used_mft()
-                && ui
-                    .button(format!("{} Fast scan", icon::LIGHTNING))
+        crate::widgets::split_row(ui, |ui, side| match side {
+            crate::widgets::Side::Left => {
+                if running {
+                    ui.spinner();
+                }
+                if scan.reading_mft() {
+                    ui.label(format!(
+                        "Reading the drive's master file table… {:.1} s",
+                        scan.elapsed().as_secs_f32()
+                    ));
+                    return;
+                }
+                let mut text = format!(
+                    "{} in {} files, {} folders",
+                    crate::fs::human_size(root.size(self.metric)),
+                    lists::count(root.totals.files),
+                    lists::count(tree.dirs),
+                );
+                if scan.cancelled() && !running {
+                    text.push_str(" — stopped early");
+                }
+                text.push_str(&format!(" · {:.1} s", scan.elapsed().as_secs_f32()));
+                ui.label(text);
+                if tree.unreadable > 0 {
+                    ui.label(
+                        RichText::new(format!("{} {} unreadable", icon::WARNING, tree.unreadable))
+                            .color(ui.visuals().warn_fg_color),
+                    )
                     .on_hover_text(
-                        "Scan the whole drive again from its master file table: seconds \
+                        "Folders that couldn't be listed, usually for lack of permission",
+                    );
+                }
+                if let Some(error) = scan.mft_error() {
+                    // Declined or failed: scanning again lists folders.
+                    self.fast = false;
+                    ui.label(
+                        RichText::new(format!("{} Fast scan didn't work", icon::WARNING))
+                            .color(ui.visuals().warn_fg_color),
+                    )
+                    .on_hover_text(format!(
+                        "Couldn't read the drive's master file table ({error}), so its folders \
+                     were listed instead"
+                    ));
+                } else if self.mft == Some(mft::Access::Elevate)
+                    && !scan.used_mft()
+                    && ui
+                        .button(format!("{} Fast scan", icon::LIGHTNING))
+                        .on_hover_text(
+                            "Scan the whole drive again from its master file table: seconds \
                          instead of minutes on a hard drive. Needs an administrator, so \
                          Windows asks first.",
-                    )
-                    .clicked()
-            {
-                fast = true;
+                        )
+                        .clicked()
+                {
+                    fast = true;
+                }
             }
-            if let Some(space) = space {
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            crate::widgets::Side::Right => {
+                if let Some(space) = space {
                     ui.label(
                         RichText::new(format!(
                             "{} free of {}",
@@ -858,7 +863,7 @@ impl UsageTab {
                         .weak(),
                     );
                     volume_bar(ui, space, root.totals.disk);
-                });
+                }
             }
         });
         fast

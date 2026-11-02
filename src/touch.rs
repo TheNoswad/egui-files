@@ -24,7 +24,7 @@ pub const TOUCH_SIZE: f32 = 40.0;
 pub fn touch_style(style: &mut Style) {
     let s = &mut style.spacing;
     s.interact_size.y = s.interact_size.y.max(TOUCH_SIZE * 0.8);
-    s.button_padding = s.button_padding.max(egui::vec2(10.0, 6.0));
+    s.button_padding = s.button_padding.max(egui::vec2(8.0, 6.0));
     s.item_spacing = s.item_spacing.max(egui::vec2(8.0, 6.0));
     let m = &mut s.menu_margin;
     for side in [&mut m.left, &mut m.right, &mut m.top, &mut m.bottom] {

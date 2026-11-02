@@ -34,6 +34,9 @@ pub struct ThemeEditor {
     message: Option<(String, bool)>,
     import: String,
     font_filter: String,
+    /// Showing the selected theme in place of the list, when they don't
+    /// fit side by side (on a phone).
+    details_open: bool,
 }
 
 /// A theme file being edited, shown live before it's saved.
@@ -174,11 +177,27 @@ impl Themes {
     }
 
     fn themes_page(&mut self, ui: &mut Ui, now: f64) {
-        Panel::left("theme-list")
-            .resizable(true)
-            .default_size(200.0)
-            .min_size(150.0)
-            .show(ui, |ui| self.theme_list(ui));
+        // Side by side when there's room, else one at a time.
+        if ui.available_width() < 500.0 {
+            if !self.editor.details_open || self.editor.selected.is_none() {
+                // Picking a theme, even the one already picked, shows it.
+                self.editor.details_open = self.theme_list(ui);
+                return;
+            }
+            if ui.button(format!("{} Themes", icon::ARROW_LEFT)).clicked() {
+                self.editor.details_open = false;
+                return;
+            }
+            ui.separator();
+        } else {
+            Panel::left("theme-list")
+                .resizable(true)
+                .default_size(200.0)
+                .min_size(150.0)
+                .show(ui, |ui| {
+                    self.theme_list(ui);
+                });
+        }
         let Some(name) = self.editor.selected.clone() else {
             ui.weak("Pick a theme on the left.");
             return;
@@ -190,8 +209,10 @@ impl Themes {
             .show(ui, |ui| self.theme_details(ui, &name, &resolved, now));
     }
 
-    fn theme_list(&mut self, ui: &mut Ui) {
+    /// The themes to pick from. Returns whether one was picked.
+    fn theme_list(&mut self, ui: &mut Ui) -> bool {
         let mut select = None;
+        let mut picked = false;
         ScrollArea::vertical()
             .id_salt("theme-list")
             .max_height(ui.available_height() - 90.0)
@@ -216,7 +237,9 @@ impl Themes {
                             text = text.color(ui.visuals().error_fg_color);
                         }
                         let selected = self.editor.selected.as_deref() == Some(&entry.name);
-                        if ui.selectable_label(selected, text).clicked() && !selected {
+                        let clicked = ui.selectable_label(selected, text).clicked();
+                        picked |= clicked;
+                        if clicked && !selected {
                             select = Some(entry.name.clone());
                         }
                     }
@@ -254,6 +277,7 @@ impl Themes {
                 self.import();
             }
         });
+        picked
     }
 
     fn import(&mut self) {

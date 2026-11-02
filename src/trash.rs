@@ -452,37 +452,39 @@ impl TrashTab {
     }
 
     fn toolbar(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
-        ui.horizontal(|ui| {
-            let has_selection = !self.selection.is_empty();
-            if ui
-                .button(RichText::new(icon::ARROW_CLOCKWISE).size(16.0))
-                .on_hover_text(crate::keymap::hint(ui.ctx(), "Refresh", C::Refresh))
-                .clicked()
-            {
-                actions.push(Action::Refresh);
+        crate::widgets::split_row(ui, |ui, side| match side {
+            crate::widgets::Side::Left => {
+                let has_selection = !self.selection.is_empty();
+                if ui
+                    .button(RichText::new(icon::ARROW_CLOCKWISE).size(16.0))
+                    .on_hover_text(crate::keymap::hint(ui.ctx(), "Refresh", C::Refresh))
+                    .clicked()
+                {
+                    actions.push(Action::Refresh);
+                }
+                ui.separator();
+                if ui
+                    .add_enabled(
+                        has_selection,
+                        Button::new(format!("{} Restore", icon::ARROW_COUNTER_CLOCKWISE)),
+                    )
+                    .on_hover_text("Move back to the original location")
+                    .clicked()
+                {
+                    actions.push(Action::Restore);
+                }
+                if ui
+                    .add_enabled(
+                        has_selection,
+                        Button::new(format!("{} Delete permanently", icon::X)),
+                    )
+                    .on_hover_text(crate::keymap::hint(ui.ctx(), "Delete", C::Trash))
+                    .clicked()
+                {
+                    actions.push(Action::AskPurge);
+                }
             }
-            ui.separator();
-            if ui
-                .add_enabled(
-                    has_selection,
-                    Button::new(format!("{} Restore", icon::ARROW_COUNTER_CLOCKWISE)),
-                )
-                .on_hover_text("Move back to the original location")
-                .clicked()
-            {
-                actions.push(Action::Restore);
-            }
-            if ui
-                .add_enabled(
-                    has_selection,
-                    Button::new(format!("{} Delete permanently", icon::X)),
-                )
-                .on_hover_text(crate::keymap::hint(ui.ctx(), "Delete", C::Trash))
-                .clicked()
-            {
-                actions.push(Action::AskPurge);
-            }
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            crate::widgets::Side::Right => {
                 if ui
                     .add_enabled(
                         !self.items().is_empty(),
@@ -497,7 +499,7 @@ impl TrashTab {
                         .hint_text(format!("{} Filter", icon::MAGNIFYING_GLASS))
                         .desired_width(180.0),
                 );
-            });
+            }
         });
     }
 
@@ -638,6 +640,7 @@ impl TrashTab {
         let mut confirmed = false;
         let mut cancelled = false;
         let modal = Modal::new(Id::new(("confirm-purge", self.id))).show(ctx, |ui| {
+            ui.set_max_width(crate::widgets::modal_width(ui, f32::INFINITY));
             ui.heading("Delete permanently?");
             ui.label(if count == 1 {
                 "1 item will be deleted. This can't be undone.".to_owned()

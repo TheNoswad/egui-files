@@ -220,7 +220,7 @@ fn appearance(ui: &mut Ui, app: &mut Access) {
     group(ui, "Theme");
     egui::widgets::global_theme_preference_buttons(ui);
     ui.add_space(4.0);
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.menu_button(format!("{} Dark mode theme", icon::MOON), |ui| {
             app.themes.menu_ui(ui, egui::Theme::Dark);
         });
@@ -235,25 +235,28 @@ fn appearance(ui: &mut Ui, app: &mut Access) {
         }
     });
 
-    group(ui, "Window");
-    let bar = &mut *app.titlebar;
-    ui.checkbox(&mut bar.enabled, "Draw the title bar in the app")
-        .on_hover_text(
-            "The menus share a row with the window buttons; \
-             off uses the system's title bar",
-        );
-    ui.indent("titlebar-parts", |ui| {
-        ui.add_enabled_ui(bar.enabled, |ui| {
-            ui.checkbox(&mut bar.title, "Title of the focused tab");
-            ui.checkbox(&mut bar.navigation, "Back, forward and up");
-            ui.checkbox(&mut bar.path_box, "Path box");
-            ui.checkbox(&mut bar.filter_box, "Filter box");
-            ui.checkbox(&mut bar.pane_toggles, "Pane buttons")
-                .on_hover_text("Open and close the places, folder tree, preview and terminal");
-            ui.weak("Parts that don't fit hide, leaving room to drag the window by.");
-            window_buttons(ui, &mut bar.buttons);
+    // A phone's app has no window of its own to dress.
+    if !cfg!(target_os = "android") {
+        group(ui, "Window");
+        let bar = &mut *app.titlebar;
+        ui.checkbox(&mut bar.enabled, "Draw the title bar in the app")
+            .on_hover_text(
+                "The menus share a row with the window buttons; \
+                 off uses the system's title bar",
+            );
+        ui.indent("titlebar-parts", |ui| {
+            ui.add_enabled_ui(bar.enabled, |ui| {
+                ui.checkbox(&mut bar.title, "Title of the focused tab");
+                ui.checkbox(&mut bar.navigation, "Back, forward and up");
+                ui.checkbox(&mut bar.path_box, "Path box");
+                ui.checkbox(&mut bar.filter_box, "Filter box");
+                ui.checkbox(&mut bar.pane_toggles, "Pane buttons")
+                    .on_hover_text("Open and close the places, folder tree, preview and terminal");
+                ui.weak("Parts that don't fit hide, leaving room to drag the window by.");
+                window_buttons(ui, &mut bar.buttons);
+            });
         });
-    });
+    }
 
     group(ui, "Editor");
     ui.menu_button(format!("{} Syntax colors", icon::PALETTE), |ui| {

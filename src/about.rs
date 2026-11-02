@@ -132,6 +132,9 @@ pub struct About {
     search: String,
     filter: Filter,
     selected: Selected,
+    /// Showing the selected crate's details in place of the list, when
+    /// they don't fit side by side (on a phone).
+    details_open: bool,
     startup: Startup,
     probed: Option<Arc<OnceLock<Probed>>>,
 }
@@ -152,6 +155,7 @@ impl About {
             search: String::new(),
             filter: Filter::All,
             selected: Selected::Crate(crate_index(NAME_FOR_START).unwrap_or(0)),
+            details_open: false,
             startup: Startup {
                 windowing,
                 gpu: cc
@@ -334,82 +338,105 @@ impl About {
     }
 
     fn credits_page(&mut self, ui: &mut Ui) {
+        // Side by side when there's room, else one at a time.
+        if ui.available_width() < 500.0 {
+            if self.details_open {
+                if ui.button(format!("{} Crates", icon::ARROW_LEFT)).clicked() {
+                    self.details_open = false;
+                }
+                ui.separator();
+                self.credits_details(ui);
+            } else if self.credits_list(ui) {
+                self.details_open = true;
+            }
+            return;
+        }
         egui::Panel::left("about-credits-list")
             .resizable(true)
             .default_size(250.0)
             .min_size(160.0)
-            .show(ui, |ui| {
-                ui.add(
-                    TextEdit::singleline(&mut self.search)
-                        .hint_text(format!(
-                            "{} Search crates, licenses, authors",
-                            icon::MAGNIFYING_GLASS
-                        ))
-                        .desired_width(f32::INFINITY),
-                );
-                egui::ComboBox::from_id_salt("about-credits-filter")
-                    .selected_text(self.filter.label())
-                    .width(ui.available_width())
-                    .show_ui(ui, |ui| {
-                        for filter in [
-                            Filter::All,
-                            Filter::InApp,
-                            Filter::Direct,
-                            Filter::BuildOnly,
-                        ] {
-                            ui.selectable_value(&mut self.filter, filter, filter.label());
-                        }
-                    });
-                let query = self.search.to_lowercase();
-                let shown: Vec<usize> = CRATES
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, c)| self.filter.matches(c) && matches_query(c, &query))
-                    .map(|(i, _)| i)
-                    .collect();
-                ui.weak(format!("{} of {} crates", shown.len(), CRATES.len()));
-                ui.separator();
-                let row_height = ui.spacing().interact_size.y;
-                let syntaxes = query.is_empty() || "syntaxes themes bat two-face".contains(&query);
-                let rows = shown.len() + usize::from(syntaxes);
-                ScrollArea::vertical().auto_shrink(false).show_rows(
-                    ui,
-                    row_height,
-                    rows,
-                    |ui, range| {
-                        for row in range {
-                            let (selected, text) = match row.checked_sub(usize::from(syntaxes)) {
-                                None => (
-                                    Selected::Syntaxes,
-                                    RichText::new(format!("{} Syntaxes & themes", icon::PALETTE)),
-                                ),
-                                Some(i) => {
-                                    let c = &CRATES[shown[i]];
-                                    let text = RichText::new(format!("{} {}", c.name, c.version));
-                                    (
-                                        Selected::Crate(shown[i]),
-                                        if c.in_app { text } else { text.weak() },
-                                    )
-                                }
-                            };
-                            ui.add_sized(
-                                [ui.available_width(), row_height],
-                                egui::Button::selectable(self.selected == selected, text)
-                                    .truncate(),
-                            )
-                            .clicked()
-                            .then(|| self.selected = selected);
-                        }
-                    },
-                );
-            });
+            .show(ui, |ui| self.credits_list(ui));
+        self.credits_details(ui);
+    }
+
+    fn credits_details(&self, ui: &mut Ui) {
         ScrollArea::vertical()
+            .scroll_source(crate::touch::scroll_source(ui.ctx()))
             .id_salt(("about-credits-details", self.selected_key()))
             .auto_shrink(false)
             .show(ui, |ui| match self.selected {
                 Selected::Syntaxes => syntaxes_ui(ui),
                 Selected::Crate(i) => crate_ui(ui, &CRATES[i]),
             });
+    }
+
+    /// The searchable list of crates. Returns whether one was picked.
+    fn credits_list(&mut self, ui: &mut Ui) -> bool {
+        let mut picked = false;
+        ui.add(
+            TextEdit::singleline(&mut self.search)
+                .hint_text(format!(
+                    "{} Search crates, licenses, authors",
+                    icon::MAGNIFYING_GLASS
+                ))
+                .desired_width(f32::INFINITY),
+        );
+        egui::ComboBox::from_id_salt("about-credits-filter")
+            .selected_text(self.filter.label())
+            .width(ui.available_width())
+            .show_ui(ui, |ui| {
+                for filter in [
+                    Filter::All,
+                    Filter::InApp,
+                    Filter::Direct,
+                    Filter::BuildOnly,
+                ] {
+                    ui.selectable_value(&mut self.filter, filter, filter.label());
+                }
+            });
+        let query = self.search.to_lowercase();
+        let shown: Vec<usize> = CRATES
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| self.filter.matches(c) && matches_query(c, &query))
+            .map(|(i, _)| i)
+            .collect();
+        ui.weak(format!("{} of {} crates", shown.len(), CRATES.len()));
+        ui.separator();
+        let row_height = ui.spacing().interact_size.y;
+        let syntaxes = query.is_empty() || "syntaxes themes bat two-face".contains(&query);
+        let rows = shown.len() + usize::from(syntaxes);
+        ScrollArea::vertical()
+            .scroll_source(crate::touch::scroll_source(ui.ctx()))
+            .auto_shrink(false)
+            .show_rows(ui, row_height, rows, |ui, range| {
+                for row in range {
+                    let (selected, text) = match row.checked_sub(usize::from(syntaxes)) {
+                        None => (
+                            Selected::Syntaxes,
+                            RichText::new(format!("{} Syntaxes & themes", icon::PALETTE)),
+                        ),
+                        Some(i) => {
+                            let c = &CRATES[shown[i]];
+                            let text = RichText::new(format!("{} {}", c.name, c.version));
+                            (
+                                Selected::Crate(shown[i]),
+                                if c.in_app { text } else { text.weak() },
+                            )
+                        }
+                    };
+                    ui.add_sized(
+                        [ui.available_width(), row_height],
+                        egui::Button::selectable(self.selected == selected, text).truncate(),
+                    )
+                    .clicked()
+                    .then(|| {
+                        self.selected = selected;
+                        picked = true;
+                    });
+                }
+            });
+        picked
     }
 
     fn selected_key(&self) -> usize {
@@ -873,6 +900,7 @@ mod tests {
             search: String::new(),
             filter: Filter::All,
             selected: Selected::Crate(0),
+            details_open: false,
             startup: Startup {
                 windowing: "test",
                 gpu: None,

@@ -1246,6 +1246,7 @@ impl BrowserTab {
         };
         let mut cancel = false;
         let modal = Modal::new(Id::new(("rename", self.id))).show(ctx, |ui| {
+            ui.set_max_width(crate::widgets::modal_width(ui, f32::INFINITY));
             ui.heading("Rename");
             let mut output = TextEdit::singleline(&mut rename.name)
                 .desired_width(320.0)

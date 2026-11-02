@@ -236,3 +236,64 @@ mod tests {
         assert_eq!(moved(1, 9), "abcd");
     }
 }
+
+/// Which part of a [`split_row`] to add.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    Left,
+    /// Added right to left: the first widget is rightmost.
+    Right,
+}
+
+/// A toolbar row with widgets along the left and others along the right,
+/// as `add` adds them for each [`Side`]. When both don't fit, as on a
+/// phone, the right ones get a row of their own below rather than being
+/// drawn over the left ones, and the left ones wrap.
+pub fn split_row(ui: &mut Ui, mut add: impl FnMut(&mut Ui, Side)) {
+    let id = ui.id().with("split_row");
+    // Each side's width, unsqueezed, as last measured.
+    let widths: Option<[f32; 2]> = ui.data(|d| d.get_temp(id));
+    let gap = ui.spacing().item_spacing.x * 2.0;
+    let available = ui.available_width();
+    let fits = |[left, right]: [f32; 2]| left + right + gap <= available;
+    if widths.is_none_or(fits) {
+        let measured = ui
+            .horizontal(|ui| {
+                let left = ui
+                    .horizontal(|ui| add(ui, Side::Left))
+                    .response
+                    .rect
+                    .width();
+                let right = ui
+                    .with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        add(ui, Side::Right);
+                        ui.min_rect().width()
+                    })
+                    .inner;
+                [left, right]
+            })
+            .inner;
+        ui.data_mut(|d| d.insert_temp(id, measured));
+        if !fits(measured) {
+            // Drawn over each other: lay the frame out again, in two rows.
+            ui.ctx().request_discard("a toolbar didn't fit on one row");
+        }
+    } else {
+        let [left, _] = widths.unwrap_or_default();
+        ui.horizontal_wrapped(|ui| add(ui, Side::Left));
+        let right = ui
+            .horizontal(|ui| add(ui, Side::Right))
+            .response
+            .rect
+            .width();
+        // The left side's width wrapped isn't its width on one row.
+        ui.data_mut(|d| d.insert_temp(id, [left, right]));
+    }
+}
+
+/// A dialog's width: `wanted`, or narrower to stay on screen (a phone's).
+pub fn modal_width(ui: &Ui, wanted: f32) -> f32 {
+    // The modal's frame, and some screen to either side.
+    let room = ui.ctx().content_rect().width() - 2.0 * ui.spacing().window_margin.sum().x - 24.0;
+    wanted.min(room.max(120.0))
+}

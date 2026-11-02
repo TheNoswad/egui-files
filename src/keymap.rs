@@ -371,8 +371,13 @@ pub fn pressed(ctx: &Context, command: Command) -> bool {
     ctx.input_mut(|i| keymap.pressed(i, command))
 }
 
-/// `command`'s first shortcut, as menus show it, or "" with none.
+/// `command`'s first shortcut, as menus show it, or "" with none (or with
+/// no keyboard to point to, in the mobile layout).
 pub fn text(ctx: &Context, command: Command) -> String {
+    // Menus on a touchscreen have no keyboard to point to.
+    if crate::touch::is_touch(ctx) {
+        return String::new();
+    }
     get(ctx)
         .shortcuts(command)
         .first()
