@@ -378,6 +378,25 @@ fn open_dir() -> PathBuf {
 mod tests {
     use super::*;
 
+    /// unrar asks GCC which SIMD the CPU has, which links GCC's CPU detection
+    /// from the static libgcc.a. On distros that build GCC for newer CPUs
+    /// (CachyOS: x86-64-v3) that code itself uses BMI2 and crashed the app at
+    /// startup on older CPUs; patches/unrar_sys/cpu_supports.hpp avoids it.
+    /// This binary links unrar too, so it must not contain it either.
+    #[test]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    fn gcc_cpu_detection_is_not_linked() {
+        let exe = std::fs::read(std::env::current_exe().unwrap()).unwrap();
+        // `__cpu_indicator_init`, spelled backwards so this test doesn't put
+        // the name in the binary itself.
+        let needle: Vec<u8> = b"tini_rotacidni_upc__".iter().rev().copied().collect();
+        assert!(
+            memchr::memmem::find(&exe, &needle).is_none(),
+            "GCC's CPU detection is linked in; it may need a newer CPU than the \
+             binary targets (see patches/unrar_sys/cpu_supports.hpp)"
+        );
+    }
+
     #[test]
     fn detects_formats_and_stems() {
         let cases = [

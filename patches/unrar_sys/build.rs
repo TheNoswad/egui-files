@@ -61,7 +61,16 @@ fn main() {
         files.push("isnt");
     }
     let files: Vec<String> = files.iter().map(|s| format!("vendor/unrar/{s}.cpp")).collect();
-    cc::Build::new()
+    let mut build = cc::Build::new();
+    // Keep GCC's CPU detection (built for a newer CPU on some distros) out of
+    // the binary; see cpu_supports.hpp.
+    let x86 = std::env::var("CARGO_CFG_TARGET_ARCH").is_ok_and(|a| a == "x86_64" || a == "x86");
+    if std::env::var("CARGO_CFG_TARGET_OS").unwrap() == "linux" && x86 {
+        let header = std::path::Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap())
+            .join("cpu_supports.hpp");
+        build.flag("-include").flag(header.to_str().unwrap());
+    }
+    build
         .cpp(true) // Switch to C++ library compilation.
         .opt_level(2)
         .std("c++14")

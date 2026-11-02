@@ -6,8 +6,15 @@ published crate as-is, so a patch can be dropped once upstream fixes it.
 
 ## unrar_sys (0.5.8)
 
-Only `build.rs`: it checks the host OS instead of the target, which breaks
+`build.rs`: it checks the host OS instead of the target, which breaks
 cross-compiling to Windows.
+
+`cpu_supports.hpp` (ours, force-included on Linux x86): unrar's
+`__builtin_cpu_supports` links GCC's `__cpu_indicator_init` from the static
+libgcc.a, which CachyOS builds for x86-64-v3 (BMI2), so the app died with
+SIGILL before `main` on older CPUs (an Ivy Bridge i5-3230M). The header swaps in
+a plain `cpuid` check; `archive::tests::gcc_cpu_detection_is_not_linked`
+guards it.
 
 ## egui-winit (0.36.2)
 
