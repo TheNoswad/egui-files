@@ -186,6 +186,22 @@ const RESERVED_BARE: [Key; 9] = [
     Key::End,
 ];
 
+/// Whether `key` is Shift, Ctrl, Alt or Super themselves, which egui reports
+/// as keys of their own when pressed. A shortcut is what's pressed with them.
+pub fn is_modifier(key: Key) -> bool {
+    matches!(
+        key,
+        Key::ShiftLeft
+            | Key::ShiftRight
+            | Key::ControlLeft
+            | Key::ControlRight
+            | Key::AltLeft
+            | Key::AltRight
+            | Key::SuperLeft
+            | Key::SuperRight
+    )
+}
+
 /// Why a shortcut can't be bound, if it can't.
 pub fn refusal(shortcut: KeyboardShortcut) -> Option<String> {
     let KeyboardShortcut {
@@ -467,6 +483,13 @@ mod tests {
         pass(false, false);
         pass(false, false);
         assert!(!get(&ctx).is_capturing());
+    }
+
+    #[test]
+    fn modifier_keys_alone_are_not_shortcuts() {
+        assert!(is_modifier(Key::ControlLeft));
+        assert!(is_modifier(Key::SuperRight));
+        assert!(!is_modifier(Key::K));
     }
 
     #[test]

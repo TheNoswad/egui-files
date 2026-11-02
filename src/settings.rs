@@ -317,12 +317,13 @@ fn keyboard(ui: &mut Ui) {
     }
 
     if let Some(command) = state.capturing {
-        // The first key pressed with any modifiers; Escape alone cancels.
+        // The first key pressed with any modifiers held; Ctrl and the like
+        // come as keys of their own too, but only count as modifiers.
+        // Escape alone cancels.
         let pressed = ctx.input_mut(|i| {
-            let at = i
-                .events
-                .iter()
-                .position(|e| matches!(e, egui::Event::Key { pressed: true, .. }))?;
+            let at = i.events.iter().position(|e| {
+                matches!(e, egui::Event::Key { pressed: true, key, .. } if !keymap::is_modifier(*key))
+            })?;
             match i.events.remove(at) {
                 egui::Event::Key { key, modifiers, .. } => Some((key, modifiers)),
                 _ => None,
