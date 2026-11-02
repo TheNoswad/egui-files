@@ -1274,7 +1274,10 @@ impl FilesApp {
                 ui.checkbox(&mut self.shared.show_hidden, "Show hidden files (Ctrl+H)");
                 ui.checkbox(&mut self.shared.show_thumbnails, "Show thumbnails");
                 ui.checkbox(&mut self.shared.usage.enabled, "Show folder sizes")
-                    .on_hover_text("Measure the folders in the Details view, in the background");
+                    .on_hover_text(
+                        "Measure the folders in the Details view, in the background; \
+                         not on network drives or FUSE mounts (a disk usage tab still can)",
+                    );
                 crate::dates::checkbox(ui);
                 ui.checkbox(&mut self.sidebar.hide_empty_drives, "Hide empty drives")
                     .on_hover_text("Card readers without a card and drives with no disc");

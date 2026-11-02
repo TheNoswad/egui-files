@@ -8,7 +8,7 @@ pub mod elevate;
 mod hash;
 mod info;
 mod media;
-mod platform;
+pub(crate) mod platform;
 mod view;
 mod walk;
 

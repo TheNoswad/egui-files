@@ -1047,6 +1047,9 @@ pub struct Scans {
     cache: Vec<Cached>,
     /// Scan folders the browser shows; off, only disk usage tabs give sizes.
     pub enabled: bool,
+    /// Folders looked at for being on a network or FUSE mount, which the
+    /// browser doesn't measure on its own.
+    remote: HashMap<PathBuf, bool>,
 }
 
 struct Owned {
@@ -1080,6 +1083,7 @@ impl Default for Scans {
             own: Vec::new(),
             cache: Vec::new(),
             enabled: true,
+            remote: HashMap::new(),
         }
     }
 }
@@ -1137,7 +1141,7 @@ impl Scans {
                 own.handle.0.clone()
             }
             (None, None) => {
-                if !self.enabled {
+                if !self.enabled || self.is_remote(dir) {
                     return None;
                 }
                 let scan = Scan::start(ctx, dir.to_path_buf());
@@ -1186,6 +1190,19 @@ impl Scans {
             None => self.cache.push(cached),
         }
         Some(sizes)
+    }
+
+    /// Whether `dir` is on a network or FUSE mount, remembered.
+    fn is_remote(&mut self, dir: &Path) -> bool {
+        if let Some(&remote) = self.remote.get(dir) {
+            return remote;
+        }
+        if self.remote.len() >= 256 {
+            self.remote.clear();
+        }
+        let remote = crate::properties::platform::is_remote(dir);
+        self.remote.insert(dir.to_path_buf(), remote);
+        remote
     }
 
     /// Once a frame: stops browser scans nothing shows any more, and looks

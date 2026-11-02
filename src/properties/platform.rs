@@ -158,6 +158,33 @@ mod imp {
             .max_by_key(|v| v.mount.components().count())
     }
 
+    /// On a network filesystem or a FUSE mount (sshfs, rclone, gvfs…),
+    /// where reading every folder is slow or costs something.
+    pub fn is_remote(path: &Path) -> bool {
+        volume(path).is_some_and(|v| remote_fs_type(&v.fs_type))
+    }
+
+    pub(super) fn remote_fs_type(fs_type: &str) -> bool {
+        const NETWORK: [&str; 14] = [
+            "nfs",
+            "nfs4",
+            "cifs",
+            "smb3",
+            "smbfs",
+            "ncpfs",
+            "afs",
+            "ceph",
+            "glusterfs",
+            "9p",
+            "lustre",
+            "gpfs",
+            "davfs",
+            "sshfs",
+        ];
+        // `fuseblk` is a local disk through FUSE (ntfs-3g, exfat-fuse).
+        NETWORK.contains(&fs_type) || fs_type == "fuse" || fs_type.starts_with("fuse.")
+    }
+
     pub fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
         fs::set_permissions(path, fs::Permissions::from_mode(mode))
     }
@@ -214,10 +241,13 @@ mod imp {
                 SID_NAME_USE, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES,
             },
             Storage::FileSystem::{
-                FILE_FLAGS_AND_ATTRIBUTES, GetVolumeInformationW, GetVolumePathNameW,
-                SetFileAttributesW,
+                FILE_FLAGS_AND_ATTRIBUTES, GetDriveTypeW, GetVolumeInformationW,
+                GetVolumePathNameW, SetFileAttributesW,
             },
-            System::Threading::{GetCurrentProcess, OpenProcessToken},
+            System::{
+                Threading::{GetCurrentProcess, OpenProcessToken},
+                WindowsProgramming::DRIVE_REMOTE,
+            },
         },
         core::{HSTRING, PCWSTR, PWSTR},
     };
@@ -425,6 +455,17 @@ mod imp {
         })
     }
 
+    /// On a network share, mapped drive letters and UNC paths alike.
+    pub fn is_remote(path: &Path) -> bool {
+        let mut root = [0u16; 261];
+        // SAFETY: `root` is the buffer it fills.
+        if unsafe { GetVolumePathNameW(&wide(path), &mut root) }.is_err() {
+            return false;
+        }
+        // SAFETY: `root` is NUL-terminated.
+        unsafe { GetDriveTypeW(PCWSTR(root.as_ptr())) == DRIVE_REMOTE }
+    }
+
     pub fn set_mode(_path: &Path, _mode: u32) -> io::Result<()> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -532,6 +573,10 @@ mod imp {
         None
     }
 
+    pub fn is_remote(_path: &Path) -> bool {
+        false
+    }
+
     pub fn set_mode(_path: &Path, _mode: u32) -> io::Result<()> {
         Err(io::Error::new(io::ErrorKind::Unsupported, "unsupported"))
     }
@@ -552,5 +597,18 @@ mod imp {
 
     pub fn acl(_path: &Path) -> Vec<String> {
         Vec::new()
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    #[test]
+    fn network_and_fuse_types_are_remote() {
+        for remote in ["nfs4", "cifs", "fuse.sshfs", "fuse.rclone", "fuse"] {
+            assert!(super::imp::remote_fs_type(remote), "{remote}");
+        }
+        for local in ["ext4", "btrfs", "fuseblk", "tmpfs", "vfat"] {
+            assert!(!super::imp::remote_fs_type(local), "{local}");
+        }
     }
 }
