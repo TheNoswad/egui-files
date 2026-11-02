@@ -67,7 +67,7 @@ impl Sidebar {
         match self.tree.ui(ui, &roots, current, show_hidden) {
             Some(TreeAction::Navigate(path)) => response.target = Some((path, false)),
             Some(TreeAction::OpenInNewTab(path)) => response.target = Some((path, true)),
-            Some(TreeAction::Drop(job)) => jobs.start(job),
+            Some(TreeAction::Drop(job)) => jobs.start(*job),
             Some(TreeAction::Properties(path)) => response.properties = Some(path),
             None => {}
         }

@@ -97,6 +97,7 @@ pub struct Terminal {
     #[serde(skip)]
     synced: Option<PathBuf>,
     /// A `cd` sent to the shell that it hasn't carried out yet, and when.
+    #[cfg(target_os = "linux")]
     #[serde(skip)]
     pending_cd: Option<(PathBuf, f64)>,
     /// A key already sent with Alt; drop the text event that follows it.

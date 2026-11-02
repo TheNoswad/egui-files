@@ -1,6 +1,10 @@
 //! Minimal bindings to libmpv's client and OpenGL render APIs, loaded at
 //! runtime so the app still starts when mpv isn't installed.
 
+// Only Linux has a video thread to use the render API and events yet (see
+// "Video backend for Windows/macOS" in TODO.md); elsewhere only probing is.
+#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
+
 use std::{
     ffi::{CStr, CString, c_char, c_int, c_ulong, c_void},
     path::Path,

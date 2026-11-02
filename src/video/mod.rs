@@ -192,6 +192,7 @@ impl Quality {
     }
 
     /// mpv options for this level.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     fn options(self) -> &'static [(&'static str, &'static str)] {
         match self {
             Self::Fast => &[("profile", "fast")],
@@ -228,6 +229,9 @@ pub struct Status {
     pub error: Option<String>,
 }
 
+// Read by the video thread, which only Linux has yet (see "Video backend
+// for Windows/macOS" in TODO.md).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 enum Command {
     Load {
         path: PathBuf,
@@ -241,6 +245,9 @@ enum Command {
     Volume(f64),
 }
 
+// Read by the video thread, which only Linux has yet (see "Video backend
+// for Windows/macOS" in TODO.md).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 struct Open {
     id: u64,
     mode: Mode,
@@ -250,6 +257,9 @@ struct Open {
     quality: Quality,
 }
 
+// Read by the video thread, which only Linux has yet (see "Video backend
+// for Windows/macOS" in TODO.md).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 enum Message {
     Open(Open),
     Command(u64, Command),

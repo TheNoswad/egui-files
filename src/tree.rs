@@ -43,7 +43,7 @@ pub enum TreeAction {
     Navigate(PathBuf),
     OpenInNewTab(PathBuf),
     /// Files were dropped onto a folder.
-    Drop(JobKind),
+    Drop(Box<JobKind>),
     Properties(PathBuf),
 }
 
@@ -242,7 +242,7 @@ impl FolderTree {
                     dnd::source(&response, || vec![row.path.clone()]);
                     if let Some(job) = dnd::target(&response, DropTarget::Folder(row.path.clone()))
                     {
-                        action = Some(TreeAction::Drop(job));
+                        action = Some(TreeAction::Drop(Box::new(job)));
                     }
 
                     let on_caret = response.interact_pointer_pos().is_some_and(|pos| {

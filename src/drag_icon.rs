@@ -157,4 +157,3 @@ fn sample(atlas: &egui::ColorImage, u: f32, v: f32) -> [f32; 4] {
         top + (bottom - top) * fy
     })
 }
-

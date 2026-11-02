@@ -331,150 +331,160 @@ pub fn label(payload: &FileDrag) -> String {
 // ---------------------------------------------------------------------------
 // Drags from other apps
 
-/// A drag from another app, as reported by the platform.
-pub enum ExternalEvent {
-    /// Files are held over the window at this position (in points).
-    Hover(egui::Pos2),
-    /// The drag left the window without dropping.
-    Leave,
-    Drop {
-        pos: egui::Pos2,
-        paths: Vec<PathBuf>,
-        /// The drag started in this app and came back (e.g. via the platform).
-        internal: bool,
-    },
-}
+// Only Linux reports drags from other apps this way (Windows has its own
+// drop target); tests use it everywhere.
+#[cfg(any(target_os = "linux", test))]
+pub use external::*;
 
-/// Feeds an external drag into egui as if it were an internal one, so the
-/// usual drop targets highlight and handle it.
-pub fn inject_external(ctx: &Context, raw: &mut egui::RawInput, event: ExternalEvent) {
-    let is_external_drag = || DragAndDrop::payload::<FileDrag>(ctx).is_some_and(|p| p.external);
-    match event {
-        ExternalEvent::Hover(pos) => {
-            if DragAndDrop::payload::<FileDrag>(ctx).is_none() {
+#[cfg(any(target_os = "linux", test))]
+mod external {
+    use super::*;
+
+    /// A drag from another app, as reported by the platform.
+    pub enum ExternalEvent {
+        /// Files are held over the window at this position (in points).
+        Hover(egui::Pos2),
+        /// The drag left the window without dropping.
+        Leave,
+        Drop {
+            pos: egui::Pos2,
+            paths: Vec<PathBuf>,
+            /// The drag started in this app and came back (e.g. via the platform).
+            internal: bool,
+        },
+    }
+
+    /// Feeds an external drag into egui as if it were an internal one, so the
+    /// usual drop targets highlight and handle it.
+    pub fn inject_external(ctx: &Context, raw: &mut egui::RawInput, event: ExternalEvent) {
+        let is_external_drag = || DragAndDrop::payload::<FileDrag>(ctx).is_some_and(|p| p.external);
+        match event {
+            ExternalEvent::Hover(pos) => {
+                if DragAndDrop::payload::<FileDrag>(ctx).is_none() {
+                    DragAndDrop::set_payload(
+                        ctx,
+                        FileDrag {
+                            paths: Vec::new(),
+                            external: true,
+                            archive: None,
+                            link_only: false,
+                        },
+                    );
+                }
+                raw.events.push(egui::Event::PointerMoved(pos));
+            }
+            ExternalEvent::Leave => {
+                if is_external_drag() {
+                    DragAndDrop::clear_payload(ctx);
+                }
+                raw.events.push(egui::Event::PointerGone);
+            }
+            ExternalEvent::Drop {
+                pos,
+                paths,
+                internal,
+            } => {
                 DragAndDrop::set_payload(
                     ctx,
                     FileDrag {
-                        paths: Vec::new(),
-                        external: true,
+                        paths,
+                        external: !internal,
                         archive: None,
                         link_only: false,
                     },
                 );
+                raw.events.push(egui::Event::PointerMoved(pos));
+                raw.events.push(egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: ctx.input(|i| i.modifiers),
+                });
             }
-            raw.events.push(egui::Event::PointerMoved(pos));
         }
-        ExternalEvent::Leave => {
-            if is_external_drag() {
-                DragAndDrop::clear_payload(ctx);
+    }
+
+    // ---------------------------------------------------------------------------
+    // text/uri-list, the format file managers exchange file lists in
+
+    /// Formats paths as a `text/uri-list` of `file://` URIs.
+    pub fn uri_list(paths: &[PathBuf]) -> String {
+        paths
+            .iter()
+            .map(|path| format!("file://{}\r\n", percent_encode(path)))
+            .collect()
+    }
+
+    /// Parses the local files out of a `text/uri-list`.
+    pub fn parse_uri_list(text: &str) -> Vec<PathBuf> {
+        text.lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .filter_map(|line| line.strip_prefix("file://"))
+            // `file://host/path`: only local files are usable.
+            .filter_map(|rest| match rest.find('/') {
+                Some(0) => Some(rest),
+                Some(i) if &rest[..i] == "localhost" => Some(&rest[i..]),
+                _ => None,
+            })
+            .filter_map(percent_decode)
+            .collect()
+    }
+
+    fn percent_encode(path: &Path) -> String {
+        let bytes = path_bytes(path);
+        let mut out = String::with_capacity(bytes.len());
+        for &b in bytes.iter() {
+            if b.is_ascii_alphanumeric() || b"/-_.~".contains(&b) {
+                out.push(b as char);
+            } else {
+                out.push_str(&format!("%{b:02X}"));
             }
-            raw.events.push(egui::Event::PointerGone);
         }
-        ExternalEvent::Drop {
-            pos,
-            paths,
-            internal,
-        } => {
-            DragAndDrop::set_payload(
-                ctx,
-                FileDrag {
-                    paths,
-                    external: !internal,
-                    archive: None,
-                    link_only: false,
-                },
-            );
-            raw.events.push(egui::Event::PointerMoved(pos));
-            raw.events.push(egui::Event::PointerButton {
-                pos,
-                button: egui::PointerButton::Primary,
-                pressed: false,
-                modifiers: ctx.input(|i| i.modifiers),
-            });
-        }
+        out
     }
-}
 
-// ---------------------------------------------------------------------------
-// text/uri-list, the format file managers exchange file lists in
-
-/// Formats paths as a `text/uri-list` of `file://` URIs.
-pub fn uri_list(paths: &[PathBuf]) -> String {
-    paths
-        .iter()
-        .map(|path| format!("file://{}\r\n", percent_encode(path)))
-        .collect()
-}
-
-/// Parses the local files out of a `text/uri-list`.
-pub fn parse_uri_list(text: &str) -> Vec<PathBuf> {
-    text.lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .filter_map(|line| line.strip_prefix("file://"))
-        // `file://host/path`: only local files are usable.
-        .filter_map(|rest| match rest.find('/') {
-            Some(0) => Some(rest),
-            Some(i) if &rest[..i] == "localhost" => Some(&rest[i..]),
-            _ => None,
-        })
-        .filter_map(percent_decode)
-        .collect()
-}
-
-fn percent_encode(path: &Path) -> String {
-    let bytes = path_bytes(path);
-    let mut out = String::with_capacity(bytes.len());
-    for &b in bytes.iter() {
-        if b.is_ascii_alphanumeric() || b"/-_.~".contains(&b) {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{b:02X}"));
+    fn percent_decode(text: &str) -> Option<PathBuf> {
+        let bytes = text.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'%' {
+                let hex = std::str::from_utf8(bytes.get(i + 1..i + 3)?).ok()?;
+                out.push(u8::from_str_radix(hex, 16).ok()?);
+                i += 3;
+            } else {
+                out.push(bytes[i]);
+                i += 1;
+            }
         }
+        Some(path_from_bytes(out))
     }
-    out
-}
 
-fn percent_decode(text: &str) -> Option<PathBuf> {
-    let bytes = text.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' {
-            let hex = std::str::from_utf8(bytes.get(i + 1..i + 3)?).ok()?;
-            out.push(u8::from_str_radix(hex, 16).ok()?);
-            i += 3;
-        } else {
-            out.push(bytes[i]);
-            i += 1;
-        }
+    #[cfg(unix)]
+    fn path_bytes(path: &Path) -> std::borrow::Cow<'_, [u8]> {
+        use std::os::unix::ffi::OsStrExt;
+        path.as_os_str().as_bytes().into()
     }
-    Some(path_from_bytes(out))
-}
 
-#[cfg(unix)]
-fn path_bytes(path: &Path) -> std::borrow::Cow<'_, [u8]> {
-    use std::os::unix::ffi::OsStrExt;
-    path.as_os_str().as_bytes().into()
-}
+    #[cfg(unix)]
+    fn path_from_bytes(bytes: Vec<u8>) -> PathBuf {
+        use std::os::unix::ffi::OsStringExt;
+        std::ffi::OsString::from_vec(bytes).into()
+    }
 
-#[cfg(unix)]
-fn path_from_bytes(bytes: Vec<u8>) -> PathBuf {
-    use std::os::unix::ffi::OsStringExt;
-    std::ffi::OsString::from_vec(bytes).into()
-}
+    #[cfg(not(unix))]
+    fn path_bytes(path: &Path) -> std::borrow::Cow<'_, [u8]> {
+        path.to_string_lossy()
+            .replace('\\', "/")
+            .into_bytes()
+            .into()
+    }
 
-#[cfg(not(unix))]
-fn path_bytes(path: &Path) -> std::borrow::Cow<'_, [u8]> {
-    path.to_string_lossy()
-        .replace('\\', "/")
-        .into_bytes()
-        .into()
-}
-
-#[cfg(not(unix))]
-fn path_from_bytes(bytes: Vec<u8>) -> PathBuf {
-    String::from_utf8_lossy(&bytes).into_owned().into()
+    #[cfg(not(unix))]
+    fn path_from_bytes(bytes: Vec<u8>) -> PathBuf {
+        String::from_utf8_lossy(&bytes).into_owned().into()
+    }
 }
 
 #[cfg(test)]
