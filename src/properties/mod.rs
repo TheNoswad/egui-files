@@ -9,6 +9,7 @@ mod hash;
 mod info;
 mod media;
 pub(crate) mod platform;
+mod program;
 mod view;
 mod walk;
 

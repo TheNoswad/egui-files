@@ -21,7 +21,6 @@
 - [ ] proton drive
 - [ ] mobile support
     - [ ] tabs like a mobile browser
-- [ ] exe information?
 
 ## Proton Drive
 

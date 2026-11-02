@@ -23,6 +23,7 @@ use super::{
     info::Item,
     media::{self, Probe},
     platform::{self, Volume},
+    program::ProgramProbe,
     walk::{Counts, Walk},
 };
 use crate::{
@@ -164,6 +165,7 @@ pub struct View {
     hashing: Option<Hashing>,
     compare: String,
     media: Option<Probe>,
+    program: Option<ProgramProbe>,
     volume: Option<(PathBuf, Option<Volume>, Option<Space>)>,
     acl: Option<(PathBuf, Vec<String>)>,
     applying: Option<Applying>,
@@ -195,6 +197,7 @@ impl View {
             hashing: None,
             compare: String::new(),
             media: None,
+            program: None,
             volume: None,
             acl: None,
             applying: None,
@@ -259,6 +262,10 @@ impl View {
                 && self.media.as_ref().is_none_or(|m| m.path != item.path)
             {
                 self.media = Some(Probe::start(ctx, item.path.clone()));
+            }
+            // Any file may be a program, whatever its name: the probe looks.
+            if !item.is_dir && self.program.as_ref().is_none_or(|p| p.path != item.path) {
+                self.program = Some(ProgramProbe::start(ctx, item.path.clone()));
             }
             if cfg!(windows) && self.acl.as_ref().is_none_or(|(p, _)| *p != item.path) {
                 self.acl = Some((item.path.clone(), platform::acl(&item.path)));
@@ -510,6 +517,7 @@ impl View {
         let full = !self.compact;
         self.general_ui(ui, shared);
         self.media_ui(ui, full);
+        self.program_ui(ui, full);
         self.dates_ui(ui);
         self.permissions_ui(ui, full);
         self.owner_ui(ui, full);
@@ -801,6 +809,37 @@ impl View {
                             });
                         }
                     });
+                });
+            }
+        });
+    }
+
+    /// What a program or library is, and what it loads.
+    fn program_ui(&mut self, ui: &mut Ui, open: bool) {
+        if self.items.len() != 1 {
+            return;
+        }
+        // Shown once read, and only for programs: most files aren't.
+        let Some(Ok(Some(program))) = self.program.as_ref().and_then(ProgramProbe::get) else {
+            return;
+        };
+        section(ui, "Program", "properties-program", open, false, |ui| {
+            grid(ui, "properties-program-grid", |ui| {
+                for (label, value) in &program.rows {
+                    row(ui, label, |ui| {
+                        ui.label(value);
+                    });
+                }
+            });
+            if !program.libraries.is_empty() {
+                CollapsingHeader::new(
+                    RichText::new(format!("Libraries ({})", program.libraries.len())).weak(),
+                )
+                .id_salt("properties-program-libraries")
+                .show(ui, |ui| {
+                    for library in &program.libraries {
+                        ui.label(library);
+                    }
                 });
             }
         });
