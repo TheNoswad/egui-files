@@ -302,6 +302,65 @@ fn add_button_hints(ui: &mut Ui, dock: &DockState<DockTab>) {
     }
 }
 
+/// The empty part of each tab bar of `dock`, drawn in `window` (`None`:
+/// the main one), whose viewport `ctx` is running: right-clicking it opens
+/// the add button's menu, and folders dropped on it open in new tabs there.
+/// `tab_buttons` are where the tabs' buttons were drawn. Returns the menu to
+/// open, and the folders dropped with their leaf.
+fn tab_bar_ui(
+    ctx: &egui::Context,
+    dock: &DockState<DockTab>,
+    tab_buttons: &[Rect],
+    window: Option<u64>,
+) -> (Option<AddMenu>, Option<(NodePath, Vec<PathBuf>)>) {
+    let style = Style::from_egui(&ctx.global_style());
+    let Some(pos) = ctx.pointer_latest_pos() else {
+        return (None, None);
+    };
+    if tab_buttons.iter().any(|rect| rect.contains(pos)) {
+        return (None, None);
+    }
+    let Some((leaf, bar)) = dock
+        .iter_leaves()
+        .map(|(path, leaf)| {
+            let bar = Rect::from_min_size(
+                leaf.rect.min,
+                egui::vec2(leaf.rect.width(), style.tab_bar.height),
+            );
+            (path, bar)
+        })
+        .find(|(_, bar)| bar.contains(pos))
+    else {
+        return (None, None);
+    };
+    let menu = ctx
+        .input(|i| i.pointer.button_clicked(egui::PointerButton::Secondary))
+        .then_some(AddMenu { window, leaf, pos });
+    let folders = dnd::new_tab_target(ctx, bar).map(|folders| (leaf, folders));
+    (menu, folders)
+}
+
+/// The app's shortcuts for tabs, pressed in one of its windows.
+struct TabKeys {
+    /// Ctrl+T
+    new_tab: bool,
+    /// Ctrl+W
+    close_tab: bool,
+    /// Ctrl+Shift+U: disk usage of the focused folder.
+    usage: bool,
+}
+
+impl TabKeys {
+    /// Takes them from the input of the viewport `ctx` is running.
+    fn read(ctx: &egui::Context) -> Self {
+        ctx.input_mut(|i| Self {
+            usage: i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::U),
+            new_tab: i.consume_key(Modifiers::COMMAND, Key::T),
+            close_tab: i.consume_key(Modifiers::COMMAND, Key::W),
+        })
+    }
+}
+
 /// Moves pinned tabs to the front of their tab bar, keeping their order and
 /// which tab is shown.
 fn pinned_first(dock: &mut DockState<DockTab>, pinned: &HashSet<u64>) {
@@ -349,6 +408,8 @@ enum NewTab {
 /// The menu opened by right-clicking a leaf's add button.
 #[derive(Clone, Copy)]
 struct AddMenu {
+    /// The tab window it's in; `None`: the main one.
+    window: Option<u64>,
     leaf: NodePath,
     pos: Pos2,
 }
@@ -685,9 +746,42 @@ impl FilesApp {
         }
     }
 
-    /// Adds a tab next to the focused one, or next to the active browser tab
-    /// if a pane has focus.
-    fn push_tab(&mut self, tab: DockTab) {
+    /// The dock of the tab window `window`, or the main window's (`None`).
+    fn dock_mut(&mut self, window: Option<u64>) -> Option<&mut DockState<DockTab>> {
+        match window {
+            None => Some(&mut self.dock),
+            Some(id) => self
+                .windows
+                .iter_mut()
+                .find(|w| w.id == id)
+                .map(|w| &mut w.dock),
+        }
+    }
+
+    /// The folder new tabs in `window` open on: its focused browser tab's,
+    /// or else the main window's.
+    fn folder_for(&mut self, window: Option<u64>) -> PathBuf {
+        if let Some(window) = window.and_then(|id| self.windows.iter_mut().find(|w| w.id == id))
+            && let Some((_, tab)) = window.dock.find_active_focused()
+            && let Some(browser) = tab.browser()
+        {
+            return browser.path.clone();
+        }
+        self.focused_path()
+    }
+
+    /// Adds a tab to the tab window `window`, next to its focused tab, or
+    /// to the main window (`None`, or a window since closed).
+    fn push_tab(&mut self, window: Option<u64>, tab: DockTab) {
+        match window.and_then(|id| self.windows.iter_mut().find(|w| w.id == id)) {
+            Some(window) => window.dock.push_to_focused_leaf(tab),
+            None => self.push_main(tab),
+        }
+    }
+
+    /// Adds a tab to the main window next to the focused one, or next to
+    /// the active browser tab if a pane has focus.
+    fn push_main(&mut self, tab: DockTab) {
         let pane_focused = self
             .dock
             .find_active_focused()
@@ -755,7 +849,7 @@ impl FilesApp {
             self.focus_tab(id);
         } else {
             let tab = DockTab::Trash(TrashTab::new(self.next_id()));
-            self.push_tab(tab);
+            self.push_main(tab);
         }
     }
 
@@ -777,25 +871,25 @@ impl FilesApp {
     }
 
     /// Shows an archive's contents, in the tab already showing it if there is one.
-    fn open_archive(&mut self, path: PathBuf) {
+    fn open_archive(&mut self, window: Option<u64>, path: PathBuf) {
         let existing = self.find_tab(|t| t.archive() == Some(path.as_path()));
         if let Some(id) = existing {
             self.focus_tab(id);
         } else {
             let tab = DockTab::Archive(ArchiveTab::new(self.next_id(), path));
-            self.push_tab(tab);
+            self.push_tab(window, tab);
         }
     }
 
     /// Shows a folder's disk usage, in the tab already showing it if there
-    /// is one.
-    fn open_usage(&mut self, path: PathBuf) {
+    /// is one, else in a new tab in `window`.
+    fn open_usage(&mut self, window: Option<u64>, path: PathBuf) {
         let existing = self.find_tab(|t| t.usage().is_some_and(|u| u.usage == path));
         if let Some(id) = existing {
             self.focus_tab(id);
         } else {
             let tab = DockTab::Usage(UsageTab::new(self.next_id(), path));
-            self.push_tab(tab);
+            self.push_tab(window, tab);
         }
     }
 
@@ -817,7 +911,7 @@ impl FilesApp {
         }
         let tab = DockTab::Properties(PropertiesTab::new(self.next_id(), source));
         if open_in == OpenIn::Tab {
-            self.push_tab(tab);
+            self.push_main(tab);
         } else if let Some(window) = self.windows.iter_mut().rev().find(|w| w.properties) {
             // Properties opened in a window of their own join each other.
             window.dock.push_to_focused_leaf(tab);
@@ -839,14 +933,15 @@ impl FilesApp {
         }))
     }
 
-    /// Opens a new tab on the folder holding `path`, with it selected.
-    fn reveal(&mut self, path: PathBuf) {
+    /// Opens a new tab in `window` on the folder holding `path`, with it
+    /// selected.
+    fn reveal(&mut self, window: Option<u64>, path: PathBuf) {
         let Some(parent) = path.parent().map(PathBuf::from) else {
-            return self.open_tab(path);
+            return self.open_tab(window, path);
         };
         let tab = self.make_tab(parent);
         let id = tab.id();
-        self.push_tab(tab);
+        self.push_tab(window, tab);
         if let Some(browser) = self
             .all_tabs_mut()
             .find(|t| t.id() == id)
@@ -856,14 +951,15 @@ impl FilesApp {
         }
     }
 
-    /// Edits a file, in the tab already editing it if there is one.
-    fn open_editor(&mut self, path: PathBuf) {
+    /// Edits a file, in the tab already editing it if there is one, else in
+    /// a new tab in `window`.
+    fn open_editor(&mut self, window: Option<u64>, path: PathBuf) {
         let existing = self.find_tab(|t| t.editor().is_some_and(|e| e.edit == path));
         if let Some(id) = existing {
             self.focus_tab(id);
         } else {
             let tab = DockTab::Editor(EditorTab::new(self.next_id(), path));
-            self.push_tab(tab);
+            self.push_tab(window, tab);
         }
     }
 
@@ -884,7 +980,7 @@ impl FilesApp {
         if own_window {
             self.new_window(tab, tab_windows::NEW_SIZE);
         } else {
-            self.push_tab(tab);
+            self.push_main(tab);
             self.focus_tab(id);
         }
     }
@@ -948,19 +1044,48 @@ impl FilesApp {
         }
     }
 
-    fn open_tab(&mut self, path: PathBuf) {
+    fn open_tab(&mut self, window: Option<u64>, path: PathBuf) {
         let tab = self.make_tab(path);
-        self.push_tab(tab);
+        self.push_tab(window, tab);
     }
 
-    fn close_focused_tab(&mut self) {
-        let last_browser = self.browser_count() == 1;
-        let Some(id) = self
-            .dock
+    /// Opens a copy of a browser tab in its tab bar.
+    fn duplicate_tab(&mut self, id: u64) {
+        let Some(path) = self
+            .all_tabs()
+            .find(|t| t.id() == id)
+            .and_then(DockTab::browser)
+            .map(|b| b.path.clone())
+        else {
+            return;
+        };
+        let tab = self.make_tab(path);
+        let window = self
+            .windows
+            .iter()
+            .find(|w| w.dock.find_tab_from(|t| t.id() == id).is_some())
+            .map(|w| w.id);
+        let Some(dock) = self.dock_mut(window) else {
+            return;
+        };
+        if let Some(at) = dock.find_tab_from(|t| t.id() == id) {
+            dock.set_focused_node_and_surface(at.node_path());
+        }
+        dock.push_to_focused_leaf(tab);
+    }
+
+    /// Closes the focused tab of `window` (`None`: the main one).
+    fn close_focused_tab(&mut self, window: Option<u64>) {
+        // The main window keeps a browser tab for the panes to follow.
+        let last_browser = window.is_none() && self.browser_count() == 1;
+        let Some(dock) = self.dock_mut(window) else {
+            return;
+        };
+        let Some(id) = dock
             .find_active_focused()
             .filter(|(_, t)| !(last_browser && t.browser().is_some()))
-            .filter(|(_, t)| !self.pinned.contains(&t.id()))
             .map(|(_, t)| t.id())
+            .filter(|id| !self.pinned.contains(id))
         else {
             return;
         };
@@ -990,7 +1115,7 @@ impl FilesApp {
             let id = tab.id;
             self.focus_tab(id);
         } else {
-            self.open_tab(path);
+            self.open_tab(None, path);
         }
     }
 
@@ -1070,51 +1195,55 @@ impl FilesApp {
         }
     }
 
-    /// Opens `kind` as a tab of `leaf`. Panes and the trash are only open
-    /// once, so if one already is, it moves there instead.
-    fn add_to_leaf(&mut self, leaf: NodePath, kind: NewTab) {
-        if self.dock.leaf(leaf).is_err() {
+    /// Adds a tab of the kind chosen in the add menu to `leaf` of `window`
+    /// (`None`: the main window). A trash or pane already open moves there
+    /// instead; panes only go in the main window.
+    fn add_to_leaf(&mut self, window: Option<u64>, leaf: NodePath, kind: NewTab) {
+        if window.is_some() && matches!(kind, NewTab::Pane(_)) {
             return;
         }
-        // The trash in a window of its own comes over.
-        if kind == NewTab::Trash
-            && self.dock.find_tab_from(DockTab::is_trash).is_none()
-            && let Some(tab) = self
-                .find_tab(DockTab::is_trash)
-                .and_then(|id| self.take_tab(id))
-        {
-            let id = tab.id();
-            self.dock.set_focused_node_and_surface(leaf);
-            self.dock.push_to_focused_leaf(tab);
-            self.focus_tab(id);
+        let Some(dock) = self.dock_mut(window) else {
+            return;
+        };
+        if dock.leaf(leaf).is_err() {
             return;
         }
-        let existing = self.dock.find_tab_from(|t| match kind {
-            NewTab::Browser => false,
+        let here = dock.find_tab_from(|t| match kind {
+            NewTab::Browser | NewTab::Usage => false,
             NewTab::Trash => t.is_trash(),
-            NewTab::Usage => false,
             NewTab::Pane(pane) => t.pane() == Some(pane),
         });
-        let id = if let Some(path) = existing {
-            let id = self.dock[path.node_path()].tabs().unwrap()[path.tab.0].id();
-            self.dock.move_tab(path, (leaf, TabInsert::Append));
+        let id = if let Some(path) = here {
+            let id = dock[path.node_path()].tabs().unwrap()[path.tab.0].id();
+            dock.move_tab(path, (leaf, TabInsert::Append));
             id
         } else {
-            let tab = match kind {
-                NewTab::Browser => {
-                    let path = self.focused_path();
+            // The trash in another window comes over.
+            let elsewhere = match kind {
+                NewTab::Trash => self
+                    .find_tab(DockTab::is_trash)
+                    .and_then(|id| self.take_tab(id)),
+                _ => None,
+            };
+            let tab = match (elsewhere, kind) {
+                (Some(tab), _) => tab,
+                (None, NewTab::Browser) => {
+                    let path = self.folder_for(window);
                     self.make_tab(path)
                 }
-                NewTab::Trash => DockTab::Trash(TrashTab::new(self.next_id())),
-                NewTab::Usage => {
-                    let path = self.focused_path();
+                (None, NewTab::Trash) => DockTab::Trash(TrashTab::new(self.next_id())),
+                (None, NewTab::Usage) => {
+                    let path = self.folder_for(window);
                     DockTab::Usage(UsageTab::new(self.next_id(), path))
                 }
-                NewTab::Pane(pane) => DockTab::Pane(PaneTab { pane }),
+                (None, NewTab::Pane(pane)) => DockTab::Pane(PaneTab { pane }),
             };
             let id = tab.id();
-            self.dock.set_focused_node_and_surface(leaf);
-            self.dock.push_to_focused_leaf(tab);
+            let Some(dock) = self.dock_mut(window) else {
+                return;
+            };
+            dock.set_focused_node_and_surface(leaf);
+            dock.push_to_focused_leaf(tab);
             id
         };
         self.focus_tab(id);
@@ -1123,45 +1252,24 @@ impl FilesApp {
         }
     }
 
-    /// The empty part of each tab bar: right-clicking it opens the add
-    /// button's menu, and folders dropped on it open in new tabs there.
-    fn tab_bars_ui(&mut self, ctx: &egui::Context, tab_buttons: &[Rect]) {
-        let style = Style::from_egui(&ctx.global_style());
-        let bars: Vec<(NodePath, Rect)> = self
-            .dock
-            .iter_leaves()
-            .map(|(path, leaf)| {
-                let bar = Rect::from_min_size(
-                    leaf.rect.min,
-                    egui::vec2(leaf.rect.width(), style.tab_bar.height),
-                );
-                (path, bar)
-            })
-            .collect();
-        let Some(pos) = ctx.pointer_latest_pos() else {
+    /// Opens `folders` in new tabs in `leaf` of `window` (`None`: the main
+    /// window), focusing the last.
+    fn open_folders(&mut self, window: Option<u64>, leaf: NodePath, folders: Vec<PathBuf>) {
+        let tabs: Vec<DockTab> = folders.into_iter().map(|f| self.make_tab(f)).collect();
+        let Some(last) = tabs.last().map(DockTab::id) else {
             return;
         };
-        let Some(&(leaf, bar)) = bars.iter().find(|(_, bar)| bar.contains(pos)) else {
+        let Some(dock) = self.dock_mut(window) else {
             return;
         };
-        if tab_buttons.iter().any(|rect| rect.contains(pos)) {
+        if dock.leaf(leaf).is_err() {
             return;
         }
-
-        if ctx.input(|i| i.pointer.button_clicked(egui::PointerButton::Secondary)) {
-            self.add_menu = Some(AddMenu { leaf, pos });
+        for tab in tabs {
+            dock.set_focused_node_and_surface(leaf);
+            dock.push_to_focused_leaf(tab);
         }
-        let folders = dnd::new_tab_target(ctx, bar).unwrap_or_default();
-        let mut last = None;
-        for folder in folders {
-            let tab = self.make_tab(folder);
-            last = Some(tab.id());
-            self.dock.set_focused_node_and_surface(leaf);
-            self.dock.push_to_focused_leaf(tab);
-        }
-        if let Some(id) = last {
-            self.focus_tab(id);
-        }
+        self.focus_tab(last);
     }
 
     /// Sidebar places dropped on a tab's content: near an edge they open
@@ -1231,63 +1339,77 @@ impl FilesApp {
         }
     }
 
-    /// Shows the add button's menu.
-    fn add_menu_ui(&mut self, ctx: &egui::Context) {
-        if let Some(menu) = self.add_menu {
-            let mut choice = None;
-            let area = egui::Area::new(Id::new("add-tab-menu"))
-                .order(egui::Order::Foreground)
-                .fixed_pos(menu.pos)
-                .show(ctx, |ui| {
-                    egui::Frame::menu(ui.style()).show(ui, |ui| {
-                        ui.set_min_width(170.0);
-                        ui.with_layout(egui::Layout::top_down_justified(egui::Align::Min), |ui| {
-                            let item = |ui: &mut Ui, glyph: &str, label: &str, open: bool| {
-                                let hint = if open { "move here" } else { "" };
-                                ui.add(
-                                    Button::new(format!("{glyph}  {label}"))
-                                        .right_text(RichText::new(hint).weak()),
-                                )
-                                .clicked()
-                            };
-                            if item(ui, icon::FOLDER, "File browser", false) {
-                                choice = Some(NewTab::Browser);
-                            }
-                            if item(
-                                ui,
-                                icon::TRASH,
-                                "Trash",
-                                self.all_tabs().any(DockTab::is_trash),
-                            ) {
-                                choice = Some(NewTab::Trash);
-                            }
-                            if item(ui, icon::CHART_PIE_SLICE, "Disk usage", false) {
-                                choice = Some(NewTab::Usage);
-                            }
-                            ui.separator();
-                            for pane in Pane::ALL {
-                                if item(ui, pane.icon(), pane.label(), self.has_pane(pane)) {
-                                    choice = Some(NewTab::Pane(pane));
-                                }
-                            }
-                        });
-                    });
-                });
-            let clicked_outside = ctx.input(|i| {
-                i.pointer.any_click()
-                    && i.pointer
-                        .interact_pos()
-                        .is_some_and(|pos| !area.response.rect.contains(pos))
-            });
-            if let Some(kind) = choice {
-                self.add_to_leaf(menu.leaf, kind);
-            }
-            if choice.is_some() || clicked_outside || ctx.input(|i| i.key_pressed(Key::Escape)) {
+    /// Shows the add menu, if it belongs to `window` (`None`: the main
+    /// window), in that window's viewport, which `ctx` is running. A click
+    /// anywhere else, in any window, or Escape closes it. Returns where to
+    /// add what was chosen. `trash_open`: in any window.
+    fn add_menu_ui(
+        &mut self,
+        ctx: &egui::Context,
+        window: Option<u64>,
+        trash_open: bool,
+    ) -> Option<(NodePath, NewTab)> {
+        let menu = self.add_menu?;
+        if menu.window != window {
+            if ctx.input(|i| i.pointer.any_click()) {
                 self.add_menu = None;
             }
+            return None;
         }
+        // Panes stay in the main window.
+        let panes: Vec<(Pane, bool)> = match window {
+            None => Pane::ALL.map(|p| (p, self.has_pane(p))).to_vec(),
+            Some(_) => Vec::new(),
+        };
+        let mut choice = None;
+        let area = egui::Area::new(Id::new("add-tab-menu"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(menu.pos)
+            .show(ctx, |ui| {
+                egui::Frame::menu(ui.style()).show(ui, |ui| {
+                    ui.set_min_width(170.0);
+                    ui.with_layout(egui::Layout::top_down_justified(egui::Align::Min), |ui| {
+                        let item = |ui: &mut Ui, glyph: &str, label: &str, open: bool| {
+                            let hint = if open { "move here" } else { "" };
+                            ui.add(
+                                Button::new(format!("{glyph}  {label}"))
+                                    .right_text(RichText::new(hint).weak()),
+                            )
+                            .clicked()
+                        };
+                        if item(ui, icon::FOLDER, "File browser", false) {
+                            choice = Some(NewTab::Browser);
+                        }
+                        if item(ui, icon::TRASH, "Trash", trash_open) {
+                            choice = Some(NewTab::Trash);
+                        }
+                        if item(ui, icon::CHART_PIE_SLICE, "Disk usage", false) {
+                            choice = Some(NewTab::Usage);
+                        }
+                        if !panes.is_empty() {
+                            ui.separator();
+                        }
+                        for &(pane, open) in &panes {
+                            if item(ui, pane.icon(), pane.label(), open) {
+                                choice = Some(NewTab::Pane(pane));
+                            }
+                        }
+                    });
+                });
+            });
+        let clicked_outside = ctx.input(|i| {
+            i.pointer.any_click()
+                && i.pointer
+                    .interact_pos()
+                    .is_some_and(|pos| !area.response.rect.contains(pos))
+        });
+        if choice.is_some() || clicked_outside || ctx.input(|i| i.key_pressed(Key::Escape)) {
+            self.add_menu = None;
+        }
+        choice.map(|kind| (menu.leaf, kind))
     }
 
+    /// The app's own shortcuts, pressed in the main window.
     fn global_shortcuts(&mut self, ctx: &egui::Context) {
         // Shift+F4 edits the selection.
         if !ctx.input(|i| i.modifiers.shift)
@@ -1299,22 +1421,21 @@ impl FilesApp {
         if self.terminal.has_focus(ctx) {
             return;
         }
-        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::U)) {
-            let path = self.focused_path();
-            self.open_usage(path);
+        self.tab_keys(None, TabKeys::read(ctx));
+    }
+
+    /// Acts on tab shortcuts pressed in `window` (`None`: the main one).
+    fn tab_keys(&mut self, window: Option<u64>, keys: TabKeys) {
+        if keys.usage {
+            let path = self.folder_for(window);
+            self.open_usage(window, path);
         }
-        let (new_tab, close_tab) = ctx.input_mut(|i| {
-            (
-                i.consume_key(Modifiers::COMMAND, Key::T),
-                i.consume_key(Modifiers::COMMAND, Key::W),
-            )
-        });
-        if new_tab {
-            let path = self.focused_path();
-            self.open_tab(path);
+        if keys.new_tab {
+            let path = self.folder_for(window);
+            self.open_tab(window, path);
         }
-        if close_tab {
-            self.close_focused_tab();
+        if keys.close_tab {
+            self.close_focused_tab(window);
         }
     }
 
@@ -1326,13 +1447,13 @@ impl FilesApp {
                     .clicked()
                 {
                     let path = self.focused_path();
-                    self.open_tab(path);
+                    self.open_tab(None, path);
                 }
                 if ui
                     .add(Button::new("Close tab").shortcut_text("Ctrl+W"))
                     .clicked()
                 {
-                    self.close_focused_tab();
+                    self.close_focused_tab(None);
                 }
                 if ui
                     .button(format!("{} Open trash", egui_phosphor::regular::TRASH))
@@ -1349,7 +1470,7 @@ impl FilesApp {
                     .clicked()
                 {
                     let path = self.focused_path();
-                    self.open_usage(path);
+                    self.open_usage(None, path);
                 }
                 if ui
                     .add(
@@ -1577,12 +1698,10 @@ impl TabViewer for Viewer<'_> {
                 ui.close();
             }
         }
-        if let Some(browser) = tab.browser()
-            && ui.button("Duplicate tab").clicked()
-        {
+        if tab.browser().is_some() && ui.button("Duplicate tab").clicked() {
             self.shared
                 .app_actions
-                .push(AppAction::NewTab(browser.path.clone()));
+                .push(AppAction::DuplicateTab(tab.id()));
             ui.close();
         }
         // Tabs can't be dragged from one window to another.
@@ -1761,11 +1880,15 @@ impl FilesApp {
 
     /// Draws the tab windows, each in a native window of its own with its
     /// own tab bar. Closing one closes its tabs, asking first about unsaved
-    /// changes.
-    fn tab_windows_ui(&mut self, ctx: &egui::Context) {
+    /// changes. Returns what their tabs asked of the app, by window.
+    fn tab_windows_ui(&mut self, ctx: &egui::Context) -> Vec<(Option<u64>, AppAction)> {
+        let trash_open = self.all_tabs().any(DockTab::is_trash);
         let mut windows = std::mem::take(&mut self.windows);
         let mut popped = Vec::new();
-        let mut add_requests: Vec<(u64, NodePath)> = Vec::new();
+        let mut add_requests: Vec<(u64, NodePath, NewTab)> = Vec::new();
+        let mut keys = Vec::new();
+        let mut folders = Vec::new();
+        let mut actions = Vec::new();
         let mut focused = self.focused_window;
         for window in &mut windows {
             let viewport = window.viewport_id();
@@ -1790,6 +1913,8 @@ impl FilesApp {
                 }
 
                 let mut requests = Vec::new();
+                let mut tab_buttons = Vec::new();
+                let first_action = self.shared.app_actions.len();
                 let mut viewer = Viewer {
                     shared: &mut self.shared,
                     // Panes stay in the main window, so these go unused.
@@ -1805,7 +1930,7 @@ impl FilesApp {
                         terminal_response: PanelResponse::default(),
                     },
                     add_requests: &mut requests,
-                    tab_buttons: &mut Vec::new(),
+                    tab_buttons: &mut tab_buttons,
                     // The main window keeps a browser tab for the panes.
                     browser_count: usize::MAX,
                     pinned: &self.pinned,
@@ -1824,8 +1949,34 @@ impl FilesApp {
                             .show_leaf_collapse_buttons(false)
                             .show_leaf_close_all_buttons(true)
                             .show_inside(ui, &mut viewer);
+                        if self.add_menu.is_none() {
+                            add_button_hints(ui, &window.dock);
+                        }
                     });
-                add_requests.extend(requests.into_iter().map(|leaf| (window.id, leaf)));
+                add_requests.extend(
+                    requests
+                        .into_iter()
+                        .map(|leaf| (window.id, leaf, NewTab::Browser)),
+                );
+                actions.extend(
+                    self.shared
+                        .app_actions
+                        .drain(first_action..)
+                        .map(|action| (Some(window.id), action)),
+                );
+                keys.push((window.id, TabKeys::read(ui.ctx())));
+                if let Some((leaf, kind)) = self.add_menu_ui(ui.ctx(), Some(window.id), trash_open)
+                {
+                    add_requests.push((window.id, leaf, kind));
+                }
+                let (menu, dropped) =
+                    tab_bar_ui(ui.ctx(), &window.dock, &tab_buttons, Some(window.id));
+                if menu.is_some() {
+                    self.add_menu = menu;
+                }
+                if let Some((leaf, dropped)) = dropped {
+                    folders.push((window.id, leaf, dropped));
+                }
 
                 let dropped = tab_windows::pop_out(ui.ctx(), &mut window.dock, &before);
                 if !dropped.is_empty() {
@@ -1860,14 +2011,16 @@ impl FilesApp {
             focused = None;
         }
         self.focused_window = focused;
-        for (window_id, leaf) in add_requests {
-            let path = self.focused_path();
-            let tab = self.make_tab(path);
-            if let Some(window) = self.windows.iter_mut().find(|w| w.id == window_id) {
-                window.dock.set_focused_node_and_surface(leaf);
-                window.dock.push_to_focused_leaf(tab);
-            }
+        for (window, leaf, kind) in add_requests {
+            self.add_to_leaf(Some(window), leaf, kind);
         }
+        for (window, leaf, dropped) in folders {
+            self.open_folders(Some(window), leaf, dropped);
+        }
+        for (window, keys) in keys {
+            self.tab_keys(Some(window), keys);
+        }
+        actions
     }
 
     /// Hands an in-app drag to the platform once it leaves the window, so it
@@ -2148,6 +2301,34 @@ impl FilesApp {
     }
 }
 
+impl FilesApp {
+    /// Does what a tab asked, from the tab window `window` (`None`: the
+    /// main one). Tabs it opens go in that window.
+    fn act(&mut self, ctx: &egui::Context, window: Option<u64>, action: AppAction) {
+        match action {
+            AppAction::NewTab(path) => self.open_tab(window, path),
+            AppAction::DuplicateTab(id) => self.duplicate_tab(id),
+            AppAction::FocusTab(id) => self.focus_tab(id),
+            AppAction::SetDefaultSort(sort) => self.default_sort = sort,
+            AppAction::TogglePreview => self.show_or_toggle_pane(ctx, Pane::Preview),
+            AppAction::OpenArchive(path) => self.open_archive(window, path),
+            AppAction::OpenWith(request, Some(target)) => {
+                self.open_with(ctx, request, target);
+            }
+            AppAction::OpenWith(request, None) => self.shared.open_with.ask(request),
+            AppAction::Edit(path) => self.open_editor(window, path),
+            AppAction::CloseTab(id) => self.request_close(id),
+            AppAction::TogglePin(id) => self.toggle_pin(id),
+            AppAction::CopyFiles { paths, cut } => self.copy_files(ctx, &paths, cut),
+            AppAction::Reveal(path) => self.reveal(window, path),
+            AppAction::DiskUsage(path) => self.open_usage(window, path),
+            AppAction::Properties(source) => self.open_properties(source),
+            AppAction::MoveToNewWindow(id) => self.move_tab_to(id, true),
+            AppAction::MoveToMainWindow(id) => self.move_tab_to(id, false),
+        }
+    }
+}
+
 impl eframe::App for FilesApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
@@ -2269,7 +2450,7 @@ impl eframe::App for FilesApp {
             self.eject(drive, label);
         }
         if let Some(path) = sidebar_response.analyze {
-            self.open_usage(path);
+            self.open_usage(None, path);
         }
         if let Some(path) = sidebar_response.properties {
             self.open_properties(Source::Files(vec![path]));
@@ -2289,33 +2470,25 @@ impl eframe::App for FilesApp {
         self.shared.app_actions.extend(app_actions);
         self.terminal_actions(&ctx, terminal_response);
         for leaf in add_requests {
-            self.add_to_leaf(leaf, NewTab::Browser);
+            self.add_to_leaf(None, leaf, NewTab::Browser);
         }
-        self.tab_windows_ui(&ctx);
-        self.add_menu_ui(&ctx);
-        self.tab_bars_ui(&ctx, &tab_buttons);
+        let window_actions = self.tab_windows_ui(&ctx);
+        let trash_open = self.all_tabs().any(DockTab::is_trash);
+        if let Some((leaf, kind)) = self.add_menu_ui(&ctx, None, trash_open) {
+            self.add_to_leaf(None, leaf, kind);
+        }
+        let (menu, folders) = tab_bar_ui(&ctx, &self.dock, &tab_buttons, None);
+        if menu.is_some() {
+            self.add_menu = menu;
+        }
+        if let Some((leaf, folders)) = folders {
+            self.open_folders(None, leaf, folders);
+        }
         self.place_split_ui(&ctx);
-        for action in std::mem::take(&mut self.shared.app_actions) {
-            match action {
-                AppAction::NewTab(path) => self.open_tab(path),
-                AppAction::FocusTab(id) => self.focus_tab(id),
-                AppAction::SetDefaultSort(sort) => self.default_sort = sort,
-                AppAction::TogglePreview => self.show_or_toggle_pane(&ctx, Pane::Preview),
-                AppAction::OpenArchive(path) => self.open_archive(path),
-                AppAction::OpenWith(request, Some(target)) => {
-                    self.open_with(&ctx, request, target);
-                }
-                AppAction::OpenWith(request, None) => self.shared.open_with.ask(request),
-                AppAction::Edit(path) => self.open_editor(path),
-                AppAction::CloseTab(id) => self.request_close(id),
-                AppAction::TogglePin(id) => self.toggle_pin(id),
-                AppAction::CopyFiles { paths, cut } => self.copy_files(&ctx, &paths, cut),
-                AppAction::Reveal(path) => self.reveal(path),
-                AppAction::DiskUsage(path) => self.open_usage(path),
-                AppAction::Properties(source) => self.open_properties(source),
-                AppAction::MoveToNewWindow(id) => self.move_tab_to(id, true),
-                AppAction::MoveToMainWindow(id) => self.move_tab_to(id, false),
-            }
+        let actions = std::mem::take(&mut self.shared.app_actions);
+        let actions = actions.into_iter().map(|action| (None, action));
+        for (window, action) in actions.chain(window_actions) {
+            self.act(&ctx, window, action);
         }
         self.confirm_close_ui(&ctx);
         if let Some((request, target)) = self.shared.open_with.ui(&ctx) {
@@ -2558,6 +2731,74 @@ mod tests {
             let preview = rect_of(&leaves, Pane::Preview).width();
             assert!((preview - 300.0).abs() < 12.0, "{pane:?}: {preview}");
         }
+    }
+
+    /// Right-clicking a tab bar's empty part opens the add menu for the
+    /// window it's in; right-clicking a tab doesn't.
+    #[test]
+    fn right_clicking_a_tab_bar_opens_the_menu_there() {
+        struct Buttons(Vec<Rect>);
+        impl TabViewer for Buttons {
+            type Tab = DockTab;
+            fn title(&mut self, tab: &mut DockTab) -> WidgetText {
+                tab.title().into()
+            }
+            fn ui(&mut self, _ui: &mut Ui, _tab: &mut DockTab) {}
+            fn id(&mut self, tab: &mut DockTab) -> Id {
+                Id::new(tab.id())
+            }
+            fn on_tab_button(&mut self, _tab: &mut DockTab, response: &egui::Response) {
+                self.0.push(response.rect);
+            }
+        }
+        let size = egui::vec2(800.0, 600.0);
+        let mut dock = DockState::new(vec![browser(1), browser(2)]);
+        let ctx = egui::Context::default();
+        // The menu a right-click at `pos` opened, and where the tabs are.
+        let mut right_click = |pos: Pos2| {
+            let mut menu = None;
+            let mut buttons = Vec::new();
+            for events in [
+                vec![egui::Event::PointerMoved(pos)],
+                vec![egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Secondary,
+                    pressed: true,
+                    modifiers: Modifiers::NONE,
+                }],
+                vec![egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Secondary,
+                    pressed: false,
+                    modifiers: Modifiers::NONE,
+                }],
+            ] {
+                let input = egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)),
+                    events,
+                    ..Default::default()
+                };
+                let mut output = ctx.run_ui(input, |ui| {
+                    let mut viewer = Buttons(Vec::new());
+                    DockArea::new(&mut dock)
+                        .style(Style::from_egui(ui.style()))
+                        .show_inside(ui, &mut viewer);
+                    buttons = viewer.0;
+                    menu = menu.or(tab_bar_ui(ui.ctx(), &dock, &buttons, Some(7)).0);
+                });
+                output.textures_delta.clear();
+            }
+            (menu, buttons)
+        };
+        let (_, buttons) = right_click(Pos2::new(700.0, 300.0));
+        assert_eq!(buttons.len(), 2);
+        let (menu, _) = right_click(buttons[0].center());
+        assert!(menu.is_none(), "not on a tab");
+        let empty = Pos2::new(buttons[1].right() + 40.0, buttons[1].center().y);
+        let (menu, _) = right_click(empty);
+        let menu = menu.expect("on the empty part");
+        assert_eq!(menu.window, Some(7));
+        assert_eq!(menu.pos, empty);
     }
 
     #[test]

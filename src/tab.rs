@@ -57,6 +57,8 @@ pub struct FileClipboard {
 /// Requests a tab cannot fulfil on its own.
 pub enum AppAction {
     NewTab(PathBuf),
+    /// Open another tab on a browser tab's folder, next to it.
+    DuplicateTab(u64),
     /// Bring the tab with this id to the front.
     FocusTab(u64),
     /// Sort new browser tabs this way.
