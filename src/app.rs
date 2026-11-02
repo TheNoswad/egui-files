@@ -453,6 +453,9 @@ pub struct FilesApp {
     /// Drag and drop with other apps on Wayland, when running there.
     #[cfg(target_os = "linux")]
     wayland: Option<crate::wayland_dnd::WaylandDnd>,
+    /// Dragging files out to other apps on X11, when running there.
+    #[cfg(target_os = "linux")]
+    x11: Option<crate::x11_dnd::X11Dnd>,
     /// Ctrl+V that egui-winit dropped (see `file_clipboard::PasteKey`).
     #[cfg(windows)]
     paste_key: crate::file_clipboard::PasteKey,
@@ -460,7 +463,7 @@ pub struct FilesApp {
     #[cfg(windows)]
     clipboard_seq: u32,
     /// An in-app drag was handed to the platform and is still in progress
-    /// (Wayland), or just ended and egui still needs the button release (Windows).
+    /// (Wayland, X11), or just ended and egui still needs the button release (Windows).
     drag_out_active: bool,
     /// Files dropped onto the window via winit (X11, Windows).
     os_dropped: Vec<PathBuf>,
@@ -639,6 +642,8 @@ impl FilesApp {
             allow_close: false,
             #[cfg(target_os = "linux")]
             wayland: crate::wayland_dnd::WaylandDnd::new(cc),
+            #[cfg(target_os = "linux")]
+            x11: crate::x11_dnd::X11Dnd::new(cc),
             #[cfg(windows)]
             paste_key: Default::default(),
             #[cfg(windows)]
@@ -2165,43 +2170,50 @@ impl FilesApp {
     /// can be dropped into other apps.
     fn drag_out(&mut self, ctx: &egui::Context) {
         #[cfg(target_os = "linux")]
-        if let Some(wayland) = &self.wayland
-            && !self.drag_out_active
-            && let Some(payload) = egui::DragAndDrop::payload::<dnd::FileDrag>(ctx)
-            && !payload.external
-            // Archive entries only exist once extracted.
-            && payload.archive.is_none()
-            && !payload.link_only
-            && ctx.input(|i| i.pointer.primary_down())
-            && let Some(pos) = ctx.input(|i| i.pointer.latest_pos())
-            && !ctx.content_rect().contains(pos)
-            && wayland.start_drag(
-                payload.paths.clone(),
-                crate::drag_icon::render(ctx, dnd::label(&payload)),
-            )
-        {
-            self.drag_out_active = true;
-            egui::DragAndDrop::clear_payload(ctx);
+        if let Some(x11) = &self.x11 {
+            if x11.ended() {
+                self.drag_out_active = false;
+            }
+            // egui drops its drag on Escape (and eats the key); the button is
+            // still held then, unlike after a drop. Let the other app know.
+            if self.drag_out_active
+                && egui::DragAndDrop::payload::<dnd::FileDrag>(ctx).is_none()
+                && ctx.input(|i| i.pointer.primary_down())
+            {
+                x11.cancel();
+            }
+        }
+        if self.drag_out_active {
+            return;
+        }
+        let Some(paths) = outgoing_drag(ctx) else {
+            return;
+        };
+        #[cfg(target_os = "linux")]
+        if let Some(wayland) = &self.wayland {
+            let label = egui::DragAndDrop::payload::<dnd::FileDrag>(ctx)
+                .map(|payload| dnd::label(&payload))
+                .unwrap_or_default();
+            if wayland.start_drag(paths, crate::drag_icon::render(ctx, label)) {
+                self.drag_out_active = true;
+                egui::DragAndDrop::clear_payload(ctx);
+            }
+        } else if let Some(x11) = &self.x11 {
+            // egui keeps its drag (and the pointer), so coming back into the
+            // window carries on with it.
+            self.drag_out_active = x11.start_drag(paths);
         }
         #[cfg(windows)]
-        if !self.drag_out_active
-            && let Some(payload) = egui::DragAndDrop::payload::<dnd::FileDrag>(ctx)
-            && !payload.external
-            && payload.archive.is_none()
-            && !payload.link_only
-            && ctx.input(|i| i.pointer.primary_down())
-            && let Some(pos) = ctx.input(|i| i.pointer.latest_pos())
-            && !ctx.content_rect().contains(pos)
         {
             egui::DragAndDrop::clear_payload(ctx);
             // Blocks until the drop; the window doesn't repaint meanwhile.
-            let _ = crate::windows_drag::run(&payload.paths);
+            let _ = crate::windows_drag::run(&paths);
             // OLE swallowed the button release; raw_input_hook sends it.
             self.drag_out_active = true;
             ctx.request_repaint();
         }
         #[cfg(not(any(target_os = "linux", windows)))]
-        let _ = ctx;
+        let _ = paths;
     }
 
     /// Applies file-watcher changes, and refreshes everything when a job finishes
@@ -2803,6 +2815,20 @@ impl eframe::App for FilesApp {
         };
         eframe::set_value(storage, eframe::APP_KEY, &state);
     }
+}
+
+/// The files of an in-app drag that has left the window with the button
+/// still held, ready to hand to other apps.
+fn outgoing_drag(ctx: &egui::Context) -> Option<Vec<PathBuf>> {
+    let payload = egui::DragAndDrop::payload::<dnd::FileDrag>(ctx)?;
+    let pos = ctx.input(|i| i.pointer.latest_pos())?;
+    // Archive entries only exist once extracted; places can't be copied.
+    let outgoing = !payload.external
+        && payload.archive.is_none()
+        && !payload.link_only
+        && ctx.input(|i| i.pointer.primary_down())
+        && !ctx.content_rect().contains(pos);
+    outgoing.then(|| payload.paths.clone())
 }
 
 #[cfg(test)]

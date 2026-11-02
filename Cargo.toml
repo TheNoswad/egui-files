@@ -57,6 +57,8 @@ serde_json = "1"
 smithay-client-toolkit = { version = "0.19", default-features = false }
 wayland-client = "0.31"
 wayland-backend = { version = "0.3", features = ["client_system"] }
+# Dragging files out to other apps on X11 (winit only receives drops).
+x11rb = "0.13"
 libc = "0.2"
 # Headless OpenGL context for libmpv's renderer.
 glow = "0.17"

@@ -45,6 +45,8 @@ mod window_buttons;
 mod windows_drag;
 #[cfg(windows)]
 mod windows_frame;
+#[cfg(target_os = "linux")]
+mod x11_dnd;
 
 fn main() -> eframe::Result {
     // Started elevated to apply changes from the Properties window.

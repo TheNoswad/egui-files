@@ -917,6 +917,7 @@ dependencies = [
  "wayland-backend",
  "wayland-client",
  "windows",
+ "x11rb",
  "xdg-mime",
  "zbus",
  "zip",
