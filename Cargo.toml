@@ -96,3 +96,6 @@ windows = { version = "0.62", features = [
 # breaks cross-compiling to Windows; patches/unrar_sys fixes only build.rs.
 [patch.crates-io]
 unrar_sys = { path = "patches/unrar_sys" }
+# Shares one Wayland clipboard between windows: upstream drops a window's
+# with it, which kills the Wayland connection (see patches/README.md).
+egui-winit = { path = "patches/egui-winit" }
