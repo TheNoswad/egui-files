@@ -28,6 +28,7 @@ use crate::{
     places,
     preview::{self, TextCache},
     properties::{self, OpenIn, PropertiesTab, Source},
+    settings::{self, NewTabs, SettingsTab},
     sidebar::{Sidebar, SidebarResponse},
     system_theme::SystemTheme,
     tab::{self, AppAction, BrowserTab, Shared},
@@ -38,6 +39,7 @@ use crate::{
     tree::FolderTree,
     usage::UsageTab,
     video::{Quality, Videos},
+    views::ViewMode,
     watcher::DirWatcher,
 };
 
@@ -96,6 +98,9 @@ struct Persisted {
     /// How new browser tabs sort.
     #[serde(default)]
     default_sort: Sort,
+    /// Which view new browser tabs show.
+    #[serde(default)]
+    default_view: ViewMode,
     /// Tabs in windows of their own.
     #[serde(default)]
     windows: Vec<TabWindow>,
@@ -134,6 +139,7 @@ struct PersistedRef<'a> {
     pinned: &'a HashSet<u64>,
     folder_sizes: bool,
     default_sort: Sort,
+    default_view: ViewMode,
     windows: &'a [TabWindow],
 }
 
@@ -348,6 +354,8 @@ struct TabKeys {
     close_tab: bool,
     /// Ctrl+Shift+U: disk usage of the focused folder.
     usage: bool,
+    /// Ctrl+,
+    settings: bool,
 }
 
 impl TabKeys {
@@ -357,6 +365,7 @@ impl TabKeys {
             usage: i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::U),
             new_tab: i.consume_key(Modifiers::COMMAND, Key::T),
             close_tab: i.consume_key(Modifiers::COMMAND, Key::W),
+            settings: i.consume_key(Modifiers::COMMAND, Key::Comma),
         })
     }
 }
@@ -458,8 +467,8 @@ pub struct FilesApp {
     /// Ids of the pinned tabs: they can't be closed and stay at the front of
     /// their tab bar.
     pinned: HashSet<u64>,
-    /// How new browser tabs sort.
-    default_sort: Sort,
+    /// How new browser tabs sort and which view they show.
+    new_tabs: NewTabs,
     /// The main surface's node kinds and the dock's size last frame, to
     /// notice them changing.
     dock_shape: (Vec<u8>, Vec2),
@@ -512,6 +521,7 @@ impl FilesApp {
                 pinned: HashSet::new(),
                 folder_sizes: true,
                 default_sort: Sort::default(),
+                default_view: ViewMode::default(),
                 windows: Vec::new(),
             });
         let Persisted {
@@ -536,6 +546,7 @@ impl FilesApp {
             pinned,
             folder_sizes,
             default_sort,
+            default_view,
             windows,
         } = persisted;
         editor::highlight::preload();
@@ -613,7 +624,10 @@ impl FilesApp {
             dock_size: Vec2::ZERO,
             add_menu: None,
             pinned,
-            default_sort,
+            new_tabs: NewTabs {
+                sort: default_sort,
+                view: default_view,
+            },
             dock_shape: (Vec::new(), Vec2::ZERO),
             about: About::new(cc),
             system_theme: SystemTheme::watch(&cc.egui_ctx),
@@ -633,7 +647,8 @@ impl FilesApp {
 
     fn make_tab(&mut self, path: PathBuf) -> DockTab {
         let mut tab = BrowserTab::new(self.next_id(), path);
-        tab.sort = self.default_sort;
+        tab.sort = self.new_tabs.sort;
+        tab.view = self.new_tabs.view;
         DockTab::Browser(tab)
     }
 
@@ -889,6 +904,16 @@ impl FilesApp {
             self.focus_tab(id);
         } else {
             let tab = DockTab::Usage(UsageTab::new(self.next_id(), path));
+            self.push_tab(window, tab);
+        }
+    }
+
+    /// Shows the settings tab, opening it in `window` if it isn't open.
+    fn open_settings(&mut self, window: Option<u64>) {
+        if let Some(id) = self.find_tab(|t| t.settings().is_some()) {
+            self.focus_tab(id);
+        } else {
+            let tab = DockTab::Settings(SettingsTab::new(self.next_id()));
             self.push_tab(window, tab);
         }
     }
@@ -1444,6 +1469,9 @@ impl FilesApp {
         if keys.close_tab {
             self.close_focused_tab(window);
         }
+        if keys.settings {
+            self.open_settings(window);
+        }
     }
 
     fn menu_bar(&mut self, ui: &mut Ui) {
@@ -1491,6 +1519,13 @@ impl FilesApp {
                     self.open_properties(source);
                 }
                 ui.separator();
+                if ui
+                    .add(Button::new(format!("{} Settings", icon::GEAR)).shortcut_text("Ctrl+,"))
+                    .clicked()
+                {
+                    self.open_settings(None);
+                }
+                ui.separator();
                 if ui.button("Quit").clicked() {
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                 }
@@ -1498,50 +1533,9 @@ impl FilesApp {
             ui.menu_button("View", |ui| {
                 ui.checkbox(&mut self.shared.show_hidden, "Show hidden files (Ctrl+H)");
                 ui.checkbox(&mut self.shared.show_thumbnails, "Show thumbnails");
-                ui.checkbox(&mut self.shared.usage.enabled, "Show folder sizes")
-                    .on_hover_text(
-                        "Measure the folders in the Details view, in the background; \
-                         not on network drives or FUSE mounts (a disk usage tab still can)",
-                    );
-                crate::dates::checkbox(ui);
-                ui.checkbox(&mut self.sidebar.hide_empty_drives, "Hide empty drives")
-                    .on_hover_text("Card readers without a card and drives with no disc");
                 ui.add(
                     egui::Slider::new(&mut self.shared.icon_size, 32.0..=192.0).text("Icon size"),
                 );
-                ui.checkbox(
-                    &mut self.shared.open_with.prefs.custom_commands,
-                    "Custom commands in “Open with”",
-                )
-                .on_hover_text("The “Other application…” dialog gets a box for typing any command");
-                ui.menu_button(format!("{} Syntax colors", icon::PALETTE), |ui| {
-                    self.shared.editor.menu_ui(ui);
-                });
-                ui.menu_button(format!("{} Properties", icon::INFO), |ui| {
-                    ui.label("Open properties in");
-                    let prefs = &mut self.shared.properties.prefs;
-                    for open_in in OpenIn::ALL {
-                        if ui
-                            .radio(prefs.open_in == open_in, open_in.label())
-                            .clicked()
-                        {
-                            prefs.open_in = open_in;
-                        }
-                    }
-                    ui.separator();
-                    ui.checkbox(&mut prefs.apply_immediately, "Apply changes immediately")
-                        .on_hover_text(
-                            "Without an Apply button: each change is made as soon as it's set",
-                        );
-                });
-                ui.menu_button("Video quality", |ui| {
-                    for quality in Quality::ALL {
-                        let selected = self.shared.videos.quality() == quality;
-                        if ui.radio(selected, quality.label()).clicked() {
-                            self.shared.videos.set_quality(quality);
-                        }
-                    }
-                });
                 ui.separator();
                 ui.menu_button(format!("{} Theme", icon::PAINT_BRUSH), |ui| {
                     egui::widgets::global_theme_preference_buttons(ui);
@@ -1561,6 +1555,16 @@ impl FilesApp {
                         ui.close();
                     }
                 });
+                if ui
+                    .add(
+                        Button::new(format!("{} More settings…", icon::GEAR))
+                            .shortcut_text("Ctrl+,"),
+                    )
+                    .clicked()
+                {
+                    self.open_settings(None);
+                    ui.close();
+                }
                 ui.separator();
                 ui.label("Panes");
                 for pane in Pane::ALL {
@@ -1666,6 +1670,8 @@ struct Viewer<'a> {
     in_window: bool,
     /// Tabs in the window being drawn.
     tabs: usize,
+    themes: &'a mut Themes,
+    new_tabs: &'a mut NewTabs,
 }
 
 impl Viewer<'_> {
@@ -1719,9 +1725,20 @@ impl TabViewer for Viewer<'_> {
     }
 
     fn ui(&mut self, ui: &mut Ui, tab: &mut DockTab) {
-        match tab.pane() {
-            Some(pane) => self.pane_ui(ui, pane),
-            None => tab.ui(ui, self.shared),
+        match tab {
+            DockTab::Pane(pane) => self.pane_ui(ui, pane.pane),
+            DockTab::Settings(settings) => settings::ui(
+                ui,
+                settings,
+                &mut settings::Access {
+                    shared: self.shared,
+                    sidebar: self.panes.sidebar,
+                    terminal: self.panes.terminal,
+                    themes: self.themes,
+                    new_tabs: self.new_tabs,
+                },
+            ),
+            _ => tab.ui(ui, self.shared),
         }
     }
 
@@ -1773,7 +1790,8 @@ impl TabViewer for Viewer<'_> {
             | DockTab::Archive(_)
             | DockTab::Editor(_)
             | DockTab::Usage(_)
-            | DockTab::Properties(_) => None,
+            | DockTab::Properties(_)
+            | DockTab::Settings(_) => None,
         };
         if let Some(job) = target.and_then(|target| dnd::target(response, target)) {
             self.shared.jobs.start(job);
@@ -1975,6 +1993,8 @@ impl FilesApp {
                     pinned: &self.pinned,
                     in_window: true,
                     tabs: window.dock.iter_all_tabs().count(),
+                    themes: &mut self.themes,
+                    new_tabs: &mut self.new_tabs,
                 };
                 let before =
                     tab_windows::Before::of(ui.ctx(), &window.dock, Id::new(("dock", window.id)));
@@ -2348,7 +2368,7 @@ impl FilesApp {
             AppAction::NewTab(path) => self.open_tab(window, path),
             AppAction::DuplicateTab(id) => self.duplicate_tab(id),
             AppAction::FocusTab(id) => self.focus_tab(id),
-            AppAction::SetDefaultSort(sort) => self.default_sort = sort,
+            AppAction::SetDefaultSort(sort) => self.new_tabs.sort = sort,
             AppAction::TogglePreview => self.show_or_toggle_pane(ctx, Pane::Preview),
             AppAction::OpenArchive(path) => self.open_archive(window, path),
             AppAction::OpenWith(request, Some(target)) => {
@@ -2442,6 +2462,8 @@ impl eframe::App for FilesApp {
             pinned: &self.pinned,
             in_window: false,
             tabs: self.dock.iter_all_tabs().count(),
+            themes: &mut self.themes,
+            new_tabs: &mut self.new_tabs,
         };
         let mut before = None;
         CentralPanel::default()
@@ -2643,7 +2665,8 @@ impl eframe::App for FilesApp {
             properties: &self.shared.properties.prefs,
             pinned: &self.pinned,
             folder_sizes: self.shared.usage.enabled,
-            default_sort: self.default_sort,
+            default_sort: self.new_tabs.sort,
+            default_view: self.new_tabs.view,
             windows: &self.windows,
         };
         eframe::set_value(storage, eframe::APP_KEY, &state);

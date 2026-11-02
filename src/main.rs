@@ -20,6 +20,7 @@ mod open_with;
 mod places;
 mod preview;
 mod properties;
+mod settings;
 mod sidebar;
 mod system_theme;
 mod tab;

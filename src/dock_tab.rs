@@ -10,6 +10,7 @@ use crate::{
     archive::ArchiveTab,
     editor::EditorTab,
     properties::PropertiesTab,
+    settings::SettingsTab,
     tab::{BrowserTab, Shared},
     trash::{self, TrashTab},
     usage::UsageTab,
@@ -33,6 +34,8 @@ pub enum DockTab {
     Usage(UsageTab),
     /// Saved as `id`, `properties`.
     Properties(PropertiesTab),
+    /// Saved as `id`, `settings`.
+    Settings(SettingsTab),
 }
 
 /// A tool docked alongside the tabs. Each is open at most once.
@@ -86,6 +89,7 @@ impl DockTab {
             Self::Editor(tab) => tab.id,
             Self::Usage(tab) => tab.id,
             Self::Properties(tab) => tab.id,
+            Self::Settings(tab) => tab.id,
         }
     }
 
@@ -98,6 +102,7 @@ impl DockTab {
             Self::Editor(tab) => tab.title(),
             Self::Usage(tab) => tab.title(),
             Self::Properties(tab) => tab.title(),
+            Self::Settings(tab) => tab.title(),
         }
     }
 
@@ -109,7 +114,8 @@ impl DockTab {
             | Self::Archive(_)
             | Self::Editor(_)
             | Self::Usage(_)
-            | Self::Properties(_) => None,
+            | Self::Properties(_)
+            | Self::Settings(_) => None,
         }
     }
 
@@ -121,7 +127,8 @@ impl DockTab {
             | Self::Archive(_)
             | Self::Editor(_)
             | Self::Usage(_)
-            | Self::Properties(_) => None,
+            | Self::Properties(_)
+            | Self::Settings(_) => None,
         }
     }
 
@@ -133,7 +140,8 @@ impl DockTab {
             | Self::Archive(_)
             | Self::Editor(_)
             | Self::Usage(_)
-            | Self::Properties(_) => None,
+            | Self::Properties(_)
+            | Self::Settings(_) => None,
         }
     }
 
@@ -176,7 +184,15 @@ impl DockTab {
         }
     }
 
-    /// Panes need more of the app than tabs do, so the app draws them.
+    pub fn settings(&self) -> Option<&SettingsTab> {
+        match self {
+            Self::Settings(tab) => Some(tab),
+            _ => None,
+        }
+    }
+
+    /// Panes and settings need more of the app than tabs do, so the app
+    /// draws them.
     pub fn ui(&mut self, ui: &mut Ui, shared: &mut Shared) {
         match self {
             Self::Browser(tab) => tab.ui(ui, shared),
@@ -185,7 +201,7 @@ impl DockTab {
             Self::Editor(tab) => tab.ui(ui, shared),
             Self::Usage(tab) => tab.ui(ui, shared),
             Self::Properties(tab) => tab.ui(ui, shared),
-            Self::Pane(_) => {}
+            Self::Pane(_) | Self::Settings(_) => {}
         }
     }
 
@@ -197,7 +213,7 @@ impl DockTab {
             Self::Usage(tab) => tab.mark_stale(),
             // Listings notice changes to the archive themselves; properties
             // look again every few seconds.
-            Self::Pane(_) | Self::Archive(_) | Self::Properties(_) => {}
+            Self::Pane(_) | Self::Archive(_) | Self::Properties(_) | Self::Settings(_) => {}
         }
     }
 
@@ -211,7 +227,7 @@ impl DockTab {
             }
             Self::Editor(tab) => tab.dirs_changed(dirs),
             Self::Usage(tab) => tab.dirs_changed(dirs),
-            Self::Pane(_) | Self::Archive(_) | Self::Properties(_) => {}
+            Self::Pane(_) | Self::Archive(_) | Self::Properties(_) | Self::Settings(_) => {}
         }
     }
 
@@ -223,7 +239,7 @@ impl DockTab {
             Self::Archive(tab) => tab.dir().into_iter().collect(),
             Self::Editor(tab) => tab.dir().into_iter().collect(),
             Self::Usage(tab) => tab.shown_dirs(),
-            Self::Pane(_) | Self::Properties(_) => Vec::new(),
+            Self::Pane(_) | Self::Properties(_) | Self::Settings(_) => Vec::new(),
         }
     }
 }
@@ -263,6 +279,9 @@ mod tests {
             PathBuf::from("/tmp/notes.txt"),
         )));
         new.push_to_first_leaf(DockTab::Usage(UsageTab::new(5, PathBuf::from("/tmp"))));
+        let mut settings = SettingsTab::new(6);
+        settings.settings = crate::settings::Section::Places;
+        new.push_to_first_leaf(DockTab::Settings(settings));
         let saved = ron::ser::to_string(&new).unwrap();
         let loaded: DockState<DockTab> = ron::from_str(&saved).unwrap();
         assert!(
@@ -270,6 +289,10 @@ mod tests {
                 .iter_all_tabs()
                 .any(|(_, t)| t.usage().is_some_and(|u| u.id == 5))
         );
+        assert!(loaded.iter_all_tabs().any(|(_, t)| {
+            t.settings()
+                .is_some_and(|s| s.id == 6 && s.settings == crate::settings::Section::Places)
+        }));
         let kinds: Vec<_> = loaded
             .iter_all_tabs()
             .map(|(_, t)| {
@@ -290,6 +313,7 @@ mod tests {
                 (3, false, None, true),
                 (4, false, None, true),
                 (5, false, None, true),
+                (6, false, None, false),
             ]
         );
     }
