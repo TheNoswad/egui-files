@@ -1658,16 +1658,11 @@ impl TabViewer for Viewer<'_> {
 }
 
 impl FilesApp {
-    /// Tabs dropped outside the main window this frame go into windows of
-    /// their own, opened where they were dropped.
-    fn pop_out(&mut self, ctx: &egui::Context) {
-        let pointer = ctx.input(|i| i.pointer.hover_pos());
-        if !tab_windows::outside(ctx.content_rect(), pointer) {
-            return;
-        }
-        let origin = ctx.input(|i| i.viewport().inner_rect).map(|r| r.min);
-        for dock in tab_windows::take_new_floating(&mut self.dock) {
-            let position = origin.zip(pointer).map(|(o, p)| o + p.to_vec2());
+    /// Tabs (or floating windows of them) dropped outside the main window
+    /// this frame go into windows of their own, opened where they were
+    /// dropped. `before` is the dock before it was drawn.
+    fn pop_out(&mut self, ctx: &egui::Context, before: &tab_windows::Before) {
+        for (dock, position) in tab_windows::pop_out(ctx, &mut self.dock, before) {
             let id = self.next_window_id;
             self.next_window_id += 1;
             self.windows
@@ -1727,6 +1722,8 @@ impl FilesApp {
                     pinned: &self.pinned,
                     in_window: true,
                 };
+                let before =
+                    tab_windows::Before::of(ui.ctx(), &window.dock, Id::new(("dock", window.id)));
                 CentralPanel::default()
                     .frame(egui::Frame::NONE)
                     .show(ui, |ui| {
@@ -1740,13 +1737,7 @@ impl FilesApp {
                     });
                 add_requests.extend(requests.into_iter().map(|leaf| (window.id, leaf)));
 
-                let pointer = ui.input(|i| i.pointer.hover_pos());
-                if tab_windows::outside(ui.ctx().content_rect(), pointer) {
-                    for dock in tab_windows::take_new_floating(&mut window.dock) {
-                        let position = inner.zip(pointer).map(|(inner, p)| inner.min + p.to_vec2());
-                        popped.push((dock, position));
-                    }
-                }
+                popped.extend(tab_windows::pop_out(ui.ctx(), &mut window.dock, &before));
 
                 if close {
                     // Unsaved editors stay, and ask; the rest close.
@@ -2140,6 +2131,7 @@ impl eframe::App for FilesApp {
             pinned: &self.pinned,
             in_window: false,
         };
+        let mut before = None;
         CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
@@ -2147,6 +2139,11 @@ impl eframe::App for FilesApp {
                 for pane in std::mem::take(&mut self.pending_panes) {
                     dock_pane(&mut self.dock, pane, self.dock_size);
                 }
+                before = Some(tab_windows::Before::of(
+                    ui.ctx(),
+                    &self.dock,
+                    Id::new("dock"),
+                ));
                 DockArea::new(&mut self.dock)
                     .id(Id::new("dock"))
                     .style(Style::from_egui(ui.style()))
@@ -2165,7 +2162,9 @@ impl eframe::App for FilesApp {
             terminal_response,
             ..
         } = viewer.panes;
-        self.pop_out(&ctx);
+        if let Some(before) = before {
+            self.pop_out(&ctx, &before);
+        }
 
         if let Some((path, new_tab)) = sidebar_response.target {
             self.go_to(path, new_tab);
