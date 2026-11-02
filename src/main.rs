@@ -40,6 +40,7 @@ mod watcher;
 #[cfg(target_os = "linux")]
 mod wayland_dnd;
 mod widgets;
+mod window_buttons;
 #[cfg(windows)]
 mod windows_drag;
 

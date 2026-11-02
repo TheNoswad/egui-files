@@ -6,8 +6,8 @@
 use std::path::PathBuf;
 
 use egui::{
-    Align2, Button, Color32, CursorIcon, FontId, Id, Order, Panel, Rect, ResizeDirection, RichText,
-    Sense, TextEdit, Ui, Vec2, ViewportCommand, pos2, vec2,
+    Button, CursorIcon, FontId, Id, Order, Panel, Rect, ResizeDirection, RichText, Sense, TextEdit,
+    Ui, Vec2, ViewportCommand, pos2, vec2,
 };
 use egui_phosphor::regular as icon;
 use serde::{Deserialize, Serialize};
@@ -17,7 +17,7 @@ use egui_dock::DockState;
 use crate::{
     dock_tab::{DockTab, Pane},
     keymap::{self, Command},
-    tab,
+    tab, window_buttons,
 };
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -35,6 +35,8 @@ pub struct Prefs {
     pub filter_box: bool,
     /// Buttons opening and closing the panes.
     pub pane_toggles: bool,
+    /// Minimize, maximize and close: which, where, and their look.
+    pub buttons: window_buttons::Prefs,
 }
 
 impl Default for Prefs {
@@ -46,6 +48,7 @@ impl Default for Prefs {
             path_box: false,
             filter_box: false,
             pane_toggles: false,
+            buttons: window_buttons::Prefs::default(),
         }
     }
 }
@@ -100,8 +103,6 @@ fn enabled_in(app_ron: &str) -> bool {
 
 /// How tall the bar is, in points.
 const HEIGHT: f32 = 32.0;
-/// How wide each window button is.
-const BUTTON_WIDTH: f32 = 46.0;
 /// How far in from the window's edges a drag resizes it.
 const EDGE: f32 = 5.0;
 /// How far along an edge from a corner a drag resizes from that corner.
@@ -265,13 +266,44 @@ fn bar(
         ctx.send_viewport_cmd(ViewportCommand::StartDrag);
     }
 
+    let layout = prefs.buttons.layout();
+    let style = prefs.buttons.style();
+    let window_command = |button| {
+        let command = match button {
+            window_buttons::Button::Minimize => ViewportCommand::Minimized(true),
+            window_buttons::Button::Maximize => ViewportCommand::Maximized(!maximized),
+            window_buttons::Button::Close => ViewportCommand::Close,
+        };
+        ctx.send_viewport_cmd(command);
+    };
+
+    // Buttons on the left go before the menus.
+    let left_buttons = window_buttons::width(&layout.left, style);
+    let left_rect = Rect::from_min_size(rect.min, vec2(left_buttons, rect.height()));
+    if let Some(button) = window_buttons::show(
+        ui,
+        left_rect,
+        &layout.left,
+        style,
+        window_buttons::Side::Left,
+        maximized,
+    ) {
+        window_command(button);
+    }
+    let menus_rect = Rect::from_x_y_ranges(left_rect.right()..=rect.right(), rect.y_range());
+
     let toggles = if prefs.pane_toggles { panes } else { &[] };
-    let right_width =
-        3.0 * BUTTON_WIDTH + toggles.len() as f32 * (NAV_BUTTON + TOGGLE_SPACING) + GAP;
+    let right_buttons = window_buttons::width(&layout.right, style);
+    let toggles_width = if toggles.is_empty() {
+        0.0
+    } else {
+        toggles.len() as f32 * (NAV_BUTTON + TOGGLE_SPACING) + GAP
+    };
+    let right_width = right_buttons + toggles_width;
     let centred = egui::Layout::left_to_right(egui::Align::Center);
     let menus_end = ui
         .scope_builder(
-            egui::UiBuilder::new().max_rect(rect).layout(centred),
+            egui::UiBuilder::new().max_rect(menus_rect).layout(centred),
             |ui| {
                 ui.add_space(6.0);
                 menus(ui)
@@ -352,22 +384,15 @@ fn bar(
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 0.0;
-                if window_button(ui, icon::X, "Close", true).clicked() {
-                    ctx.send_viewport_cmd(ViewportCommand::Close);
+                let (right_rect, _) =
+                    ui.allocate_exact_size(vec2(right_buttons, rect.height()), Sense::hover());
+                let side = window_buttons::Side::Right;
+                if let Some(button) =
+                    window_buttons::show(ui, right_rect, &layout.right, style, side, maximized)
+                {
+                    window_command(button);
                 }
-                let (glyph, tip) = if maximized {
-                    (icon::CORNERS_IN, "Restore")
-                } else {
-                    (icon::SQUARE, "Maximize")
-                };
-                if window_button(ui, glyph, tip, false).clicked() {
-                    ctx.send_viewport_cmd(ViewportCommand::Maximized(!maximized));
-                }
-                let minimize = window_button(ui, icon::MINUS, "Minimize", false);
-                if minimize.clicked() {
-                    ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
-                }
-                buttons_left = minimize.rect.left();
+                buttons_left = right_rect.left();
                 if !toggles.is_empty() {
                     ui.add_space(GAP);
                     ui.spacing_mut().item_spacing.x = TOGGLE_SPACING;
@@ -478,30 +503,6 @@ fn path_box(ui: &mut Ui, id: Id, path: Option<&PathBuf>, width: f32) -> Option<P
         ui.data_mut(|d| d.remove::<String>(id));
     }
     (entered && !text.trim().is_empty()).then(|| PathBuf::from(text.trim()))
-}
-
-/// A minimize, maximize or close button: flat, filling the bar's height,
-/// with close turning red under the pointer as on Windows.
-fn window_button(ui: &mut Ui, glyph: &str, tip: &str, close: bool) -> egui::Response {
-    let (rect, response) =
-        ui.allocate_exact_size(vec2(BUTTON_WIDTH, ui.available_height()), Sense::click());
-    let visuals = ui.visuals();
-    let hot = response.hovered() || response.is_pointer_button_down_on();
-    let (fill, text) = match (hot, close) {
-        (true, true) => (Color32::from_rgb(0xc4, 0x2b, 0x1c), Color32::WHITE),
-        (true, false) => (visuals.widgets.hovered.weak_bg_fill, visuals.text_color()),
-        (false, _) => (Color32::TRANSPARENT, visuals.text_color()),
-    };
-    let painter = ui.painter();
-    painter.rect_filled(rect, 0.0, fill);
-    painter.text(
-        rect.center(),
-        Align2::CENTER_CENTER,
-        glyph,
-        FontId::proportional(14.0),
-        text,
-    );
-    response.on_hover_text(tip)
 }
 
 /// Lets the edges and corners of the viewport `ctx` is running resize it,
@@ -666,7 +667,9 @@ mod tests {
             path.rect
         );
         assert!(
-            path.rect.right() < 1200.0 - 3.0 * BUTTON_WIDTH,
+            path.rect.right()
+                < 1200.0
+                    - window_buttons::width(&prefs.buttons.layout().right, prefs.buttons.style()),
             "{:?}",
             path.rect
         );
@@ -693,6 +696,7 @@ mod tests {
             path_box: true,
             filter_box: true,
             pane_toggles: true,
+            ..Prefs::default()
         };
         let nav = 3.0 * NAV_BUTTON + GAP;
         // Plenty of room: everything at its widest.

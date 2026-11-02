@@ -9,7 +9,6 @@
 - [ ] Custom titlebar that looks native (opt-in; the system frame stays the default)
     - [ ] The system window menu on right-click of the bar, where there is one
     - [ ] Tab windows: their tab bar inline in the title bar, like a browser
-    - [ ] Window buttons: settings for the side (left / right), which ones (minimize, maximize, close) and their look (Windows, Adwaita, Breeze, macOS); default to the platform's, and on Linux read the GNOME / KDE button layout
     - [ ] Windows: rounded corners and the shadow via DWM; the Win11 snap layouts flyout needs `HTMAXBUTTON` from `WM_NCHITTEST`, which winit doesn't give us
 - [ ] Upstream: egui-winit makes a smithay clipboard per viewport and drops it with the viewport, which kills the Wayland connection ("not a valid new object id … data_offer"); we patch it to share one (patches/README.md has a repro). Report it or send the PR, then drop the patch.
 - [ ] Tab windows: check they keep updating while the main window is hidden (another workspace, minimized). Their UI runs in the main window's frame, and on Wayland winit may hold that frame until the compositor sends the main window a frame callback

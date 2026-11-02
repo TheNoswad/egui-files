@@ -250,12 +250,52 @@ fn appearance(ui: &mut Ui, app: &mut Access) {
             ui.checkbox(&mut bar.pane_toggles, "Pane buttons")
                 .on_hover_text("Open and close the places, folder tree, preview and terminal");
             ui.weak("Parts that don't fit hide, leaving room to drag the window by.");
+            window_buttons(ui, &mut bar.buttons);
         });
     });
 
     group(ui, "Editor");
     ui.menu_button(format!("{} Syntax colors", icon::PALETTE), |ui| {
         app.shared.editor.menu_ui(ui);
+    });
+}
+
+fn window_buttons(ui: &mut Ui, prefs: &mut crate::window_buttons::Prefs) {
+    use crate::window_buttons::{Side, Style, desktop};
+    ui.add_space(6.0);
+    ui.label("Window buttons");
+    let detected = desktop();
+    ui.radio_value(
+        &mut prefs.follow_desktop,
+        true,
+        format!("Like the desktop ({})", detected.name),
+    );
+    ui.radio_value(&mut prefs.follow_desktop, false, "Choose");
+    ui.indent("window-buttons-choice", |ui| {
+        ui.add_enabled_ui(!prefs.follow_desktop, |ui| {
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut prefs.side, Side::Left, "Left");
+                ui.selectable_value(&mut prefs.side, Side::Right, "Right");
+            });
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut prefs.minimize, "Minimize");
+                ui.checkbox(&mut prefs.maximize, "Maximize");
+                ui.checkbox(&mut prefs.close, "Close");
+            });
+        });
+    });
+    ui.horizontal(|ui| {
+        ui.label("Look");
+        egui::ComboBox::from_id_salt("window-button-style")
+            .selected_text(match prefs.style {
+                Style::Auto => format!("Like the desktop ({})", detected.style.label()),
+                style => style.label().to_owned(),
+            })
+            .show_ui(ui, |ui| {
+                for style in Style::ALL {
+                    ui.selectable_value(&mut prefs.style, style, style.label());
+                }
+            });
     });
 }
 
