@@ -3,18 +3,76 @@
 //! to drag the window by. Without the system frame the window also needs
 //! edges to resize it by, which [`resize_edges`] adds.
 
+use std::path::PathBuf;
+
 use egui::{
-    Align2, Color32, CursorIcon, FontId, Id, Order, Panel, Rect, ResizeDirection, Sense, Ui, Vec2,
-    ViewportCommand, pos2, vec2,
+    Align2, Button, Color32, CursorIcon, FontId, Id, Order, Panel, Rect, ResizeDirection, RichText,
+    Sense, TextEdit, Ui, Vec2, ViewportCommand, pos2, vec2,
 };
 use egui_phosphor::regular as icon;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+use egui_dock::DockState;
+
+use crate::{
+    dock_tab::{DockTab, Pane},
+    keymap::{self, Command},
+    tab,
+};
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Prefs {
     /// Draw the title bar in the app; off keeps the system's.
     pub enabled: bool,
+    /// The focused tab's title in the middle.
+    pub title: bool,
+    /// Back, forward and up for the focused tab.
+    pub navigation: bool,
+    /// The focused tab's folder, to type a path into.
+    pub path_box: bool,
+    /// The focused tab's filter.
+    pub filter_box: bool,
+    /// Buttons opening and closing the panes.
+    pub pane_toggles: bool,
+}
+
+impl Default for Prefs {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            title: true,
+            navigation: true,
+            path_box: false,
+            filter_box: false,
+            pane_toggles: false,
+        }
+    }
+}
+
+/// What the bar shows of the focused tab.
+#[derive(Default)]
+pub struct Focus {
+    pub title: String,
+    /// Shown on hovering the title.
+    pub hover: Option<String>,
+    /// The folder of the focused browser tab; without one, navigation and
+    /// the boxes are disabled.
+    pub path: Option<PathBuf>,
+    pub can_go_back: bool,
+    pub can_go_forward: bool,
+    pub filter: String,
+}
+
+/// What the bar asks of the app this frame.
+// A few a frame at most, so the size difference doesn't matter.
+#[allow(clippy::large_enum_variant)]
+pub enum Request {
+    /// For the focused browser tab.
+    Tab(tab::Action),
+    /// Set the focused browser tab's filter.
+    Filter(String),
+    TogglePane(Pane),
 }
 
 /// Whether the bar was on when the app last saved its state. Read before
@@ -49,21 +107,147 @@ const EDGE: f32 = 5.0;
 /// How far along an edge from a corner a drag resizes from that corner.
 const CORNER: f32 = 14.0;
 
-/// Draws the bar along the top of the viewport `ui` is in, with `menus` at
-/// its left and `title` in the middle when there's room.
-pub fn show(ui: &mut Ui, id: &str, title: &str, menus: impl FnOnce(&mut Ui)) {
+/// What the bar shows of `dock`'s focused tab, and the id of the browser
+/// tab its requests go to: the focused tab if it's one, or with a pane
+/// focused, `active_browser` (the tab the panes follow).
+pub fn focus(dock: &mut DockState<DockTab>, active_browser: Option<u64>) -> (Focus, Option<u64>) {
+    let focused = dock.find_active_focused().map(|(_, t)| t.id());
+    let shown = match focused {
+        Some(id)
+            if dock
+                .iter_all_tabs()
+                .any(|(_, t)| t.id() == id && t.pane().is_none()) =>
+        {
+            Some(id)
+        }
+        _ => active_browser.or_else(|| {
+            dock.iter_all_tabs()
+                .find(|(_, t)| t.browser().is_some())
+                .map(|(_, t)| t.id())
+        }),
+    };
+    let Some(tab) = shown.and_then(|id| {
+        dock.iter_all_tabs()
+            .find(|(_, t)| t.id() == id)
+            .map(|(_, t)| t)
+    }) else {
+        return (Focus::default(), None);
+    };
+    let mut focus = Focus {
+        title: crate::tab_windows::plain_title(&tab.title()),
+        ..Focus::default()
+    };
+    let Some(browser) = tab.browser() else {
+        return (focus, None);
+    };
+    focus.hover = Some(browser.path.display().to_string());
+    focus.path = Some(browser.path.clone());
+    focus.can_go_back = browser.can_go_back();
+    focus.can_go_forward = browser.can_go_forward();
+    focus.filter = browser.filter.clone();
+    (focus, Some(browser.id))
+}
+
+/// Hands `requests` to the browser tab `browser` in `dock`; returns the
+/// panes to open or close, which only the app can.
+pub fn apply(
+    dock: &mut DockState<DockTab>,
+    browser: Option<u64>,
+    requests: Vec<Request>,
+) -> Vec<Pane> {
+    let mut panes = Vec::new();
+    let mut tab = browser.and_then(|id| {
+        dock.iter_all_tabs_mut()
+            .find(|(_, t)| t.id() == id)
+            .and_then(|(_, t)| t.browser_mut())
+    });
+    for request in requests {
+        match (request, &mut tab) {
+            (Request::Tab(action), Some(tab)) => tab.queued.push(action),
+            (Request::Filter(filter), Some(tab)) => tab.filter = filter,
+            (Request::TogglePane(pane), _) => panes.push(pane),
+            (Request::Tab(_) | Request::Filter(_), None) => {}
+        }
+    }
+    panes
+}
+
+/// Least room left over to drag the window by, whatever else is on.
+const MIN_DRAG: f32 = 80.0;
+const GAP: f32 = 8.0;
+const NAV_BUTTON: f32 = 28.0;
+const PATH_WIDTH: (f32, f32) = (140.0, 360.0);
+const FILTER_WIDTH: (f32, f32) = (100.0, 180.0);
+
+/// Which optional parts left of the title fit in `room`, and how wide the
+/// boxes are, keeping [`MIN_DRAG`] free. Navigation goes first, then the
+/// path, then the filter; each shows at its least width before any grows.
+#[derive(Debug, PartialEq)]
+struct Fit {
+    navigation: bool,
+    path: Option<f32>,
+    filter: Option<f32>,
+}
+
+fn fit(prefs: &Prefs, room: f32) -> Fit {
+    let mut room = room - MIN_DRAG;
+    let mut take = |on: bool, width: f32| {
+        let fits = on && room >= width + GAP;
+        if fits {
+            room -= width + GAP;
+        }
+        fits
+    };
+    let navigation = take(prefs.navigation, 3.0 * NAV_BUTTON);
+    let path = take(prefs.path_box, PATH_WIDTH.0);
+    let filter = take(prefs.filter_box, FILTER_WIDTH.0);
+    let mut grow = |on: bool, (least, most): (f32, f32)| {
+        on.then(|| {
+            let extra = room.min(most - least).max(0.0);
+            room -= extra;
+            least + extra
+        })
+    };
+    let path = grow(path, PATH_WIDTH);
+    let filter = grow(filter, FILTER_WIDTH);
+    Fit {
+        navigation,
+        path,
+        filter,
+    }
+}
+
+/// Draws the bar along the top of the viewport `ui` is in: `menus` at its
+/// left, then the parts `prefs` turns on for `focus`, and `panes` (each
+/// with whether it's open) as toggles beside the window buttons.
+pub fn show(
+    ui: &mut Ui,
+    id: &str,
+    prefs: &Prefs,
+    focus: &Focus,
+    panes: &[(Pane, bool)],
+    menus: impl FnOnce(&mut Ui),
+) -> Vec<Request> {
     let frame = egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin::ZERO);
     Panel::top(Id::new(("titlebar", id)))
         .exact_size(HEIGHT)
         .resizable(false)
         .frame(frame)
-        .show(ui, |ui| bar(ui, title, menus));
+        .show(ui, |ui| bar(ui, prefs, focus, panes, menus))
+        .inner
 }
 
-fn bar(ui: &mut Ui, title: &str, menus: impl FnOnce(&mut Ui)) {
+fn bar(
+    ui: &mut Ui,
+    prefs: &Prefs,
+    focus: &Focus,
+    panes: &[(Pane, bool)],
+    menus: impl FnOnce(&mut Ui),
+) -> Vec<Request> {
     let rect = ui.max_rect();
     let ctx = ui.ctx().clone();
     let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+    let mut requests = Vec::new();
 
     // Under everything else in the bar: what's left over moves the window.
     let background = ui.interact(rect, ui.id().with("drag"), Sense::click_and_drag());
@@ -73,12 +257,79 @@ fn bar(ui: &mut Ui, title: &str, menus: impl FnOnce(&mut Ui)) {
         ctx.send_viewport_cmd(ViewportCommand::StartDrag);
     }
 
-    let mut menus_right = rect.left();
+    let toggles = if prefs.pane_toggles { panes } else { &[] };
+    let right_width = 3.0 * BUTTON_WIDTH + toggles.len() as f32 * NAV_BUTTON + GAP;
+    let mut left_end = rect.left();
     let mut buttons_left = rect.right();
     ui.horizontal_centered(|ui| {
         ui.add_space(6.0);
-        let response = ui.scope(menus).response;
-        menus_right = response.rect.right();
+        ui.scope(menus);
+        let room = rect.right() - right_width - ui.cursor().left();
+        let fit = fit(prefs, room);
+        let browser = focus.path.as_ref();
+        if fit.navigation {
+            ui.add_space(GAP);
+            ui.spacing_mut().item_spacing.x = 0.0;
+            let nav = [
+                (
+                    icon::ARROW_LEFT,
+                    "Back",
+                    Command::Back,
+                    focus.can_go_back,
+                    tab::Action::Back,
+                ),
+                (
+                    icon::ARROW_RIGHT,
+                    "Forward",
+                    Command::Forward,
+                    focus.can_go_forward,
+                    tab::Action::Forward,
+                ),
+                (
+                    icon::ARROW_UP,
+                    "Up",
+                    Command::Up,
+                    browser.is_some_and(|p| p.parent().is_some()),
+                    tab::Action::Up,
+                ),
+            ];
+            for (glyph, label, command, enabled, action) in nav {
+                let button = Button::new(RichText::new(glyph).size(15.0))
+                    .frame(false)
+                    .min_size(vec2(NAV_BUTTON, NAV_BUTTON - 4.0));
+                if ui
+                    .add_enabled(enabled, button)
+                    .on_hover_text(keymap::hint(&ctx, label, command))
+                    .clicked()
+                {
+                    requests.push(Request::Tab(action));
+                }
+            }
+            ui.spacing_mut().item_spacing.x = ui.style().spacing.item_spacing.x;
+        }
+        if let Some(width) = fit.path {
+            ui.add_space(GAP);
+            if let Some(path) = path_box(ui, browser, width) {
+                requests.push(Request::Tab(tab::Action::Navigate(path)));
+            }
+        }
+        if let Some(width) = fit.filter {
+            ui.add_space(GAP);
+            let mut filter = focus.filter.clone();
+            let hint = format!(
+                "{} {}",
+                icon::MAGNIFYING_GLASS,
+                keymap::hint(&ctx, "Filter", Command::Filter)
+            );
+            let edit = TextEdit::singleline(&mut filter)
+                .hint_text(hint)
+                .desired_width(width);
+            if ui.add_enabled(browser.is_some(), edit).changed() {
+                requests.push(Request::Filter(filter));
+            }
+        }
+        left_end = ui.cursor().left();
+
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             if window_button(ui, icon::X, "Close", true).clicked() {
@@ -97,25 +348,92 @@ fn bar(ui: &mut Ui, title: &str, menus: impl FnOnce(&mut Ui)) {
                 ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
             }
             buttons_left = minimize.rect.left();
+            if !toggles.is_empty() {
+                ui.add_space(GAP);
+                for &(pane, open) in toggles.iter().rev() {
+                    let button = Button::selectable(open, RichText::new(pane.icon()).size(15.0))
+                        .min_size(vec2(NAV_BUTTON, NAV_BUTTON - 4.0));
+                    let tip = match pane {
+                        Pane::Preview => keymap::hint(&ctx, pane.label(), Command::TogglePreview),
+                        Pane::Terminal => keymap::hint(&ctx, pane.label(), Command::ToggleTerminal),
+                        _ => pane.label().to_owned(),
+                    };
+                    let response = ui.add(button).on_hover_text(tip);
+                    if response.clicked() {
+                        requests.push(Request::TogglePane(pane));
+                    }
+                    buttons_left = response.rect.left();
+                }
+            }
         });
     });
 
-    // Centred on the window, as system title bars are, if that leaves it
-    // clear of the menus and buttons.
+    if prefs.title {
+        title(ui, &background, focus, rect, left_end, buttons_left);
+    }
+    requests
+}
+
+/// The focused tab's title, centred on the window as system title bars
+/// have it, if that leaves it clear of what's on either side.
+fn title(
+    ui: &Ui,
+    background: &egui::Response,
+    focus: &Focus,
+    rect: Rect,
+    left_end: f32,
+    right_start: f32,
+) {
+    let ctx = ui.ctx();
     let font = FontId::proportional(13.0);
     let color = if ctx.input(|i| i.viewport().focused) == Some(false) {
         ui.visuals().weak_text_color()
     } else {
         ui.visuals().text_color()
     };
-    let galley = ui.painter().layout_no_wrap(title.to_owned(), font, color);
-    let width = galley.size().x;
-    let centred = rect.center().x - width / 2.0;
-    let x = centred.max(menus_right + 12.0);
-    if x + width + 12.0 <= buttons_left {
-        let pos = pos2(x, rect.center().y - galley.size().y / 2.0);
-        ui.painter().galley(pos, galley, color);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(focus.title.clone(), font, color);
+    let size = galley.size();
+    let x = (rect.center().x - size.x / 2.0).max(left_end + 12.0);
+    if x + size.x + 12.0 > right_start {
+        return;
     }
+    let pos = pos2(x, rect.center().y - size.y / 2.0);
+    let text_rect = Rect::from_min_size(pos, size);
+    ui.painter().galley(pos, galley, color);
+    if let Some(hover) = &focus.hover
+        && background
+            .hover_pos()
+            .is_some_and(|p| text_rect.contains(p))
+    {
+        background.clone().on_hover_text(hover);
+    }
+}
+
+/// The focused tab's folder; click to type another and Enter to go there.
+/// Returns where to go.
+fn path_box(ui: &mut Ui, path: Option<&PathBuf>, width: f32) -> Option<PathBuf> {
+    let id = ui.id().with("path-box");
+    let editing = ui.memory(|m| m.has_focus(id));
+    let shown = path.map(|p| p.display().to_string()).unwrap_or_default();
+    let mut text = if editing {
+        ui.data(|d| d.get_temp::<String>(id)).unwrap_or(shown)
+    } else {
+        shown
+    };
+    let response = ui.add_enabled(
+        path.is_some(),
+        TextEdit::singleline(&mut text).id(id).desired_width(width),
+    );
+    if response.has_focus() {
+        ui.data_mut(|d| d.insert_temp(id, text.clone()));
+    }
+    let entered = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+    if response.lost_focus() {
+        ui.data_mut(|d| d.remove::<String>(id));
+    }
+    (entered && !text.trim().is_empty()).then(|| PathBuf::from(text.trim()))
 }
 
 /// A minimize, maximize or close button: flat, filling the bar's height,
@@ -223,6 +541,91 @@ mod tests {
         // Saved before the setting existed, or nothing saved.
         assert!(!enabled_in(&save("(show_hidden: true)")));
         assert!(!enabled_in(""));
+    }
+
+    #[test]
+    fn requests_reach_the_focused_browser_tab() {
+        use crate::{dock_tab::PaneTab, tab::BrowserTab};
+        let browser = |id, path: &str| DockTab::Browser(BrowserTab::new(id, PathBuf::from(path)));
+        let mut dock = DockState::new(vec![browser(1, "/tmp"), browser(2, "/usr/lib")]);
+        dock.push_to_first_leaf(DockTab::Pane(PaneTab {
+            pane: Pane::Preview,
+        }));
+
+        // A pane is focused (pushed last): the bar follows the active browser.
+        let (focus, target) = focus(&mut dock, Some(2));
+        assert_eq!(target, Some(2));
+        assert_eq!(focus.path, Some(PathBuf::from("/usr/lib")));
+        assert_eq!(focus.title, "lib");
+        assert!(!focus.can_go_back);
+
+        let panes = apply(
+            &mut dock,
+            target,
+            vec![
+                Request::Tab(tab::Action::Up),
+                Request::Filter("so".into()),
+                Request::TogglePane(Pane::Terminal),
+            ],
+        );
+        assert_eq!(panes, [Pane::Terminal]);
+        let tab = dock
+            .iter_all_tabs()
+            .find_map(|(_, t)| t.browser().filter(|b| b.id == 2))
+            .unwrap();
+        assert_eq!(tab.filter, "so");
+        assert!(matches!(tab.queued[..], [tab::Action::Up]));
+    }
+
+    #[test]
+    fn parts_fit_in_order_and_leave_room_to_drag() {
+        let all = Prefs {
+            enabled: true,
+            title: true,
+            navigation: true,
+            path_box: true,
+            filter_box: true,
+            pane_toggles: true,
+        };
+        let nav = 3.0 * NAV_BUTTON + GAP;
+        // Plenty of room: everything at its widest.
+        assert_eq!(
+            fit(&all, 2000.0),
+            Fit {
+                navigation: true,
+                path: Some(PATH_WIDTH.1),
+                filter: Some(FILTER_WIDTH.1),
+            }
+        );
+        // Room for navigation and the path at its least only.
+        let room = MIN_DRAG + nav + PATH_WIDTH.0 + GAP + 10.0;
+        assert_eq!(
+            fit(&all, room),
+            Fit {
+                navigation: true,
+                path: Some(PATH_WIDTH.0 + 10.0),
+                filter: None,
+            }
+        );
+        // Nothing fits but the room to drag.
+        assert_eq!(
+            fit(&all, MIN_DRAG + 10.0),
+            Fit {
+                navigation: false,
+                path: None,
+                filter: None,
+            }
+        );
+        // Turned off stays off.
+        let defaults = Prefs::default();
+        assert_eq!(
+            fit(&defaults, 2000.0),
+            Fit {
+                navigation: true,
+                path: None,
+                filter: None,
+            }
+        );
     }
 
     #[test]

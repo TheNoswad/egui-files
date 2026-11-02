@@ -490,6 +490,8 @@ pub struct FilesApp {
     /// Whether the main window has the system's frame now; it opens as the
     /// setting was saved.
     decorated: bool,
+    /// The main window's title as last set: the focused tab's.
+    window_title: String,
     /// The tab window with the keyboard focus, if not the main window.
     focused_window: Option<u64>,
     /// Tabs just dropped outside their window, which may be over another.
@@ -660,6 +662,7 @@ impl FilesApp {
             windows,
             next_window_id,
             decorated: !titlebar.enabled,
+            window_title: "egui-files".to_owned(),
             titlebar,
             focused_window: None,
             pending_drop: None,
@@ -1989,11 +1992,14 @@ impl FilesApp {
             }
             let custom = self.titlebar.enabled;
             let builder = window.builder().with_decorations(!custom);
-            let title = window.title();
+            let prefs = self.titlebar.clone();
             ctx.show_viewport_immediate(viewport, builder, |ui, _class| {
                 if custom {
                     let id = format!("window-{}", window.id);
-                    crate::titlebar::show(ui, &id, &title, |_| {});
+                    let (focus, browser) = crate::titlebar::focus(&mut window.dock, None);
+                    // Panes live in the main window.
+                    let requests = crate::titlebar::show(ui, &id, &prefs, &focus, &[], |_| {});
+                    crate::titlebar::apply(&mut window.dock, browser, requests);
                     crate::titlebar::resize_edges(ui.ctx());
                 }
                 let (inner, outer, is_focused, close) = ui.input(|i| {
@@ -2478,8 +2484,28 @@ impl eframe::App for FilesApp {
                 egui::ViewportCommand::Decorations(!custom),
             );
         }
+        let (focus, browser) = crate::titlebar::focus(&mut self.dock, self.active_browser);
+        let title = if focus.title.is_empty() {
+            "egui-files".to_owned()
+        } else {
+            focus.title.clone()
+        };
+        if self.window_title != title {
+            ctx.send_viewport_cmd_to(
+                egui::ViewportId::ROOT,
+                egui::ViewportCommand::Title(title.clone()),
+            );
+            self.window_title = title;
+        }
         if custom {
-            crate::titlebar::show(ui, "main", "egui-files", |ui| self.menu_bar(ui));
+            let panes: Vec<(Pane, bool)> =
+                Pane::ALL.iter().map(|&p| (p, self.has_pane(p))).collect();
+            let prefs = self.titlebar.clone();
+            let requests =
+                crate::titlebar::show(ui, "main", &prefs, &focus, &panes, |ui| self.menu_bar(ui));
+            for pane in crate::titlebar::apply(&mut self.dock, browser, requests) {
+                self.toggle_pane(&ctx, pane);
+            }
             crate::titlebar::resize_edges(&ctx);
         } else {
             Panel::top("menu_bar").show(ui, |ui| self.menu_bar(ui));

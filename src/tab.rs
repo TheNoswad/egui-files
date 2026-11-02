@@ -192,6 +192,9 @@ pub struct BrowserTab {
 
     #[serde(skip)]
     pub filter: String,
+    /// Asked of the tab from outside it (the title bar), for its next frame.
+    #[serde(skip)]
+    pub queued: Vec<Action>,
     #[serde(skip)]
     entries: Option<Vec<Entry>>,
     /// The listing is out of date and should be re-read, keeping the cursor.
@@ -248,6 +251,7 @@ impl BrowserTab {
             back: Vec::new(),
             forward: Vec::new(),
             filter: String::new(),
+            queued: Vec::new(),
             entries: None,
             stale: false,
             error: None,
@@ -408,6 +412,14 @@ impl BrowserTab {
         });
     }
 
+    pub fn can_go_back(&self) -> bool {
+        !self.back.is_empty()
+    }
+
+    pub fn can_go_forward(&self) -> bool {
+        !self.forward.is_empty()
+    }
+
     pub fn navigate(&mut self, path: PathBuf) {
         if path == self.path {
             return;
@@ -501,7 +513,7 @@ impl BrowserTab {
             self.select_path(&path, shared.show_hidden);
         }
 
-        let mut actions = Vec::new();
+        let mut actions = std::mem::take(&mut self.queued);
         if shared.focused_tab == Some(self.id) {
             self.keyboard(ui.ctx(), &mut actions);
         }
