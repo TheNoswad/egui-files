@@ -11,6 +11,7 @@
 - [ ] Upstream: egui-winit makes a smithay clipboard per viewport and drops it with the viewport, which kills the Wayland connection ("not a valid new object id … data_offer"); we patch it to share one (patches/README.md has a repro). Report it or send the PR, then drop the patch.
 - [ ] Tab windows: check they keep updating while the main window is hidden (another workspace, minimized). Their UI runs in the main window's frame, and on Wayland winit may hold that frame until the compositor sends the main window a frame callback
 - [ ] Tab windows: try dropping a tab outside the window, and into another of the app's windows, by hand on Wayland, X11 and Windows (only unit-tested so far; the drop is told from the pointer, which egui may lose as it leaves)
+- [ ] Pane sizes go wrong after dragging tabs between windows (a friend on X11 ended up with Places/Folder tree taking ~85% of the main window; fine on first launch). Seen in small here: dragging the only tab out of the main window widened the side panes from 220 to 275 px. Suspect `fit_panes` / `refit_on_change` keeping a "drawn" width from a frame where the dock's shape was in flux
 - [ ] sftp etc
 - [ ] google drive
 - [ ] proton drive

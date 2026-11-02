@@ -2722,6 +2722,11 @@ impl eframe::App for FilesApp {
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         if let Some(theme) = self.system_theme.get() {
             raw_input.system_theme = Some(theme);
+            // Tab windows get their input from winit without this hook, and
+            // winit reports no theme on Linux, so egui falls back to this.
+            if ctx.options(|o| o.fallback_theme) != theme {
+                ctx.options_mut(|o| o.fallback_theme = theme);
+            }
         }
         #[cfg(windows)]
         {
