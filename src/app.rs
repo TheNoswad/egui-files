@@ -108,6 +108,8 @@ struct Persisted {
     /// Shortcuts changed from the defaults.
     #[serde(default)]
     keymap: crate::keymap::Keymap,
+    #[serde(default)]
+    titlebar: crate::titlebar::Prefs,
 }
 
 fn default_true() -> bool {
@@ -147,6 +149,7 @@ struct PersistedRef<'a> {
     default_view: ViewMode,
     windows: &'a [TabWindow],
     keymap: &'a crate::keymap::Keymap,
+    titlebar: &'a crate::titlebar::Prefs,
 }
 
 /// The panes a fresh layout starts with.
@@ -483,6 +486,10 @@ pub struct FilesApp {
     /// Tabs in windows of their own.
     windows: Vec<TabWindow>,
     next_window_id: u64,
+    titlebar: crate::titlebar::Prefs,
+    /// Whether the main window has the system's frame now; it opens as the
+    /// setting was saved.
+    decorated: bool,
     /// The tab window with the keyboard focus, if not the main window.
     focused_window: Option<u64>,
     /// Tabs just dropped outside their window, which may be over another.
@@ -530,6 +537,7 @@ impl FilesApp {
                 default_view: ViewMode::default(),
                 windows: Vec::new(),
                 keymap: Default::default(),
+                titlebar: Default::default(),
             });
         let Persisted {
             dock,
@@ -557,6 +565,7 @@ impl FilesApp {
             default_view,
             windows,
             keymap,
+            titlebar,
         } = persisted;
         crate::keymap::set(&cc.egui_ctx, keymap);
         editor::highlight::preload();
@@ -650,6 +659,8 @@ impl FilesApp {
             themes: Themes::new(&cc.egui_ctx, theme),
             windows,
             next_window_id,
+            decorated: !titlebar.enabled,
+            titlebar,
             focused_window: None,
             pending_drop: None,
             ctx: cc.egui_ctx.clone(),
@@ -1694,6 +1705,7 @@ struct Viewer<'a> {
     tabs: usize,
     themes: &'a mut Themes,
     new_tabs: &'a mut NewTabs,
+    titlebar: &'a mut crate::titlebar::Prefs,
 }
 
 impl Viewer<'_> {
@@ -1758,6 +1770,7 @@ impl TabViewer for Viewer<'_> {
                     terminal: self.panes.terminal,
                     themes: self.themes,
                     new_tabs: self.new_tabs,
+                    titlebar: self.titlebar,
                 },
             ),
             _ => tab.ui(ui, self.shared),
@@ -1974,8 +1987,15 @@ impl FilesApp {
             if std::mem::take(&mut window.raise) {
                 ctx.send_viewport_cmd_to(viewport, egui::ViewportCommand::Focus);
             }
-            let builder = window.builder();
+            let custom = self.titlebar.enabled;
+            let builder = window.builder().with_decorations(!custom);
+            let title = window.title();
             ctx.show_viewport_immediate(viewport, builder, |ui, _class| {
+                if custom {
+                    let id = format!("window-{}", window.id);
+                    crate::titlebar::show(ui, &id, &title, |_| {});
+                    crate::titlebar::resize_edges(ui.ctx());
+                }
                 let (inner, outer, is_focused, close) = ui.input(|i| {
                     let v = i.viewport();
                     (v.inner_rect, v.outer_rect, v.focused, v.close_requested())
@@ -2017,6 +2037,7 @@ impl FilesApp {
                     tabs: window.dock.iter_all_tabs().count(),
                     themes: &mut self.themes,
                     new_tabs: &mut self.new_tabs,
+                    titlebar: &mut self.titlebar,
                 };
                 let before =
                     tab_windows::Before::of(ui.ctx(), &window.dock, Id::new(("dock", window.id)));
@@ -2449,7 +2470,20 @@ impl eframe::App for FilesApp {
         self.shared.preview_shown = self.has_pane(Pane::Preview);
         self.place_dropped(&ctx);
 
-        Panel::top("menu_bar").show(ui, |ui| self.menu_bar(ui));
+        let custom = self.titlebar.enabled;
+        if self.decorated == custom {
+            self.decorated = !custom;
+            ctx.send_viewport_cmd_to(
+                egui::ViewportId::ROOT,
+                egui::ViewportCommand::Decorations(!custom),
+            );
+        }
+        if custom {
+            crate::titlebar::show(ui, "main", "egui-files", |ui| self.menu_bar(ui));
+            crate::titlebar::resize_edges(&ctx);
+        } else {
+            Panel::top("menu_bar").show(ui, |ui| self.menu_bar(ui));
+        }
         self.about.ui(&ctx);
         if self.themes.editor.open {
             self.themes.editor_ui(&ctx);
@@ -2487,6 +2521,7 @@ impl eframe::App for FilesApp {
             tabs: self.dock.iter_all_tabs().count(),
             themes: &mut self.themes,
             new_tabs: &mut self.new_tabs,
+            titlebar: &mut self.titlebar,
         };
         let mut before = None;
         CentralPanel::default()
@@ -2694,6 +2729,7 @@ impl eframe::App for FilesApp {
             default_view: self.new_tabs.view,
             windows: &self.windows,
             keymap: &keymap,
+            titlebar: &self.titlebar,
         };
         eframe::set_value(storage, eframe::APP_KEY, &state);
     }

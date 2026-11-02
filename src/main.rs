@@ -30,6 +30,7 @@ mod terminal;
 mod terminal_panel;
 mod theme;
 mod thumbnails;
+mod titlebar;
 mod trash;
 mod tree;
 mod usage;
@@ -56,7 +57,8 @@ fn main() -> eframe::Result {
             .with_title("egui-files")
             .with_app_id("egui-files")
             .with_inner_size([1100.0, 700.0])
-            .with_min_inner_size([480.0, 320.0]),
+            .with_min_inner_size([480.0, 320.0])
+            .with_decorations(!titlebar::saved_enabled("egui-files")),
         wgpu_options: wgpu_options(),
         ..Default::default()
     };

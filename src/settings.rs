@@ -95,6 +95,7 @@ pub struct Access<'a> {
     pub terminal: &'a mut TerminalPanel,
     pub themes: &'a mut Themes,
     pub new_tabs: &'a mut NewTabs,
+    pub titlebar: &'a mut crate::titlebar::Prefs,
 }
 
 pub fn ui(ui: &mut Ui, tab: &mut SettingsTab, app: &mut Access) {
@@ -232,6 +233,13 @@ fn appearance(ui: &mut Ui, app: &mut Access) {
             app.themes.open_editor(ui.ctx());
         }
     });
+
+    group(ui, "Window");
+    ui.checkbox(&mut app.titlebar.enabled, "Draw the title bar in the app")
+        .on_hover_text(
+            "The menus share a row with the window buttons; \
+             off uses the system's title bar",
+        );
 
     group(ui, "Editor");
     ui.menu_button(format!("{} Syntax colors", icon::PALETTE), |ui| {
