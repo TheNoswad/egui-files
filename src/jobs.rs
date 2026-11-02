@@ -134,6 +134,49 @@ pub enum ConflictChoice {
     KeepBoth,
 }
 
+/// Remembers "do this for all conflicts", for folders and files apart.
+#[derive(Default)]
+pub(crate) struct Resolver {
+    files: Option<ConflictChoice>,
+    folders: Option<ConflictChoice>,
+}
+
+impl Resolver {
+    /// What to do with `incoming` where `existing` is; `None` if the user
+    /// cancelled.
+    pub(crate) fn choose(
+        &mut self,
+        incoming: &Path,
+        existing: &Path,
+        p: &Progress,
+    ) -> Option<ConflictChoice> {
+        let always = if is_dir(incoming) && is_dir(existing) {
+            &mut self.folders
+        } else {
+            &mut self.files
+        };
+        if let Some(choice) = *always {
+            return Some(choice);
+        }
+        let Answer::Conflict { choice, all } = p.ask(Prompt::Conflict {
+            incoming: incoming.to_path_buf(),
+            existing: existing.to_path_buf(),
+        })?
+        else {
+            return None;
+        };
+        if all {
+            *always = Some(choice);
+        }
+        Some(choice)
+    }
+}
+
+/// A folder, not following symlinks.
+fn is_dir(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|m| m.is_dir())
+}
+
 /// What to do with a job's result once it finishes.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Outcome {
@@ -527,7 +570,9 @@ impl Jobs {
                     });
                 }
                 Prompt::Conflict { incoming, existing } => {
-                    ui.heading(format!("{} File already exists", icon::WARNING));
+                    let folders = is_dir(incoming) && is_dir(existing);
+                    let what = if folders { "Folder" } else { "File" };
+                    ui.heading(format!("{} {what} already exists", icon::WARNING));
                     ui.label(format!(
                         "“{}” already exists in “{}”.",
                         display_name(existing),
@@ -556,15 +601,25 @@ impl Jobs {
                             ui.end_row();
                         });
                     ui.add_space(4.0);
-                    ui.checkbox(&mut state.apply_to_all, "Do this for all conflicts");
+                    let all = if folders {
+                        "Do this for all folders"
+                    } else {
+                        "Do this for all files"
+                    };
+                    ui.checkbox(&mut state.apply_to_all, all);
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        for (choice, label) in [
-                            (ConflictChoice::Overwrite, "Overwrite"),
-                            (ConflictChoice::Skip, "Skip"),
-                            (ConflictChoice::KeepBoth, "Keep both"),
+                        let (overwrite, overwrite_hint) = if folders {
+                            ("Merge", "Put its contents in the existing folder, asking about files in both")
+                        } else {
+                            ("Overwrite", "Replace the existing one")
+                        };
+                        for (choice, label, hint) in [
+                            (ConflictChoice::Overwrite, overwrite, overwrite_hint),
+                            (ConflictChoice::Skip, "Skip", "Leave the existing one as it is"),
+                            (ConflictChoice::KeepBoth, "Keep both", "Give the new one another name"),
                         ] {
-                            if ui.button(label).clicked() {
+                            if ui.button(label).on_hover_text(hint).clicked() {
                                 answer = Some(Answer::Conflict {
                                     choice,
                                     all: state.apply_to_all,
@@ -607,12 +662,18 @@ fn run(kind: JobKind, p: &Progress) {
             for src in &sources {
                 scan(src, p);
             }
-            let mut buffer = vec![0; BUFFER_SIZE];
+            let mut paste = Paste::new(Transfer::Copy, p);
             for src in &sources {
                 let Some(name) = src.file_name() else {
                     continue;
                 };
-                copy_tree(src, &unique_path(&dest, name), p, &mut buffer);
+                let target = dest.join(name);
+                if target == *src {
+                    // Pasted where it came from: a copy beside it.
+                    copy_tree(src, &unique_path(&dest, name), p, &mut paste.buffer);
+                } else if !paste.place(src, &target) {
+                    return;
+                }
             }
         }
         JobKind::Move { sources, dest } => {
@@ -621,46 +682,20 @@ fn run(kind: JobKind, p: &Progress) {
             }
             p.total_items.store(sources.len() as u64, Relaxed);
             // Renames are instant; only cross-device moves need copy + delete.
-            let mut fallback = Vec::new();
+            let mut paste = Paste::new(Transfer::Move, p);
             for src in &sources {
-                if p.cancelled() {
-                    return;
-                }
                 let Some(name) = src.file_name() else {
                     continue;
                 };
-                if src.parent() == Some(dest.as_path()) {
-                    p.done_items.fetch_add(1, Relaxed);
-                    continue;
-                }
-                let target = unique_path(&dest, name);
-                p.set_current(src);
-                match fs::rename(src, &target) {
-                    Ok(()) => {
-                        p.done_items.fetch_add(1, Relaxed);
+                if src.parent() != Some(dest.as_path()) {
+                    p.set_current(src);
+                    if !paste.place(src, &dest.join(name)) {
+                        return;
                     }
-                    Err(err) if err.kind() == io::ErrorKind::CrossesDevices => {
-                        fallback.push((src.clone(), target));
-                    }
-                    Err(err) => p.error(src, err),
                 }
+                p.done_items.fetch_add(1, Relaxed);
             }
-            if fallback.is_empty() {
-                return;
-            }
-            // Re-count progress in terms of the files that need copying.
-            p.total_items.fetch_sub(fallback.len() as u64, Relaxed);
-            for (src, _) in &fallback {
-                scan(src, p);
-            }
-            let mut buffer = vec![0; BUFFER_SIZE];
-            for (src, target) in fallback {
-                if copy_tree(&src, &target, p, &mut buffer)
-                    && let Err(err) = remove_all(&src)
-                {
-                    p.error(&src, err);
-                }
-            }
+            paste.finish_moves();
         }
         JobKind::Restore { items } => {
             p.total_items.store(items.len() as u64, Relaxed);
@@ -717,6 +752,166 @@ fn run(kind: JobKind, p: &Progress) {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Transfer {
+    Copy,
+    Move,
+}
+
+/// Puts pasted (or dropped) items in place, asking about names already
+/// taken.
+struct Paste<'a> {
+    how: Transfer,
+    p: &'a Progress,
+    resolver: Resolver,
+    buffer: Vec<u8>,
+    /// Moves across drives, done by copying once every rename is: from, to,
+    /// and what it replaces once there.
+    later: Vec<(PathBuf, PathBuf, Option<PathBuf>)>,
+    /// Folders moved out of by merging, removed at the end if empty.
+    emptied: Vec<PathBuf>,
+}
+
+impl<'a> Paste<'a> {
+    fn new(how: Transfer, p: &'a Progress) -> Self {
+        Self {
+            how,
+            p,
+            resolver: Resolver::default(),
+            buffer: vec![0; BUFFER_SIZE],
+            later: Vec::new(),
+            emptied: Vec::new(),
+        }
+    }
+
+    /// Puts `src` at `dst`, asking first if something is there. False once
+    /// the job is cancelled.
+    fn place(&mut self, src: &Path, dst: &Path) -> bool {
+        if self.p.cancelled() {
+            return false;
+        }
+        if fs::symlink_metadata(dst).is_err() {
+            self.put(src, dst, None);
+            return true;
+        }
+        let (Some(dir), Some(name)) = (dst.parent(), dst.file_name()) else {
+            return true;
+        };
+        let Some(choice) = self.resolver.choose(src, dst, self.p) else {
+            return false;
+        };
+        match choice {
+            ConflictChoice::Skip => self.skip(src),
+            ConflictChoice::KeepBoth => self.put(src, &unique_path(dir, name), None),
+            ConflictChoice::Overwrite if src.starts_with(dst) => {
+                self.p.error(src, "it's inside the folder it would go over");
+                self.skip(src);
+            }
+            ConflictChoice::Overwrite if is_dir(src) && is_dir(dst) => return self.merge(src, dst),
+            // Beside it first, so a failed copy leaves the old one alone.
+            ConflictChoice::Overwrite => self.put(src, &unique_path(dir, name), Some(dst)),
+        }
+        true
+    }
+
+    /// Places what's in folder `src` into folder `dst`.
+    fn merge(&mut self, src: &Path, dst: &Path) -> bool {
+        let entries = match fs::read_dir(src) {
+            Ok(entries) => entries,
+            Err(err) => {
+                self.p.error(src, err);
+                return true;
+            }
+        };
+        for entry in entries.flatten() {
+            if !self.place(&entry.path(), &dst.join(entry.file_name())) {
+                return false;
+            }
+        }
+        if self.how == Transfer::Move {
+            self.emptied.push(src.to_path_buf());
+        }
+        true
+    }
+
+    /// Copies or moves `src` to the free `dst`, then puts it over `replace`.
+    fn put(&mut self, src: &Path, dst: &Path, replace: Option<&Path>) {
+        match self.how {
+            Transfer::Copy => {
+                if copy_tree(src, dst, self.p, &mut self.buffer)
+                    && let Some(replace) = replace
+                {
+                    self.swap(dst, replace);
+                }
+            }
+            Transfer::Move => match fs::rename(src, dst) {
+                Ok(()) => {
+                    if let Some(replace) = replace {
+                        self.swap(dst, replace);
+                    }
+                }
+                Err(err) if err.kind() == io::ErrorKind::CrossesDevices => {
+                    self.later.push((
+                        src.to_path_buf(),
+                        dst.to_path_buf(),
+                        replace.map(Path::to_path_buf),
+                    ));
+                }
+                Err(err) => self.p.error(src, err),
+            },
+        }
+    }
+
+    /// Replaces `old` with `new`, which is beside it.
+    fn swap(&self, new: &Path, old: &Path) {
+        if let Err(err) = remove_all(old).and_then(|()| fs::rename(new, old)) {
+            self.p.error(
+                old,
+                format!(
+                    "couldn't replace it ({err}); the new one is “{}”",
+                    display_name(new)
+                ),
+            );
+        }
+    }
+
+    /// Counts a skipped copy as done, so the progress still ends full.
+    fn skip(&self, src: &Path) {
+        if self.how == Transfer::Copy {
+            let (bytes, items) = measure(src, self.p);
+            self.p.add_done(bytes, items);
+        }
+    }
+
+    /// Copies (then deletes) what couldn't be renamed across drives, and
+    /// removes the folders merging emptied.
+    fn finish_moves(mut self) {
+        let later = std::mem::take(&mut self.later);
+        if !later.is_empty() {
+            // Re-count progress in terms of the files that need copying.
+            self.p.reset();
+            for (src, _, _) in &later {
+                scan(src, self.p);
+            }
+            for (src, dst, replace) in later {
+                if !copy_tree(&src, &dst, self.p, &mut self.buffer) {
+                    continue;
+                }
+                if let Err(err) = remove_all(&src) {
+                    self.p.error(&src, err);
+                }
+                if let Some(replace) = replace {
+                    self.swap(&dst, &replace);
+                }
+            }
+        }
+        // Innermost first; ones still holding skipped items stay.
+        for dir in self.emptied.iter().rev() {
+            let _ = fs::remove_dir(dir);
+        }
+    }
+}
+
 fn restore_error(err: trash::Error) -> String {
     match err {
         trash::Error::RestoreCollision { .. } => {
@@ -738,21 +933,27 @@ fn check_not_into_itself(sources: &[PathBuf], dest: &Path) -> Result<(), String>
 
 /// Adds the files and bytes under `path` to the totals.
 pub(crate) fn scan(path: &Path, p: &Progress) {
+    let (bytes, items) = measure(path, p);
+    p.add_totals(bytes, items);
+}
+
+/// The bytes and files under `path`, as progress counts them.
+fn measure(path: &Path, p: &Progress) -> (u64, u64) {
     if p.cancelled() {
-        return;
+        return (0, 0);
     }
     let Ok(meta) = fs::symlink_metadata(path) else {
-        return;
+        return (0, 0);
     };
     if meta.is_dir() {
-        for entry in fs::read_dir(path).into_iter().flatten().flatten() {
-            scan(&entry.path(), p);
-        }
+        fs::read_dir(path)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| measure(&entry.path(), p))
+            .fold((0, 0), |(b, i), (eb, ei)| (b + eb, i + ei))
     } else {
-        p.total_items.fetch_add(1, Relaxed);
-        if meta.is_file() {
-            p.total_bytes.fetch_add(meta.len(), Relaxed);
-        }
+        (if meta.is_file() { meta.len() } else { 0 }, 1)
     }
 }
 
@@ -876,21 +1077,62 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn copy_and_move_trees_with_conflicts() {
-        let root = std::env::temp_dir().join(format!("egui-files-jobs-{}", std::process::id()));
+    /// Runs `kind`, answering each of its questions with `answer`; the
+    /// existing names it was asked about, and the errors.
+    fn run_answering(
+        kind: JobKind,
+        answer: impl Fn(&Path) -> ConflictChoice,
+        all: bool,
+    ) -> (Vec<String>, Vec<String>) {
+        let p = Arc::new(Progress::default());
+        let worker = {
+            let p = p.clone();
+            std::thread::spawn(move || run(kind, &p))
+        };
+        let mut asked = Vec::new();
+        while !worker.is_finished() {
+            if let Some(Prompt::Conflict { existing, .. }) = &*p.prompt.lock().unwrap() {
+                asked.push(display_name(existing));
+                *p.answer.lock().unwrap() = Some(Answer::Conflict {
+                    choice: answer(existing),
+                    all,
+                });
+            } else {
+                std::thread::sleep(Duration::from_millis(2));
+                continue;
+            }
+            *p.prompt.lock().unwrap() = None;
+            p.answered.notify_all();
+        }
+        worker.join().unwrap();
+        let errors = p.errors();
+        (asked, errors)
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("egui-files-jobs-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn read(path: PathBuf) -> String {
+        fs::read_to_string(path).unwrap()
+    }
+
+    #[test]
+    fn copy_and_move_trees() {
+        let root = scratch("trees");
         let (src, dest) = (root.join("src"), root.join("dest"));
         fs::create_dir_all(src.join("tree/sub")).unwrap();
         fs::create_dir_all(&dest).unwrap();
         fs::write(src.join("tree/a.txt"), "a").unwrap();
         fs::write(src.join("tree/sub/b.bin"), vec![7u8; 3 * BUFFER_SIZE + 5]).unwrap();
-        fs::write(src.join("single.txt"), "single").unwrap();
-        fs::write(dest.join("single.txt"), "existing").unwrap();
 
         let mut jobs = Jobs::new(&egui::Context::default());
         jobs.start(JobKind::Copy {
-            sources: vec![src.join("tree"), src.join("single.txt")],
+            sources: vec![src.join("tree")],
             dest: dest.clone(),
         });
         wait(&mut jobs);
@@ -899,24 +1141,16 @@ mod tests {
             fs::read(dest.join("tree/sub/b.bin")).unwrap().len(),
             3 * BUFFER_SIZE + 5
         );
-        assert_eq!(
-            fs::read_to_string(dest.join("single (1).txt")).unwrap(),
-            "single"
-        );
-        assert_eq!(
-            fs::read_to_string(dest.join("single.txt")).unwrap(),
-            "existing"
-        );
         let p = &jobs.jobs[0].progress;
         assert_eq!(p.done_items.load(Relaxed), p.total_items.load(Relaxed));
         assert_eq!(p.fraction(), 1.0);
 
-        jobs.start(JobKind::Move {
-            sources: vec![src.join("tree")],
+        // Pasting where it came from makes a copy beside it, unasked.
+        jobs.start(JobKind::Copy {
+            sources: vec![dest.join("tree")],
             dest: dest.clone(),
         });
         wait(&mut jobs);
-        assert!(!src.join("tree").exists());
         assert!(dest.join("tree (1)/a.txt").exists());
 
         jobs.start(JobKind::Copy {
@@ -925,6 +1159,125 @@ mod tests {
         });
         wait(&mut jobs);
         assert!(errors(&jobs).iter().any(|e| e.contains("into itself")));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn paste_asks_about_names_taken() {
+        let root = scratch("conflicts");
+        let (src, dest) = (root.join("src"), root.join("dest"));
+        for dir in [&src, &dest] {
+            fs::create_dir_all(dir.join("tree")).unwrap();
+            fs::write(dir.join("single.txt"), format!("{}", dir.display())).unwrap();
+            fs::write(dir.join("tree/both.txt"), format!("{}", dir.display())).unwrap();
+        }
+        fs::write(src.join("tree/new.txt"), "new").unwrap();
+        fs::write(dest.join("tree/mine.txt"), "mine").unwrap();
+        let src_text = src.display().to_string();
+        let dest_text = dest.display().to_string();
+        let copy = || JobKind::Copy {
+            sources: vec![src.join("single.txt"), src.join("tree")],
+            dest: dest.clone(),
+        };
+
+        // Skip touches nothing.
+        let (asked, errors) = run_answering(copy(), |_| ConflictChoice::Skip, false);
+        assert_eq!(asked, ["single.txt", "tree"]);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(read(dest.join("single.txt")), dest_text);
+        assert!(!dest.join("tree/new.txt").exists());
+
+        // Keep both.
+        let (_, errors) = run_answering(copy(), |_| ConflictChoice::KeepBoth, false);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(read(dest.join("single (1).txt")), src_text);
+        assert_eq!(read(dest.join("tree (1)/both.txt")), src_text);
+        fs::remove_dir_all(dest.join("tree (1)")).unwrap();
+        fs::remove_file(dest.join("single (1).txt")).unwrap();
+
+        // Overwrite the file and merge the folder, asking about the file in
+        // both, which is kept.
+        let (asked, errors) = run_answering(
+            copy(),
+            |existing| {
+                if existing.ends_with("tree/both.txt") {
+                    ConflictChoice::Skip
+                } else {
+                    ConflictChoice::Overwrite
+                }
+            },
+            false,
+        );
+        assert_eq!(asked, ["single.txt", "tree", "both.txt"]);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(read(dest.join("single.txt")), src_text);
+        assert_eq!(read(dest.join("tree/both.txt")), dest_text);
+        assert_eq!(read(dest.join("tree/new.txt")), "new");
+        assert_eq!(read(dest.join("tree/mine.txt")), "mine");
+        assert!(
+            !dest.join("single (1).txt").exists(),
+            "no copy left beside it"
+        );
+
+        // Moving, merged and overwritten for all: the sources go.
+        fs::write(dest.join("tree/both.txt"), "old").unwrap();
+        let (asked, errors) = run_answering(
+            JobKind::Move {
+                sources: vec![src.join("single.txt"), src.join("tree")],
+                dest: dest.clone(),
+            },
+            |_| ConflictChoice::Overwrite,
+            true,
+        );
+        assert_eq!(
+            asked,
+            ["single.txt", "tree"],
+            "files asked once, folders once"
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(read(dest.join("tree/both.txt")), src_text);
+        assert_eq!(read(dest.join("tree/mine.txt")), "mine");
+        assert!(!src.join("tree").exists());
+        assert!(!src.join("single.txt").exists());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn overwriting_a_folder_with_something_inside_it_fails() {
+        let root = scratch("inside");
+        fs::create_dir_all(root.join("x/x")).unwrap();
+        fs::write(root.join("x/x/keep.txt"), "keep").unwrap();
+        let (_, errors) = run_answering(
+            JobKind::Move {
+                sources: vec![root.join("x/x")],
+                dest: root.clone(),
+            },
+            |_| ConflictChoice::Overwrite,
+            false,
+        );
+        assert!(
+            errors.iter().any(|e| e.contains("inside the folder")),
+            "{errors:?}"
+        );
+        assert_eq!(read(root.join("x/x/keep.txt")), "keep");
+
+        fs::create_dir_all(root.join("y")).unwrap();
+        fs::write(root.join("y/y"), "file").unwrap();
+        let (_, errors) = run_answering(
+            JobKind::Copy {
+                sources: vec![root.join("y/y")],
+                dest: root.clone(),
+            },
+            |_| ConflictChoice::Overwrite,
+            false,
+        );
+        assert!(
+            errors.iter().any(|e| e.contains("inside the folder")),
+            "{errors:?}"
+        );
+        assert_eq!(read(root.join("y/y")), "file");
 
         fs::remove_dir_all(root).unwrap();
     }

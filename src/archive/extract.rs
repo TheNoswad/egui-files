@@ -11,7 +11,7 @@ use std::{
 use super::{Error, ExtractJob, ExtractMode, open_dir, read, stem};
 use crate::{
     fs::unique_path,
-    jobs::{self, Answer, ConflictChoice, Outcome, Progress, Prompt},
+    jobs::{self, Answer, ConflictChoice, Outcome, Progress, Prompt, Resolver},
 };
 
 /// Files opened from archives are kept this long, in case the app that opened them
@@ -155,32 +155,6 @@ fn move_staging(staging: &Path, folder: &Path, p: &Progress) -> Option<PathBuf> 
             p.error(folder, err);
             None
         }
-    }
-}
-
-/// Remembers "do this for all conflicts".
-#[derive(Default)]
-struct Resolver {
-    always: Option<ConflictChoice>,
-}
-
-impl Resolver {
-    /// `None` if the user cancelled.
-    fn choose(&mut self, incoming: &Path, existing: &Path, p: &Progress) -> Option<ConflictChoice> {
-        if let Some(choice) = self.always {
-            return Some(choice);
-        }
-        let Answer::Conflict { choice, all } = p.ask(Prompt::Conflict {
-            incoming: incoming.to_path_buf(),
-            existing: existing.to_path_buf(),
-        })?
-        else {
-            return None;
-        };
-        if all {
-            self.always = Some(choice);
-        }
-        Some(choice)
     }
 }
 

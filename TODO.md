@@ -5,7 +5,6 @@
 - [ ] Settings screen / config: columns, keybindings, sidebar sections, default view
 - [ ] Video backend for Windows/macOS (WGL / ANGLE); Linux-only for now
 - [ ] Zero-copy dmabuf → wgpu import for video, if readback ever matters
-- [ ] Conflict dialog (overwrite / skip) for paste
 - [ ] Drag-out on X11 (Wayland and Windows done)
 - [ ] Disk usage: keep scans after their tab closes?
 - [ ] Folder sizes: skip (or ask before) measuring network and FUSE mounts
