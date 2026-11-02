@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     fs::{Sort, SortKey},
     properties::OpenIn,
-    sidebar::Sidebar,
+    sidebar::{Layout, Section, Sidebar},
     tab::Shared,
     terminal_panel::TerminalPanel,
     theme::Themes,
@@ -17,7 +17,7 @@ use crate::{
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Section {
+pub enum Page {
     #[default]
     General,
     Appearance,
@@ -25,7 +25,7 @@ pub enum Section {
     Files,
 }
 
-impl Section {
+impl Page {
     pub const ALL: [Self; 4] = [Self::General, Self::Appearance, Self::Places, Self::Files];
 
     fn label(self) -> &'static str {
@@ -51,14 +51,14 @@ impl Section {
 pub struct SettingsTab {
     pub id: u64,
     /// The section shown; also marks saved state as a settings tab.
-    pub settings: Section,
+    pub settings: Page,
 }
 
 impl SettingsTab {
     pub fn new(id: u64) -> Self {
         Self {
             id,
-            settings: Section::default(),
+            settings: Page::default(),
         }
     }
 
@@ -86,8 +86,8 @@ pub struct Access<'a> {
 pub fn ui(ui: &mut Ui, tab: &mut SettingsTab, app: &mut Access) {
     // Side by side when there's room, the sections above otherwise.
     let wide = ui.available_width() > 520.0;
-    let nav = |ui: &mut Ui, section: &mut Section| {
-        for s in Section::ALL {
+    let nav = |ui: &mut Ui, section: &mut Page| {
+        for s in Page::ALL {
             let text = format!("{}  {}", s.icon(), s.label());
             if ui.add(Button::selectable(*section == s, text)).clicked() {
                 *section = s;
@@ -116,10 +116,10 @@ pub fn ui(ui: &mut Ui, tab: &mut SettingsTab, app: &mut Access) {
             ui.heading(tab.settings.label());
             ui.add_space(4.0);
             match tab.settings {
-                Section::General => general(ui, app),
-                Section::Appearance => appearance(ui, app),
-                Section::Places => places(ui, app),
-                Section::Files => files(ui, app),
+                Page::General => general(ui, app),
+                Page::Appearance => appearance(ui, app),
+                Page::Places => places(ui, app),
+                Page::Files => files(ui, app),
             }
             ui.add_space(12.0);
         });
@@ -223,9 +223,103 @@ fn appearance(ui: &mut Ui, app: &mut Access) {
 }
 
 fn places(ui: &mut Ui, app: &mut Access) {
+    let sidebar = &mut *app.sidebar;
+    group(ui, "Sections");
+    ui.weak("Drag to reorder; untick to hide.");
+    let layout = &mut sidebar.layout;
+    let standard = &sidebar.places;
+    let mut places_shown: Vec<(String, bool)> = standard
+        .iter()
+        .map(|p| (p.label.clone(), layout.place_shown(&p.label)))
+        .collect();
+    let mut sections = layout.sections.clone();
+    reorderable(ui, "settings-places", &mut sections, |ui, (section, on)| {
+        ui.vertical(|ui| {
+            ui.checkbox(on, section.label());
+            if *section == Section::Places {
+                ui.indent("places", |ui| {
+                    ui.add_enabled_ui(*on, |ui| {
+                        for (label, shown) in &mut places_shown {
+                            ui.checkbox(shown, label.as_str());
+                        }
+                    });
+                });
+            }
+        });
+    });
+    layout.sections = sections;
+    for (label, shown) in places_shown {
+        layout.set_place_shown(&label, shown);
+    }
+
     group(ui, "Drives");
-    ui.checkbox(&mut app.sidebar.hide_empty_drives, "Hide empty drives")
+    ui.checkbox(&mut sidebar.hide_empty_drives, "Hide empty drives")
         .on_hover_text("Card readers without a card and drives with no disc");
+    ui.checkbox(
+        &mut sidebar.layout.space_bars,
+        "Show how full each drive is",
+    );
+    if ui.button("Reset places pane").clicked() {
+        sidebar.layout = Layout::default();
+    }
+}
+
+/// Rows dragged by their handle into a different order.
+fn reorderable<T>(
+    ui: &mut Ui,
+    salt: &str,
+    items: &mut Vec<T>,
+    mut row: impl FnMut(&mut Ui, &mut T),
+) {
+    let list = egui::Id::new(salt);
+    let mut moved = None;
+    for (i, item) in items.iter_mut().enumerate() {
+        let response = ui
+            .horizontal(|ui| {
+                ui.dnd_drag_source(list.with(i), DragRow { list, index: i }, |ui| {
+                    ui.label(RichText::new(icon::DOTS_SIX_VERTICAL).weak());
+                })
+                .response
+                .on_hover_cursor(egui::CursorIcon::Grab);
+                row(ui, item);
+            })
+            .response;
+        let ours = |row: Option<std::sync::Arc<DragRow>>| row.filter(|r| r.list == list);
+        if let Some(pointer) = ui.ctx().pointer_interact_pos()
+            && ours(response.dnd_hover_payload()).is_some()
+        {
+            // Dropped onto the top half of a row goes before it, the
+            // bottom half after.
+            let rect = response.rect;
+            let below = pointer.y > rect.center().y;
+            let y = if below { rect.bottom() } else { rect.top() };
+            ui.painter()
+                .hline(rect.x_range(), y, ui.visuals().selection.stroke);
+            if let Some(from) = ours(response.dnd_release_payload()) {
+                moved = Some((from.index, i + usize::from(below)));
+            }
+        }
+    }
+    if let Some((from, to)) = moved {
+        move_item(items, from, to);
+    }
+}
+
+/// What a row of a [`reorderable`] list carries while dragged.
+struct DragRow {
+    list: egui::Id,
+    index: usize,
+}
+
+/// Moves `items[from]` to just before what was `items[to]` (or to the end
+/// for `items.len()`).
+fn move_item<T>(items: &mut Vec<T>, from: usize, to: usize) {
+    if from >= items.len() || to > items.len() {
+        return;
+    }
+    let item = items.remove(from);
+    let to = if to > from { to - 1 } else { to };
+    items.insert(to, item);
 }
 
 fn files(ui: &mut Ui, app: &mut Access) {
@@ -268,4 +362,24 @@ fn files(ui: &mut Ui, app: &mut Access) {
     ui.menu_button(format!("{} Terminal folder", icon::LINK_SIMPLE), |ui| {
         app.terminal.follow_menu(ui);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn moves_items() {
+        let moved = |from, to| {
+            let mut v = vec!['a', 'b', 'c', 'd'];
+            move_item(&mut v, from, to);
+            v.into_iter().collect::<String>()
+        };
+        assert_eq!(moved(0, 2), "bacd");
+        assert_eq!(moved(0, 4), "bcda");
+        assert_eq!(moved(3, 0), "dabc");
+        assert_eq!(moved(2, 2), "abcd");
+        assert_eq!(moved(2, 3), "abcd");
+        assert_eq!(moved(1, 9), "abcd");
+    }
 }

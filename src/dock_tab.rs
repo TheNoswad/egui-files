@@ -280,7 +280,7 @@ mod tests {
         )));
         new.push_to_first_leaf(DockTab::Usage(UsageTab::new(5, PathBuf::from("/tmp"))));
         let mut settings = SettingsTab::new(6);
-        settings.settings = crate::settings::Section::Places;
+        settings.settings = crate::settings::Page::Places;
         new.push_to_first_leaf(DockTab::Settings(settings));
         let saved = ron::ser::to_string(&new).unwrap();
         let loaded: DockState<DockTab> = ron::from_str(&saved).unwrap();
@@ -291,7 +291,7 @@ mod tests {
         );
         assert!(loaded.iter_all_tabs().any(|(_, t)| {
             t.settings()
-                .is_some_and(|s| s.id == 6 && s.settings == crate::settings::Section::Places)
+                .is_some_and(|s| s.id == 6 && s.settings == crate::settings::Page::Places)
         }));
         let kinds: Vec<_> = loaded
             .iter_all_tabs()

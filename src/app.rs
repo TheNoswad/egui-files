@@ -88,6 +88,9 @@ struct Persisted {
     theme: theme::Prefs,
     #[serde(default = "default_true")]
     hide_empty_drives: bool,
+    /// What the places pane shows, and in what order.
+    #[serde(default)]
+    places_layout: crate::sidebar::Layout,
     #[serde(default)]
     properties: properties::Prefs,
     /// Ids of the pinned tabs.
@@ -135,6 +138,7 @@ struct PersistedRef<'a> {
     editor: &'a editor::Prefs,
     theme: &'a theme::Prefs,
     hide_empty_drives: bool,
+    places_layout: &'a crate::sidebar::Layout,
     properties: &'a properties::Prefs,
     pinned: &'a HashSet<u64>,
     folder_sizes: bool,
@@ -517,6 +521,7 @@ impl FilesApp {
                 editor: editor::Prefs::default(),
                 theme: theme::Prefs::default(),
                 hide_empty_drives: true,
+                places_layout: Default::default(),
                 properties: properties::Prefs::default(),
                 pinned: HashSet::new(),
                 folder_sizes: true,
@@ -542,6 +547,7 @@ impl FilesApp {
             editor,
             theme,
             hide_empty_drives,
+            places_layout,
             properties,
             pinned,
             folder_sizes,
@@ -601,7 +607,13 @@ impl FilesApp {
                 },
                 properties: properties::Properties::new(properties),
             },
-            sidebar: Sidebar::new(&cc.egui_ctx, bookmarks, tree, hide_empty_drives),
+            sidebar: Sidebar::new(
+                &cc.egui_ctx,
+                bookmarks,
+                tree,
+                hide_empty_drives,
+                places_layout,
+            ),
             next_tab_id,
             active_browser: None,
             watcher: DirWatcher::new(&cc.egui_ctx),
@@ -2651,6 +2663,7 @@ impl eframe::App for FilesApp {
             show_hidden: self.shared.show_hidden,
             bookmarks: &self.sidebar.bookmarks,
             hide_empty_drives: self.sidebar.hide_empty_drives,
+            places_layout: &self.sidebar.layout,
             panes_docked: true,
             tree: &self.sidebar.tree,
             show_thumbnails: self.shared.show_thumbnails,
