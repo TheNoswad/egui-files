@@ -101,8 +101,8 @@ fn enabled_in(app_ron: &str) -> bool {
         .is_some_and(|saved| saved.titlebar.enabled)
 }
 
-/// How tall the bar is, in points.
-const HEIGHT: f32 = 32.0;
+/// How tall the bar is, in points; tab windows' tab bars too.
+pub const HEIGHT: f32 = 32.0;
 /// How far in from the window's edges a drag resizes it.
 const EDGE: f32 = 5.0;
 /// How far along an edge from a corner a drag resizes from that corner.
@@ -265,6 +265,7 @@ fn bar(
     } else if background.drag_started_by(egui::PointerButton::Primary) {
         ctx.send_viewport_cmd(ViewportCommand::StartDrag);
     }
+    window_menu(&background, maximized);
 
     let layout = prefs.buttons.layout();
     let style = prefs.buttons.style();
@@ -481,6 +482,138 @@ fn path_box_id(bar: &str) -> Id {
     Id::new(("titlebar-path", bar))
 }
 
+/// In a tab window, the dock's tab bar is the title bar: as tall as the
+/// main window's, with the window buttons at its ends (see
+/// [`inline_buttons`]) and the tabs kept clear of them.
+pub fn inline_tab_bar(style: &mut egui_dock::Style, prefs: &Prefs) {
+    let layout = prefs.buttons.layout();
+    let look = prefs.buttons.style();
+    // The margin is an i8; Windows-style buttons are made to fit it.
+    let margin = |buttons: &[window_buttons::Button]| {
+        window_buttons::width(buttons, look).ceil().min(127.0) as i8
+    };
+    let inner = &mut style.tab_bar.inner_margin;
+    inner.left = inner.left.saturating_add(margin(&layout.left));
+    inner.right = inner.right.saturating_add(margin(&layout.right));
+    style.tab_bar.height = HEIGHT;
+}
+
+/// The window buttons at the top corners of a tab window, over the ends of
+/// its tab bar. Call it after drawing the dock, in its `ui`.
+pub fn inline_buttons(ui: &mut Ui, prefs: &Prefs) {
+    let rect = ui.max_rect();
+    let layout = prefs.buttons.layout();
+    let look = prefs.buttons.style();
+    let maximized = ui.input(|i| i.viewport().maximized.unwrap_or(false));
+    let left = Rect::from_min_size(
+        rect.min,
+        vec2(window_buttons::width(&layout.left, look), HEIGHT),
+    );
+    let right_width = window_buttons::width(&layout.right, look);
+    let right = Rect::from_min_size(
+        pos2(rect.right() - right_width, rect.top()),
+        vec2(right_width, HEIGHT),
+    );
+    let groups = [
+        (left, &layout.left, window_buttons::Side::Left),
+        (right, &layout.right, window_buttons::Side::Right),
+    ];
+    for (rect, buttons, side) in groups {
+        if let Some(button) = window_buttons::show(ui, rect, buttons, look, side, maximized) {
+            ui.ctx().send_viewport_cmd(match button {
+                window_buttons::Button::Minimize => ViewportCommand::Minimized(true),
+                window_buttons::Button::Maximize => ViewportCommand::Maximized(!maximized),
+                window_buttons::Button::Close => ViewportCommand::Close,
+            });
+        }
+    }
+}
+
+/// Lets the empty part of the tab bars along the top of a tab window move
+/// it, and double-clicking there maximize it. Call it before drawing the
+/// dock, so its tabs and buttons, drawn later, take the pointer first.
+pub fn tab_bar_drag(ui: &mut Ui, dock: &DockState<DockTab>) {
+    let top = ui.max_rect().top();
+    let maximized = ui.input(|i| i.viewport().maximized.unwrap_or(false));
+    for (path, leaf) in dock.iter_leaves() {
+        if !path.surface.is_main() || leaf.rect.top() > top + 1.0 {
+            continue;
+        }
+        let bar = Rect::from_min_size(leaf.rect.min, vec2(leaf.rect.width(), HEIGHT));
+        let response = ui.interact(
+            bar,
+            Id::new(("tab-bar-drag", path)),
+            Sense::click_and_drag(),
+        );
+        if response.double_clicked() {
+            ui.ctx()
+                .send_viewport_cmd(ViewportCommand::Maximized(!maximized));
+        } else if response.drag_started_by(egui::PointerButton::Primary) {
+            ui.ctx().send_viewport_cmd(ViewportCommand::StartDrag);
+        }
+    }
+}
+
+/// The window menu, on right-clicking `response`: Windows' own there,
+/// the same commands in an egui menu elsewhere (winit has the desktop's
+/// for Wayland, but eframe doesn't let us reach it).
+#[cfg(windows)]
+pub fn window_menu(response: &egui::Response, _maximized: bool) {
+    if response.secondary_clicked() {
+        crate::windows_frame::show_system_menu();
+    }
+}
+
+#[cfg(not(windows))]
+pub fn window_menu(response: &egui::Response, maximized: bool) {
+    response.context_menu(|ui| {
+        window_menu_items(ui, maximized);
+    });
+}
+
+/// Minimize, maximize or restore, always on top, and close, for the window
+/// `ui` is in. Returns whether one was chosen.
+pub fn window_menu_items(ui: &mut Ui, maximized: bool) -> bool {
+    let ctx = ui.ctx().clone();
+    let item = |ui: &mut Ui, label: &str, command: ViewportCommand| {
+        let clicked = ui.button(label).clicked();
+        if clicked {
+            ctx.send_viewport_cmd(command);
+            ui.close();
+        }
+        clicked
+    };
+    let mut chosen = item(ui, "Minimize", ViewportCommand::Minimized(true));
+    chosen |= if maximized {
+        item(ui, "Restore", ViewportCommand::Maximized(false))
+    } else {
+        item(ui, "Maximize", ViewportCommand::Maximized(true))
+    };
+    // Windows don't say their level, so it's remembered here.
+    let on_top_id = Id::new(("always-on-top", ctx.viewport_id()));
+    let mut on_top = ui.data(|d| d.get_temp::<bool>(on_top_id)).unwrap_or(false);
+    if ui.checkbox(&mut on_top, "Always on top").changed() {
+        ui.data_mut(|d| d.insert_temp(on_top_id, on_top));
+        let level = if on_top {
+            egui::WindowLevel::AlwaysOnTop
+        } else {
+            egui::WindowLevel::Normal
+        };
+        ctx.send_viewport_cmd(ViewportCommand::WindowLevel(level));
+        ui.close();
+        chosen = true;
+    }
+    ui.separator();
+    chosen | item(ui, "Close", ViewportCommand::Close)
+}
+
+/// Where maximize is with `prefs`, for Windows' snap layouts: its side of
+/// the window and how far from it, in points.
+#[cfg(windows)]
+pub fn maximize_span(prefs: &Prefs) -> Option<(window_buttons::Side, f32, f32)> {
+    window_buttons::maximize_span(&prefs.buttons.layout(), prefs.buttons.style())
+}
+
 /// The focused tab's folder; click to type another and Enter to go there.
 /// Returns where to go.
 fn path_box(ui: &mut Ui, id: Id, path: Option<&PathBuf>, width: f32) -> Option<PathBuf> {
@@ -674,6 +807,35 @@ mod tests {
             path.rect
         );
         assert!(path.rect.width() >= PATH_WIDTH.0, "{:?}", path.rect);
+    }
+
+    #[test]
+    fn tab_windows_tab_bar_leaves_room_for_the_buttons() {
+        use window_buttons::{Prefs as Buttons, Side, Style};
+        let prefs = |side, style| Prefs {
+            enabled: true,
+            buttons: Buttons {
+                follow_desktop: false,
+                side,
+                style,
+                ..Buttons::default()
+            },
+            ..Prefs::default()
+        };
+        let base = egui_dock::Style::from_egui(&egui::Style::default());
+        let margins = |prefs: &Prefs| {
+            let mut style = base.clone();
+            inline_tab_bar(&mut style, prefs);
+            assert_eq!(style.tab_bar.height, HEIGHT);
+            let m = style.tab_bar.inner_margin;
+            (
+                m.left - base.tab_bar.inner_margin.left,
+                m.right - base.tab_bar.inner_margin.right,
+            )
+        };
+        // Three Windows-style buttons fit the margin's i8.
+        assert_eq!(margins(&prefs(Side::Right, Style::Windows)), (0, 126));
+        assert_eq!(margins(&prefs(Side::Left, Style::MacOs)), (70, 0));
     }
 
     #[test]

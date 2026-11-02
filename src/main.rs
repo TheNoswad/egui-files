@@ -43,6 +43,8 @@ mod widgets;
 mod window_buttons;
 #[cfg(windows)]
 mod windows_drag;
+#[cfg(windows)]
+mod windows_frame;
 
 fn main() -> eframe::Result {
     // Started elevated to apply changes from the Properties window.

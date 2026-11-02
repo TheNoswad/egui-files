@@ -305,11 +305,10 @@ fn add_button_rect(leaf_rect: Rect, style: &Style) -> Rect {
 
 /// Tooltips for the add buttons, which egui_dock doesn't offer. Only for the
 /// main surface; windows are drawn on layers above it.
-fn add_button_hints(ui: &mut Ui, dock: &DockState<DockTab>) {
-    let style = Style::from_egui(ui.style());
+fn add_button_hints(ui: &mut Ui, dock: &DockState<DockTab>, style: &Style) {
     for (path, leaf) in dock.iter_leaves() {
         if path.surface.is_main() {
-            let rect = add_button_rect(leaf.rect, &style);
+            let rect = add_button_rect(leaf.rect, style);
             // Hover only, so the button underneath still gets the clicks.
             ui.interact(rect, Id::new(("add-tab-hint", path)), egui::Sense::hover())
                 .on_hover_text("New file browser tab\nRight-click the tab bar for panes and more");
@@ -327,8 +326,8 @@ fn tab_bar_ui(
     dock: &DockState<DockTab>,
     tab_buttons: &[Rect],
     window: Option<u64>,
+    style: &Style,
 ) -> (Option<AddMenu>, Option<(NodePath, Vec<PathBuf>)>) {
-    let style = Style::from_egui(&ctx.global_style());
     let Some(pos) = ctx.pointer_latest_pos() else {
         return (None, None);
     };
@@ -1424,6 +1423,11 @@ impl FilesApp {
             Some(_) => Vec::new(),
         };
         let mut choice = None;
+        // A tab window's tab bar is its title bar, so the window's own
+        // commands are here too.
+        let window_items = window.is_some() && self.titlebar.enabled;
+        let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+        let mut window_chosen = false;
         let area = egui::Area::new(Id::new("add-tab-menu"))
             .order(egui::Order::Foreground)
             .fixed_pos(menu.pos)
@@ -1456,6 +1460,10 @@ impl FilesApp {
                                 choice = Some(NewTab::Pane(pane));
                             }
                         }
+                        if window_items {
+                            ui.separator();
+                            window_chosen = crate::titlebar::window_menu_items(ui, maximized);
+                        }
                     });
                 });
             });
@@ -1465,7 +1473,11 @@ impl FilesApp {
                     .interact_pos()
                     .is_some_and(|pos| !area.response.rect.contains(pos))
         });
-        if choice.is_some() || clicked_outside || ctx.input(|i| i.key_pressed(Key::Escape)) {
+        if choice.is_some()
+            || window_chosen
+            || clicked_outside
+            || ctx.input(|i| i.key_pressed(Key::Escape))
+        {
             self.add_menu = None;
         }
         choice.map(|kind| (menu.leaf, kind))
@@ -2002,15 +2014,11 @@ impl FilesApp {
             let builder = window.builder().with_decorations(!custom);
             let prefs = self.titlebar.clone();
             ctx.show_viewport_immediate(viewport, builder, |ui, _class| {
+                // The tab bar is the title bar (each tab has its own
+                // navigation), with the window buttons at its ends.
                 if custom {
-                    let id = format!("window-{}", window.id);
-                    let (focus, browser) = crate::titlebar::focus(&mut window.dock, None);
-                    // Panes live in the main window.
-                    let requests = crate::titlebar::show(ui, &id, &prefs, &focus, &[], |ui| {
-                        ui.cursor().left()
-                    });
-                    crate::titlebar::apply(&mut window.dock, browser, requests);
                     crate::titlebar::resize_edges(ui.ctx());
+                    crate::titlebar::tab_bar_drag(ui, &window.dock);
                 }
                 let (inner, outer, is_focused, close) = ui.input(|i| {
                     let v = i.viewport();
@@ -2057,18 +2065,25 @@ impl FilesApp {
                 };
                 let before =
                     tab_windows::Before::of(ui.ctx(), &window.dock, Id::new(("dock", window.id)));
+                let mut dock_style = Style::from_egui(ui.style());
+                if custom {
+                    crate::titlebar::inline_tab_bar(&mut dock_style, &prefs);
+                }
                 CentralPanel::default()
                     .frame(egui::Frame::NONE)
                     .show(ui, |ui| {
                         DockArea::new(&mut window.dock)
                             .id(Id::new(("dock", window.id)))
-                            .style(Style::from_egui(ui.style()))
+                            .style(dock_style.clone())
                             .show_add_buttons(true)
                             .show_leaf_collapse_buttons(false)
                             .show_leaf_close_all_buttons(true)
                             .show_inside(ui, &mut viewer);
+                        if custom {
+                            crate::titlebar::inline_buttons(ui, &prefs);
+                        }
                         if self.add_menu.is_none() {
-                            add_button_hints(ui, &window.dock);
+                            add_button_hints(ui, &window.dock, &dock_style);
                         }
                     });
                 add_requests.extend(
@@ -2087,8 +2102,13 @@ impl FilesApp {
                 {
                     add_requests.push((window.id, leaf, kind));
                 }
-                let (menu, dropped) =
-                    tab_bar_ui(ui.ctx(), &window.dock, &tab_buttons, Some(window.id));
+                let (menu, dropped) = tab_bar_ui(
+                    ui.ctx(),
+                    &window.dock,
+                    &tab_buttons,
+                    Some(window.id),
+                    &dock_style,
+                );
                 if menu.is_some() {
                     self.add_menu = menu;
                 }
@@ -2507,6 +2527,19 @@ impl eframe::App for FilesApp {
             );
             self.window_title = title;
         }
+        #[cfg(windows)]
+        {
+            let maximize =
+                crate::titlebar::maximize_span(&self.titlebar).map(|(side, near, far)| {
+                    crate::windows_frame::Maximize {
+                        side,
+                        near,
+                        far,
+                        height: crate::titlebar::HEIGHT,
+                    }
+                });
+            crate::windows_frame::update(&ctx, custom, maximize);
+        }
         if custom {
             let panes: Vec<(Pane, bool)> =
                 Pane::ALL.iter().map(|&p| (p, self.has_pane(p))).collect();
@@ -2581,7 +2614,7 @@ impl eframe::App for FilesApp {
                     .show_leaf_close_all_buttons(true)
                     .show_inside(ui, &mut viewer);
                 if self.add_menu.is_none() {
-                    add_button_hints(ui, &self.dock);
+                    add_button_hints(ui, &self.dock, &Style::from_egui(ui.style()));
                 }
             });
         let Panes {
@@ -2631,7 +2664,8 @@ impl eframe::App for FilesApp {
         if let Some((leaf, kind)) = self.add_menu_ui(&ctx, None, trash_open) {
             self.add_to_leaf(None, leaf, kind);
         }
-        let (menu, folders) = tab_bar_ui(&ctx, &self.dock, &tab_buttons, None);
+        let style = Style::from_egui(&ctx.global_style());
+        let (menu, folders) = tab_bar_ui(&ctx, &self.dock, &tab_buttons, None, &style);
         if menu.is_some() {
             self.add_menu = menu;
         }
@@ -2972,7 +3006,8 @@ mod tests {
                         .style(Style::from_egui(ui.style()))
                         .show_inside(ui, &mut viewer);
                     buttons = viewer.0;
-                    menu = menu.or(tab_bar_ui(ui.ctx(), &dock, &buttons, Some(7)).0);
+                    let style = Style::from_egui(ui.style());
+                    menu = menu.or(tab_bar_ui(ui.ctx(), &dock, &buttons, Some(7), &style).0);
                 });
                 output.textures_delta.clear();
             }
@@ -3025,7 +3060,7 @@ mod tests {
                     .show_leaf_close_all_buttons(true)
                     .show_inside(ui, &mut viewer);
                 // The hints mustn't take the clicks.
-                add_button_hints(ui, dock);
+                add_button_hints(ui, dock, &Style::from_egui(ui.style()));
             });
             output.textures_delta.clear();
         };

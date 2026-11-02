@@ -6,10 +6,8 @@
 - [ ] Zero-copy dmabuf → wgpu import for video, if readback ever matters
 - [ ] Drag-out on X11 (Wayland and Windows done)
 - [ ] Upstream: egui-winit (0.36 and 0.37) drops Ctrl+V entirely, without even the key press, when the clipboard has no text (or image), e.g. files copied in Explorer. We work around it with `file_clipboard::PasteKey` (Windows: `GetKeyState`) so copied files don't need a text fallback, which Discord would paste instead of the files. Report it, or send a PR that always passes the key press through (or adds an empty-paste event), then drop `PasteKey`.
-- [ ] Custom titlebar that looks native (opt-in; the system frame stays the default)
-    - [ ] The system window menu on right-click of the bar, where there is one
-    - [ ] Tab windows: their tab bar inline in the title bar, like a browser
-    - [ ] Windows: rounded corners and the shadow via DWM; the Win11 snap layouts flyout needs `HTMAXBUTTON` from `WM_NCHITTEST`, which winit doesn't give us
+- [ ] In-app title bar on Windows: check by hand that the DWM shadow and rounded corners show, the snap layouts flyout opens over maximize (and maximize still works and highlights), and right-click opens the system menu; only compile-checked so far
+- [ ] In-app title bar on Wayland: right-click shows our own window menu, since eframe gives no way to reach winit's `show_window_menu` (the compositor's). Expose it (a viewport command upstream, or via our egui-winit patch) and use it there
 - [ ] Upstream: egui-winit makes a smithay clipboard per viewport and drops it with the viewport, which kills the Wayland connection ("not a valid new object id … data_offer"); we patch it to share one (patches/README.md has a repro). Report it or send the PR, then drop the patch.
 - [ ] Tab windows: check they keep updating while the main window is hidden (another workspace, minimized). Their UI runs in the main window's frame, and on Wayland winit may hold that frame until the compositor sends the main window a frame callback
 - [ ] Tab windows: try dropping a tab outside the window, and into another of the app's windows, by hand on Wayland, X11 and Windows (only unit-tested so far; the drop is told from the pointer, which egui may lose as it leaves)

@@ -41,7 +41,9 @@ impl Style {
     /// of the group.
     fn slot(self) -> (f32, f32) {
         match self {
-            Self::Windows | Self::Auto => (46.0, 0.0),
+            // Windows' are 46 wide, but three of these must fit the dock's
+            // tab bar margin (an i8) in tab windows.
+            Self::Windows | Self::Auto => (42.0, 0.0),
             Self::Adwaita => (34.0, 6.0),
             Self::Breeze => (30.0, 6.0),
             Self::MacOs => (20.0, 10.0),
@@ -294,6 +296,22 @@ fn parse_kwinrc(text: &str) -> Layout {
     }
 }
 
+#[cfg(any(windows, test))]
+/// Where maximize is, if shown: the side of the window its group is at,
+/// and how far its near and far edges are from that side, in points.
+pub fn maximize_span(layout: &Layout, style: Style) -> Option<(Side, f32, f32)> {
+    let (slot, pad) = style.slot();
+    if let Some(i) = layout.left.iter().position(|&b| b == Button::Maximize) {
+        let near = pad + i as f32 * slot;
+        return Some((Side::Left, near, near + slot));
+    }
+    let i = layout.right.iter().position(|&b| b == Button::Maximize)?;
+    // The right group starts with its slots and ends with the padding.
+    let group = width(&layout.right, style);
+    let far = group - i as f32 * slot;
+    Some((Side::Right, far - slot, far))
+}
+
 /// How wide a group of `buttons` is in `style`.
 pub fn width(buttons: &[Button], style: Style) -> f32 {
     if buttons.is_empty() {
@@ -324,7 +342,13 @@ pub fn show(
             Rect::from_x_y_ranges(x..=x + slot, rect.y_range())
         })
         .collect();
-    let group_hovered = ui.rect_contains_pointer(rect);
+    // Over maximize, Windows tells the subclass rather than egui (for the
+    // snap layouts flyout).
+    #[cfg(windows)]
+    let native = crate::windows_frame::maximize_state(ui.ctx());
+    #[cfg(not(windows))]
+    let native = (false, false);
+    let group_hovered = ui.rect_contains_pointer(rect) || native.0;
     let focused = ui.ctx().input(|i| i.viewport().focused) != Some(false);
     let mut clicked = None;
     for (&button, &slot) in buttons.iter().zip(&slots) {
@@ -336,9 +360,10 @@ pub fn show(
             Button::Maximize => "Maximize",
             Button::Close => "Close",
         };
+        let maximize = button == Button::Maximize;
         let state = State {
-            hovered: response.hovered(),
-            pressed: response.is_pointer_button_down_on(),
+            hovered: response.hovered() || maximize && native.0,
+            pressed: response.is_pointer_button_down_on() || maximize && native.1,
             group_hovered,
             focused,
             maximized,
@@ -610,9 +635,35 @@ mod tests {
     }
 
     #[test]
+    fn finds_maximize() {
+        let right = Layout {
+            left: vec![],
+            right: vec![Minimize, Maximize, Close],
+        };
+        // Close is the last 42 points, maximize the 42 before.
+        assert_eq!(
+            maximize_span(&right, Style::Windows),
+            Some((Side::Right, 42.0, 84.0))
+        );
+        let left = Layout {
+            left: vec![Close, Minimize, Maximize],
+            right: vec![],
+        };
+        assert_eq!(
+            maximize_span(&left, Style::MacOs),
+            Some((Side::Left, 50.0, 70.0))
+        );
+        let none = Layout {
+            left: vec![],
+            right: vec![Close],
+        };
+        assert_eq!(maximize_span(&none, Style::Adwaita), None);
+    }
+
+    #[test]
     fn widths_add_up() {
         assert_eq!(width(&[], Style::MacOs), 0.0);
-        assert_eq!(width(&[Close], Style::Windows), 46.0);
+        assert_eq!(width(&[Close], Style::Windows), 42.0);
         assert_eq!(width(&[Close, Minimize], Style::Adwaita), 74.0);
     }
 }
