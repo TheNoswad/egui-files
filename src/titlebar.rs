@@ -219,30 +219,33 @@ fn fit(prefs: &Prefs, room: f32) -> Fit {
 
 /// Draws the bar along the top of the viewport `ui` is in: `menus` at its
 /// left, then the parts `prefs` turns on for `focus`, and `panes` (each
-/// with whether it's open) as toggles beside the window buttons.
+/// with whether it's open) as toggles beside the window buttons. `menus`
+/// returns where its content ends: egui's menu bar takes all the width it's
+/// given, so where it ends says nothing.
 pub fn show(
     ui: &mut Ui,
     id: &str,
     prefs: &Prefs,
     focus: &Focus,
     panes: &[(Pane, bool)],
-    menus: impl FnOnce(&mut Ui),
+    menus: impl FnOnce(&mut Ui) -> f32,
 ) -> Vec<Request> {
     let frame = egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin::ZERO);
     Panel::top(Id::new(("titlebar", id)))
         .exact_size(HEIGHT)
         .resizable(false)
         .frame(frame)
-        .show(ui, |ui| bar(ui, prefs, focus, panes, menus))
+        .show(ui, |ui| bar(ui, id, prefs, focus, panes, menus))
         .inner
 }
 
 fn bar(
     ui: &mut Ui,
+    id: &str,
     prefs: &Prefs,
     focus: &Focus,
     panes: &[(Pane, bool)],
-    menus: impl FnOnce(&mut Ui),
+    menus: impl FnOnce(&mut Ui) -> f32,
 ) -> Vec<Request> {
     let rect = ui.max_rect();
     let ctx = ui.ctx().clone();
@@ -259,114 +262,131 @@ fn bar(
 
     let toggles = if prefs.pane_toggles { panes } else { &[] };
     let right_width = 3.0 * BUTTON_WIDTH + toggles.len() as f32 * NAV_BUTTON + GAP;
-    let mut left_end = rect.left();
+    let centred = egui::Layout::left_to_right(egui::Align::Center);
+    let menus_end = ui
+        .scope_builder(
+            egui::UiBuilder::new().max_rect(rect).layout(centred),
+            |ui| {
+                ui.add_space(6.0);
+                menus(ui)
+            },
+        )
+        .inner;
+    let rest = Rect::from_x_y_ranges(menus_end..=rect.right(), rect.y_range());
+    let mut left_end = menus_end;
     let mut buttons_left = rect.right();
-    ui.horizontal_centered(|ui| {
-        ui.add_space(6.0);
-        ui.scope(menus);
-        let room = rect.right() - right_width - ui.cursor().left();
-        let fit = fit(prefs, room);
-        let browser = focus.path.as_ref();
-        if fit.navigation {
-            ui.add_space(GAP);
-            ui.spacing_mut().item_spacing.x = 0.0;
-            let nav = [
-                (
-                    icon::ARROW_LEFT,
-                    "Back",
-                    Command::Back,
-                    focus.can_go_back,
-                    tab::Action::Back,
-                ),
-                (
-                    icon::ARROW_RIGHT,
-                    "Forward",
-                    Command::Forward,
-                    focus.can_go_forward,
-                    tab::Action::Forward,
-                ),
-                (
-                    icon::ARROW_UP,
-                    "Up",
-                    Command::Up,
-                    browser.is_some_and(|p| p.parent().is_some()),
-                    tab::Action::Up,
-                ),
-            ];
-            for (glyph, label, command, enabled, action) in nav {
-                let button = Button::new(RichText::new(glyph).size(15.0))
-                    .frame(false)
-                    .min_size(vec2(NAV_BUTTON, NAV_BUTTON - 4.0));
-                if ui
-                    .add_enabled(enabled, button)
-                    .on_hover_text(keymap::hint(&ctx, label, command))
-                    .clicked()
-                {
-                    requests.push(Request::Tab(action));
-                }
-            }
-            ui.spacing_mut().item_spacing.x = ui.style().spacing.item_spacing.x;
-        }
-        if let Some(width) = fit.path {
-            ui.add_space(GAP);
-            if let Some(path) = path_box(ui, browser, width) {
-                requests.push(Request::Tab(tab::Action::Navigate(path)));
-            }
-        }
-        if let Some(width) = fit.filter {
-            ui.add_space(GAP);
-            let mut filter = focus.filter.clone();
-            let hint = format!(
-                "{} {}",
-                icon::MAGNIFYING_GLASS,
-                keymap::hint(&ctx, "Filter", Command::Filter)
-            );
-            let edit = TextEdit::singleline(&mut filter)
-                .hint_text(hint)
-                .desired_width(width);
-            if ui.add_enabled(browser.is_some(), edit).changed() {
-                requests.push(Request::Filter(filter));
-            }
-        }
-        left_end = ui.cursor().left();
-
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.spacing_mut().item_spacing.x = 0.0;
-            if window_button(ui, icon::X, "Close", true).clicked() {
-                ctx.send_viewport_cmd(ViewportCommand::Close);
-            }
-            let (glyph, tip) = if maximized {
-                (icon::CORNERS_IN, "Restore")
-            } else {
-                (icon::SQUARE, "Maximize")
-            };
-            if window_button(ui, glyph, tip, false).clicked() {
-                ctx.send_viewport_cmd(ViewportCommand::Maximized(!maximized));
-            }
-            let minimize = window_button(ui, icon::MINUS, "Minimize", false);
-            if minimize.clicked() {
-                ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
-            }
-            buttons_left = minimize.rect.left();
-            if !toggles.is_empty() {
+    ui.scope_builder(
+        egui::UiBuilder::new().max_rect(rest).layout(centred),
+        |ui| {
+            let room = rect.right() - right_width - menus_end;
+            let fit = fit(prefs, room);
+            let browser = focus.path.as_ref();
+            if fit.navigation {
                 ui.add_space(GAP);
-                for &(pane, open) in toggles.iter().rev() {
-                    let button = Button::selectable(open, RichText::new(pane.icon()).size(15.0))
+                ui.spacing_mut().item_spacing.x = 0.0;
+                let nav = [
+                    (
+                        icon::ARROW_LEFT,
+                        "Back",
+                        Command::Back,
+                        focus.can_go_back,
+                        tab::Action::Back,
+                    ),
+                    (
+                        icon::ARROW_RIGHT,
+                        "Forward",
+                        Command::Forward,
+                        focus.can_go_forward,
+                        tab::Action::Forward,
+                    ),
+                    (
+                        icon::ARROW_UP,
+                        "Up",
+                        Command::Up,
+                        browser.is_some_and(|p| p.parent().is_some()),
+                        tab::Action::Up,
+                    ),
+                ];
+                for (glyph, label, command, enabled, action) in nav {
+                    let button = Button::new(RichText::new(glyph).size(15.0))
+                        .frame(false)
                         .min_size(vec2(NAV_BUTTON, NAV_BUTTON - 4.0));
-                    let tip = match pane {
-                        Pane::Preview => keymap::hint(&ctx, pane.label(), Command::TogglePreview),
-                        Pane::Terminal => keymap::hint(&ctx, pane.label(), Command::ToggleTerminal),
-                        _ => pane.label().to_owned(),
-                    };
-                    let response = ui.add(button).on_hover_text(tip);
-                    if response.clicked() {
-                        requests.push(Request::TogglePane(pane));
+                    if ui
+                        .add_enabled(enabled, button)
+                        .on_hover_text(keymap::hint(&ctx, label, command))
+                        .clicked()
+                    {
+                        requests.push(Request::Tab(action));
                     }
-                    buttons_left = response.rect.left();
+                }
+                ui.spacing_mut().item_spacing.x = ui.style().spacing.item_spacing.x;
+            }
+            if let Some(width) = fit.path {
+                ui.add_space(GAP);
+                if let Some(path) = path_box(ui, path_box_id(id), browser, width) {
+                    requests.push(Request::Tab(tab::Action::Navigate(path)));
                 }
             }
-        });
-    });
+            if let Some(width) = fit.filter {
+                ui.add_space(GAP);
+                let mut filter = focus.filter.clone();
+                let hint = format!(
+                    "{} {}",
+                    icon::MAGNIFYING_GLASS,
+                    keymap::hint(&ctx, "Filter", Command::Filter)
+                );
+                let edit = TextEdit::singleline(&mut filter)
+                    .hint_text(hint)
+                    .desired_width(width);
+                if ui.add_enabled(browser.is_some(), edit).changed() {
+                    requests.push(Request::Filter(filter));
+                }
+            }
+            left_end = ui.cursor().left();
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                if window_button(ui, icon::X, "Close", true).clicked() {
+                    ctx.send_viewport_cmd(ViewportCommand::Close);
+                }
+                let (glyph, tip) = if maximized {
+                    (icon::CORNERS_IN, "Restore")
+                } else {
+                    (icon::SQUARE, "Maximize")
+                };
+                if window_button(ui, glyph, tip, false).clicked() {
+                    ctx.send_viewport_cmd(ViewportCommand::Maximized(!maximized));
+                }
+                let minimize = window_button(ui, icon::MINUS, "Minimize", false);
+                if minimize.clicked() {
+                    ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
+                }
+                buttons_left = minimize.rect.left();
+                if !toggles.is_empty() {
+                    ui.add_space(GAP);
+                    for &(pane, open) in toggles.iter().rev() {
+                        let button =
+                            Button::selectable(open, RichText::new(pane.icon()).size(15.0))
+                                .min_size(vec2(NAV_BUTTON, NAV_BUTTON - 4.0));
+                        let tip = match pane {
+                            Pane::Preview => {
+                                keymap::hint(&ctx, pane.label(), Command::TogglePreview)
+                            }
+                            Pane::Terminal => {
+                                keymap::hint(&ctx, pane.label(), Command::ToggleTerminal)
+                            }
+                            _ => pane.label().to_owned(),
+                        };
+                        let response = ui.add(button).on_hover_text(tip);
+                        if response.clicked() {
+                            requests.push(Request::TogglePane(pane));
+                        }
+                        buttons_left = response.rect.left();
+                    }
+                }
+            });
+        },
+    );
 
     if prefs.title {
         title(ui, &background, focus, rect, left_end, buttons_left);
@@ -411,10 +431,13 @@ fn title(
     }
 }
 
+fn path_box_id(bar: &str) -> Id {
+    Id::new(("titlebar-path", bar))
+}
+
 /// The focused tab's folder; click to type another and Enter to go there.
 /// Returns where to go.
-fn path_box(ui: &mut Ui, path: Option<&PathBuf>, width: f32) -> Option<PathBuf> {
-    let id = ui.id().with("path-box");
+fn path_box(ui: &mut Ui, id: Id, path: Option<&PathBuf>, width: f32) -> Option<PathBuf> {
     let editing = ui.memory(|m| m.has_focus(id));
     let shown = path.map(|p| p.display().to_string()).unwrap_or_default();
     let mut text = if editing {
@@ -575,6 +598,58 @@ mod tests {
             .unwrap();
         assert_eq!(tab.filter, "so");
         assert!(matches!(tab.queued[..], [tab::Action::Up]));
+    }
+
+    /// The bar as the main window draws it, with egui's menu bar, which
+    /// takes the whole row it's given.
+    #[test]
+    fn parts_show_after_the_menus() {
+        let ctx = egui::Context::default();
+        let prefs = Prefs {
+            enabled: true,
+            path_box: true,
+            filter_box: true,
+            ..Prefs::default()
+        };
+        let focus = Focus {
+            title: "lib".into(),
+            path: Some(PathBuf::from("/usr/lib")),
+            ..Focus::default()
+        };
+        let mut menus_end = 0.0;
+        for _ in 0..2 {
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1200.0, 600.0))),
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| {
+                show(ui, "test", &prefs, &focus, &[], |ui| {
+                    egui::MenuBar::new()
+                        .ui(ui, |ui| {
+                            ui.menu_button("File", |_| {});
+                            ui.menu_button("View", |_| {});
+                            menus_end = ui.cursor().left();
+                            menus_end
+                        })
+                        .inner
+                });
+            });
+            output.textures_delta.clear();
+        }
+        let path = ctx
+            .read_response(path_box_id("test"))
+            .expect("the path box is drawn");
+        assert!(
+            path.rect.left() > menus_end,
+            "{:?} vs {menus_end}",
+            path.rect
+        );
+        assert!(
+            path.rect.right() < 1200.0 - 3.0 * BUTTON_WIDTH,
+            "{:?}",
+            path.rect
+        );
+        assert!(path.rect.width() >= PATH_WIDTH.0, "{:?}", path.rect);
     }
 
     #[test]

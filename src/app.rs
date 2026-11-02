@@ -1501,144 +1501,152 @@ impl FilesApp {
         }
     }
 
-    fn menu_bar(&mut self, ui: &mut Ui) {
+    /// The File, View and Help menus. Returns where they end: the menu bar
+    /// itself takes the whole row.
+    fn menu_bar(&mut self, ui: &mut Ui) -> f32 {
         use crate::keymap::Command as C;
         let ctx = ui.ctx().clone();
         let keys = |command| crate::keymap::text(&ctx, command);
-        egui::MenuBar::new().ui(ui, |ui| {
-            ui.menu_button("File", |ui| {
-                if ui
-                    .add(Button::new("New tab").shortcut_text(keys(C::NewTab)))
-                    .clicked()
-                {
-                    let path = self.focused_path();
-                    self.open_tab(None, path);
-                }
-                if ui
-                    .add(Button::new("Close tab").shortcut_text(keys(C::CloseTab)))
-                    .clicked()
-                {
-                    self.close_focused_tab(None);
-                }
-                if ui
-                    .button(format!("{} Open trash", egui_phosphor::regular::TRASH))
-                    .clicked()
-                {
-                    self.open_trash();
-                }
-                if ui
-                    .add(
-                        Button::new(format!("{} Disk usage", icon::CHART_PIE_SLICE))
-                            .shortcut_text(keys(C::DiskUsage)),
-                    )
-                    .on_hover_text("Where the space in this folder went")
-                    .clicked()
-                {
-                    let path = self.focused_path();
-                    self.open_usage(None, path);
-                }
-                if ui
-                    .add(
-                        Button::new(format!("{} Properties", icon::INFO))
-                            .shortcut_text(keys(C::Properties)),
-                    )
-                    .on_hover_text("Of the selected items, or of the folder")
-                    .clicked()
-                    && let Some(source) = self.focused_selection()
-                {
-                    self.open_properties(source);
-                }
-                ui.separator();
-                if ui
-                    .add(
-                        Button::new(format!("{} Settings", icon::GEAR))
-                            .shortcut_text(keys(C::Settings)),
-                    )
-                    .clicked()
-                {
-                    self.open_settings(None);
-                }
-                ui.separator();
-                if ui.button("Quit").clicked() {
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-                }
-            });
-            ui.menu_button("View", |ui| {
-                ui.checkbox(
-                    &mut self.shared.show_hidden,
-                    crate::keymap::hint(&ctx, "Show hidden files", C::ToggleHidden),
-                );
-                ui.checkbox(&mut self.shared.show_thumbnails, "Show thumbnails");
-                ui.add(
-                    egui::Slider::new(&mut self.shared.icon_size, 32.0..=192.0).text("Icon size"),
-                );
-                ui.separator();
-                ui.menu_button(format!("{} Theme", icon::PAINT_BRUSH), |ui| {
-                    egui::widgets::global_theme_preference_buttons(ui);
-                    ui.separator();
-                    ui.menu_button(format!("{} Dark mode theme", icon::MOON), |ui| {
-                        self.themes.menu_ui(ui, egui::Theme::Dark);
-                    });
-                    ui.menu_button(format!("{} Light mode theme", icon::SUN), |ui| {
-                        self.themes.menu_ui(ui, egui::Theme::Light);
-                    });
-                    ui.separator();
+        egui::MenuBar::new()
+            .ui(ui, |ui| {
+                ui.menu_button("File", |ui| {
                     if ui
-                        .button(format!("{} Theme editor…", icon::PALETTE))
+                        .add(Button::new("New tab").shortcut_text(keys(C::NewTab)))
                         .clicked()
                     {
-                        self.themes.open_editor(ui.ctx());
+                        let path = self.focused_path();
+                        self.open_tab(None, path);
+                    }
+                    if ui
+                        .add(Button::new("Close tab").shortcut_text(keys(C::CloseTab)))
+                        .clicked()
+                    {
+                        self.close_focused_tab(None);
+                    }
+                    if ui
+                        .button(format!("{} Open trash", egui_phosphor::regular::TRASH))
+                        .clicked()
+                    {
+                        self.open_trash();
+                    }
+                    if ui
+                        .add(
+                            Button::new(format!("{} Disk usage", icon::CHART_PIE_SLICE))
+                                .shortcut_text(keys(C::DiskUsage)),
+                        )
+                        .on_hover_text("Where the space in this folder went")
+                        .clicked()
+                    {
+                        let path = self.focused_path();
+                        self.open_usage(None, path);
+                    }
+                    if ui
+                        .add(
+                            Button::new(format!("{} Properties", icon::INFO))
+                                .shortcut_text(keys(C::Properties)),
+                        )
+                        .on_hover_text("Of the selected items, or of the folder")
+                        .clicked()
+                        && let Some(source) = self.focused_selection()
+                    {
+                        self.open_properties(source);
+                    }
+                    ui.separator();
+                    if ui
+                        .add(
+                            Button::new(format!("{} Settings", icon::GEAR))
+                                .shortcut_text(keys(C::Settings)),
+                        )
+                        .clicked()
+                    {
+                        self.open_settings(None);
+                    }
+                    ui.separator();
+                    if ui.button("Quit").clicked() {
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                });
+                ui.menu_button("View", |ui| {
+                    ui.checkbox(
+                        &mut self.shared.show_hidden,
+                        crate::keymap::hint(&ctx, "Show hidden files", C::ToggleHidden),
+                    );
+                    ui.checkbox(&mut self.shared.show_thumbnails, "Show thumbnails");
+                    ui.add(
+                        egui::Slider::new(&mut self.shared.icon_size, 32.0..=192.0)
+                            .text("Icon size"),
+                    );
+                    ui.separator();
+                    ui.menu_button(format!("{} Theme", icon::PAINT_BRUSH), |ui| {
+                        egui::widgets::global_theme_preference_buttons(ui);
+                        ui.separator();
+                        ui.menu_button(format!("{} Dark mode theme", icon::MOON), |ui| {
+                            self.themes.menu_ui(ui, egui::Theme::Dark);
+                        });
+                        ui.menu_button(format!("{} Light mode theme", icon::SUN), |ui| {
+                            self.themes.menu_ui(ui, egui::Theme::Light);
+                        });
+                        ui.separator();
+                        if ui
+                            .button(format!("{} Theme editor…", icon::PALETTE))
+                            .clicked()
+                        {
+                            self.themes.open_editor(ui.ctx());
+                            ui.close();
+                        }
+                    });
+                    if ui
+                        .add(
+                            Button::new(format!("{} More settings…", icon::GEAR))
+                                .shortcut_text(keys(C::Settings)),
+                        )
+                        .clicked()
+                    {
+                        self.open_settings(None);
+                        ui.close();
+                    }
+                    ui.separator();
+                    ui.label("Panes");
+                    for pane in Pane::ALL {
+                        let label = match pane {
+                            Pane::Preview => crate::keymap::hint(&ctx, "Preview", C::TogglePreview),
+                            Pane::Terminal => {
+                                crate::keymap::hint(&ctx, "Terminal", C::ToggleTerminal)
+                            }
+                            _ => pane.label().to_owned(),
+                        };
+                        let mut open = self.has_pane(pane);
+                        if ui
+                            .checkbox(&mut open, format!("{} {label}", pane.icon()))
+                            .changed()
+                        {
+                            self.toggle_pane(ui.ctx(), pane);
+                        }
+                    }
+                    ui.menu_button(format!("{} Terminal folder", icon::LINK_SIMPLE), |ui| {
+                        self.terminal.follow_menu(ui);
+                    });
+                    if ui
+                        .button("Reset layout")
+                        .on_hover_text("Put the panes back where they started; tabs stay open")
+                        .clicked()
+                    {
+                        self.reset_layout();
                         ui.close();
                     }
                 });
-                if ui
-                    .add(
-                        Button::new(format!("{} More settings…", icon::GEAR))
-                            .shortcut_text(keys(C::Settings)),
-                    )
-                    .clicked()
-                {
-                    self.open_settings(None);
-                    ui.close();
-                }
-                ui.separator();
-                ui.label("Panes");
-                for pane in Pane::ALL {
-                    let label = match pane {
-                        Pane::Preview => crate::keymap::hint(&ctx, "Preview", C::TogglePreview),
-                        Pane::Terminal => crate::keymap::hint(&ctx, "Terminal", C::ToggleTerminal),
-                        _ => pane.label().to_owned(),
-                    };
-                    let mut open = self.has_pane(pane);
+                ui.menu_button("Help", |ui| {
                     if ui
-                        .checkbox(&mut open, format!("{} {label}", pane.icon()))
-                        .changed()
+                        .button(format!("{} About egui-files", icon::INFO))
+                        .clicked()
                     {
-                        self.toggle_pane(ui.ctx(), pane);
+                        self.about.open = true;
+                        ui.close();
                     }
-                }
-                ui.menu_button(format!("{} Terminal folder", icon::LINK_SIMPLE), |ui| {
-                    self.terminal.follow_menu(ui);
                 });
-                if ui
-                    .button("Reset layout")
-                    .on_hover_text("Put the panes back where they started; tabs stay open")
-                    .clicked()
-                {
-                    self.reset_layout();
-                    ui.close();
-                }
-            });
-            ui.menu_button("Help", |ui| {
-                if ui
-                    .button(format!("{} About egui-files", icon::INFO))
-                    .clicked()
-                {
-                    self.about.open = true;
-                    ui.close();
-                }
-            });
-        });
+                ui.cursor().left()
+            })
+            .inner
     }
 }
 
@@ -1998,7 +2006,9 @@ impl FilesApp {
                     let id = format!("window-{}", window.id);
                     let (focus, browser) = crate::titlebar::focus(&mut window.dock, None);
                     // Panes live in the main window.
-                    let requests = crate::titlebar::show(ui, &id, &prefs, &focus, &[], |_| {});
+                    let requests = crate::titlebar::show(ui, &id, &prefs, &focus, &[], |ui| {
+                        ui.cursor().left()
+                    });
                     crate::titlebar::apply(&mut window.dock, browser, requests);
                     crate::titlebar::resize_edges(ui.ctx());
                 }
