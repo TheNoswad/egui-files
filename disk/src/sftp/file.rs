@@ -165,6 +165,26 @@ impl File {
         })
     }
 
+    /// Copies `len` bytes at `offset` into `to`, at the same offset, on the
+    /// server itself (OpenSSH's copy-data). `false` if it can't: another
+    /// server, or one without the extension.
+    pub fn copy_on_server(&mut self, to: &mut Self, offset: u64, len: u64) -> io::Result<bool> {
+        if !Arc::ptr_eq(&self.session, &to.session) || !self.session.has_extension("copy-data") {
+            return Ok(false);
+        }
+        self.finish_writes()?;
+        to.finish_writes()?;
+        let request = Writer::default()
+            .bytes(&self.handle)
+            .u64(offset)
+            .u64(len)
+            .bytes(&to.handle)
+            .u64(offset);
+        self.session.extended("copy-data", request)?.wait()?.ok()?;
+        super::changed(&to.location);
+        Ok(true)
+    }
+
     pub fn sync(&mut self) -> io::Result<()> {
         self.finish_writes()?;
         if self.session.has_extension("fsync@openssh.com") {

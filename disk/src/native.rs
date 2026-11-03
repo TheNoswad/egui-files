@@ -664,6 +664,18 @@ impl File {
             Handle::Remote(_) => None,
         }
     }
+
+    /// Copies `len` bytes at `offset` into `to`, at the same offset,
+    /// without them coming here: both on one server that can. `false` if
+    /// they can't, to copy them the usual way.
+    pub fn copy_on_server(&self, to: &File, offset: u64, len: u64) -> io::Result<bool> {
+        let (Handle::Remote(from), Handle::Remote(into)) = (&self.0, &to.0) else {
+            return Ok(false);
+        };
+        let mut from = from.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut into = into.lock().unwrap_or_else(PoisonError::into_inner);
+        from.copy_on_server(&mut into, offset, len)
+    }
 }
 
 impl From<std::fs::File> for File {

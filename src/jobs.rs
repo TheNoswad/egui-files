@@ -33,6 +33,9 @@ use crate::{
 };
 
 const BUFFER_SIZE: usize = 1 << 20;
+/// How much a server copies at a time within itself, between looks at
+/// whether the job was cancelled.
+const SERVER_COPY_PIECE: u64 = 64 << 20;
 
 /// Runs a job to the end on this thread. Nothing suspends outside the browser:
 /// questions wait on the thread instead, and pausing does nothing.
@@ -1135,7 +1138,26 @@ async fn copy_file(
     let result = async {
         let mut from = disk::File::open(src)?;
         let mut to = disk::File::create_new(dst)?;
+        // Within one server, on the server, a piece at a time for progress.
+        let mut offset = 0;
+        let len = meta.len();
+        while offset < len {
+            if p.cancelled() {
+                return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+            }
+            let piece = (len - offset).min(SERVER_COPY_PIECE);
+            if !from.copy_on_server(&to, offset, piece)? {
+                break;
+            }
+            offset += piece;
+            p.done_bytes.fetch_add(piece, Relaxed);
+            p.pause().await;
+        }
         loop {
+            // Done on the server: there's nothing more to read.
+            if offset > 0 && offset >= len {
+                break;
+            }
             if p.cancelled() {
                 return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
             }
@@ -1321,6 +1343,18 @@ mod tests {
         assert_eq!(
             disk::read_link(there.join("tree/link")).unwrap(),
             Path::new("a.txt")
+        );
+        // Within the server, done there.
+        disk::create_dir(there.join("copied")).unwrap();
+        jobs.start(JobKind::Copy {
+            sources: vec![there.join("tree")],
+            dest: there.join("copied"),
+        });
+        wait(&mut jobs);
+        assert_eq!(errors(&jobs), Vec::<String>::new());
+        assert_eq!(
+            disk::read(there.join("copied/tree/sub/b.bin")).unwrap(),
+            vec![7u8; 3 * BUFFER_SIZE + 5]
         );
         disk::create_dir(there.join("moved")).unwrap();
         jobs.start(JobKind::Move {

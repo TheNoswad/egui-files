@@ -292,6 +292,12 @@ fn copies_between_here_and_there() {
     disk::copy(dir.join("up"), &down).unwrap();
     assert_eq!(std::fs::read_to_string(&down).unwrap(), "local");
     disk::copy(dir.join("up"), dir.join("again")).unwrap();
+    // On the server itself.
+    let from = disk::File::open(dir.join("up")).unwrap();
+    let to = disk::File::create(dir.join("there")).unwrap();
+    assert!(from.copy_on_server(&to, 0, 5).unwrap());
+    drop((from, to));
+    assert_eq!(disk::read_to_string(dir.join("there")).unwrap(), "local");
     assert_eq!(disk::read_to_string(dir.join("again")).unwrap(), "local");
     std::fs::remove_file(local).unwrap();
     std::fs::remove_file(down).unwrap();

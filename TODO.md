@@ -17,7 +17,7 @@
     - [ ] Drag out of a server (copies, up to 16 MB) into another app, by hand: only built
     - [x] Others' changes on a server: the folders on screen are listed again every 10 s while connected
     - [ ] Terminal: once ssh'd onto a server it doesn't follow the tab about the server, nor the tab it (there's no telling whether the shell over there is at a prompt). A prompt hook sent along (OSC 7, or a title) could tell
-    - [ ] Server-side copy (`copy-data` extension) for copies within one server, which go through this computer now
+    - [x] Copies within one server are done there (`copy-data`, OpenSSH 9.0+), 64 MB at a time for progress and cancelling
     - [ ] FTP, WebDAV, SMB ("etc")
 - [ ] google drive
 - [ ] proton drive
