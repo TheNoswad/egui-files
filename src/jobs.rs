@@ -1288,7 +1288,12 @@ mod tests {
         let Some(config) = std::env::var_os("EGUI_FILES_SFTP_TEST_CONFIG") else {
             return;
         };
-        disk::sftp::set_extra_ssh_args([std::ffi::OsString::from("-F"), config]);
+        disk::sftp::set_extra_ssh_args([
+            std::ffi::OsString::from("-F"),
+            config,
+            "-o".into(),
+            "ControlPath=none".into(),
+        ]);
         let server = PathBuf::from("sftp://sftp-test");
         disk::sftp::connect(&server).unwrap();
         let there = disk::sftp::home(&server)

@@ -721,6 +721,15 @@ impl Terminal {
         if !idle || self.remote_sent.as_deref() == Some(folder) {
             return None;
         }
+        // Once the app's connection is up, to share it: no password again.
+        // If it failed, ssh asks for itself.
+        use disk::sftp::Status;
+        if matches!(
+            disk::sftp::status(folder),
+            Status::Connecting | Status::Disconnected
+        ) {
+            return None;
+        }
         let command = ssh_command(folder)?;
         let mut keys = b"\x05\x15 ".to_vec();
         keys.extend_from_slice(command.as_bytes());
@@ -739,6 +748,10 @@ fn ssh_command(folder: &Path) -> Option<String> {
     let target = disk::sftp::Target::parse(&location.authority)?;
     let quote = |text: &str| format!("'{}'", text.replace('\'', r"'\''"));
     let mut command = "ssh -t".to_owned();
+    // Over the app's connection, if it has one: no password again.
+    if let Some(path) = disk::sftp::control_path() {
+        command.push_str(&format!(" -o {}", quote(&format!("ControlPath={path}"))));
+    }
     if let Some(port) = target.port {
         command.push_str(&format!(" -p {port}"));
     }
@@ -1404,8 +1417,9 @@ mod tests {
         let command = ssh_command(&folder).unwrap();
         // A stand-in ssh says what it was given, then runs the command for
         // over there.
-        let script =
-            format!("ssh() {{ printf '%s\\n' \"$@\"; shift 7; sh -c \"$1\"; }}; {command}");
+        let script = format!(
+            "ssh() {{ printf '%s\\n' \"$@\"; while [ \"$1\" != -- ]; do shift; done; shift 2; sh -c \"$1\"; }}; {command}"
+        );
         let output = std::process::Command::new("/bin/sh")
             .args(["-c", &script])
             .env("SHELL", &shell)
@@ -1414,6 +1428,14 @@ mod tests {
         let output = String::from_utf8(output.stdout).unwrap();
         let lines: Vec<&str> = output.lines().collect();
         let real = disk::canonicalize(&dir).unwrap();
+        // Past the shared connection's socket, if there is one.
+        let lines: Vec<&str> = match lines.iter().position(|l| *l == "-t") {
+            Some(t) if lines.get(t + 1) == Some(&"-o") => {
+                assert!(lines[t + 2].starts_with("ControlPath="));
+                [&lines[..=t], &lines[t + 3..]].concat()
+            }
+            _ => lines,
+        };
         assert_eq!(lines[..7], ["-t", "-p", "2222", "-l", "me", "--", "host"]);
         assert_eq!(lines.last().copied(), Some(real.to_str().unwrap()));
         assert_eq!(ssh_command(Path::new("/local")), None);
@@ -1421,7 +1443,9 @@ mod tests {
         let home = |path| {
             let command = ssh_command(Path::new(path)).unwrap();
             // Like ssh, it starts over there in the home folder.
-            let script = format!("ssh() {{ shift 3; cd; sh -c \"$1\"; }}; {command}");
+            let script = format!(
+                "ssh() {{ while [ \"$1\" != -- ]; do shift; done; shift 2; cd; sh -c \"$1\"; }}; {command}"
+            );
             let output = std::process::Command::new("/bin/sh")
                 .args(["-c", &script])
                 .env("SHELL", &shell)

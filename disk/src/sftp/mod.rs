@@ -281,6 +281,41 @@ pub fn set_extra_ssh_args(args: impl IntoIterator<Item = impl Into<OsString>>) {
     pool().0.extra_args = args.into_iter().map(Into::into).collect();
 }
 
+/// Where connections listen for other ssh's to share them (ssh's
+/// `ControlPath`), so a terminal's ssh to a server needs no password again.
+/// A folder only the user can reach, in the runtime folder (or `/tmp`: on
+/// macOS the temporary folder's path is too long for a socket). `None` on
+/// Windows, whose OpenSSH can't share connections, or if the folder isn't
+/// safe.
+pub fn control_path() -> Option<String> {
+    static PATH: OnceLock<Option<String>> = OnceLock::new();
+    PATH.get_or_init(|| {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+            let base = std::env::var_os("XDG_RUNTIME_DIR")
+                .map(PathBuf::from)
+                .filter(|dir| dir.is_absolute())
+                .unwrap_or_else(|| PathBuf::from("/tmp"));
+            let user = std::env::var("USER").unwrap_or_else(|_| "user".into());
+            let user: String = user.chars().filter(char::is_ascii_alphanumeric).collect();
+            let dir = base.join(format!("egui-files-ssh-{user}"));
+            let _ = std::fs::DirBuilder::new().mode(0o700).create(&dir);
+            // Ours, and no one else's to get into, or not at all.
+            let meta = std::fs::symlink_metadata(&dir).ok()?;
+            let home = std::fs::metadata(std::env::var_os("HOME")?).ok()?;
+            if !meta.is_dir() || meta.uid() != home.uid() || meta.mode() & 0o077 != 0 {
+                return None;
+            }
+            // %C: a hash of where it leads, short enough for a socket.
+            Some(format!("{}/%C", dir.to_str()?))
+        }
+        #[cfg(not(unix))]
+        None
+    })
+    .clone()
+}
+
 /// Runs this instead of `ssh` (for tests).
 pub fn set_ssh_program(program: impl Into<OsString>) {
     pool().0.program = Some(program.into());

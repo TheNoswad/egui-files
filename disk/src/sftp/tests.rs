@@ -59,7 +59,14 @@ fn server(host: &str) -> Option<PathBuf> {
     let config = std::env::var_os("EGUI_FILES_SFTP_TEST_CONFIG")?;
     static SET_UP: Once = Once::new();
     SET_UP.call_once(|| {
-        set_extra_ssh_args([OsString::from("-F"), config]);
+        // Each alias on a connection of its own: they're all the one user
+        // on the one server, which would share one otherwise.
+        set_extra_ssh_args([
+            OsString::from("-F"),
+            config,
+            "-o".into(),
+            "ControlPath=none".into(),
+        ]);
         let askpass = std::env::current_exe()
             .unwrap()
             .parent()

@@ -115,6 +115,11 @@ pub fn ssh_command(target: &Target) -> Command {
     for option in SSH_OPTIONS {
         command.arg("-o").arg(option);
     }
+    // Others share the connection (a terminal's ssh, see control_path).
+    if let Some(path) = super::control_path() {
+        command.args(["-o", "ControlMaster=auto", "-o", "ControlPersist=no"]);
+        command.arg("-o").arg(format!("ControlPath={path}"));
+    }
     if let Some(port) = target.port {
         command.arg("-p").arg(port.to_string());
     }

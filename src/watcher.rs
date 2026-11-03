@@ -114,7 +114,8 @@ impl DirWatcher {
         changed.extend(disk::take_changes());
         if !changed.is_empty() {
             for path in changed {
-                if let Some(parent) = path.parent() {
+                // Not above a server's top, to "sftp:".
+                if let Some(parent) = crate::remote::parent(&path) {
                     self.dirty.insert(parent.to_path_buf());
                 }
                 self.dirty.insert(path);
@@ -157,6 +158,8 @@ mod tests {
             let mut changed = HashSet::new();
             while Instant::now() < deadline && changed.is_empty() {
                 changed = watcher.poll();
+                // Servers' changes, from other tests at the same time.
+                changed.retain(|p| !crate::remote::is_remote(p));
                 std::thread::sleep(Duration::from_millis(20));
             }
             changed
