@@ -53,7 +53,7 @@
 - [x] Links followed in place with Back and Forward; programs are revealed rather than run
 - [x] Local and remote pictures, SVG included; remote ones behind a setting, by default asked for each document
 - [x] Phase 2, editing aids: formatting commands and shortcuts, lists that continue on Enter and nest on Tab, addresses pasted over text become links, table editing (`table.rs`), outline, word count and reading time, find in the rendered view, pasted and dropped pictures (`assets.rs`), a picture's lightbox
-- [ ] Pasting a picture was only tried on X11 (Xvfb); check on Wayland and Windows. It needs the clipboard to have no text, and the compositor to offer data control on Wayland. Android and the browser can't: there, pictures come by dropping or the toolbar's template
+- [ ] Pasting files and pictures (`system_clipboard.rs`), in the file browser and documents: the whole path only tried on X11, and reading the clipboard on KWin Wayland; check Ctrl+V on Wayland and Windows. Android and the browser can't read it: there, pictures come by dropping or the toolbar's template
 - [ ] Clicking a picture in a rendered document on a touchscreen: the lightbox is only checked with a mouse; pinch-to-zoom in it is untested
 - [ ] Phase 3: math and Mermaid (their source is shown until then)
 - [ ] Phase 4: Live view

@@ -44,6 +44,7 @@ mod properties;
 mod renderer;
 mod settings;
 mod sidebar;
+mod system_clipboard;
 mod system_theme;
 mod tab;
 mod tab_windows;

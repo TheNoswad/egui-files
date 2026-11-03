@@ -65,26 +65,6 @@ pub fn link_to(dir: &Path, file: &Path) -> String {
     link.join("/")
 }
 
-/// A name that isn't taken in `dir`: `a.png`, then `a-1.png`, and so on.
-fn free_name(dir: &Path, name: &str) -> PathBuf {
-    let path = dir.join(name);
-    if !disk::path_exists(&path) {
-        return path;
-    }
-    let as_path = Path::new(name);
-    let stem = as_path
-        .file_stem()
-        .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
-    let extension = as_path
-        .extension()
-        .map(|e| format!(".{}", e.to_string_lossy()))
-        .unwrap_or_default();
-    (1..)
-        .map(|n| dir.join(format!("{stem}-{n}{extension}")))
-        .find(|path| !disk::path_exists(path))
-        .expect("a free name, among so many")
-}
-
 /// Where a document keeps its pictures: `folder` in the document's own folder.
 /// A name that climbs out isn't taken: settings shouldn't write elsewhere.
 fn pictures_dir(dir: &Path, folder: &str) -> PathBuf {
@@ -114,7 +94,7 @@ pub fn markdown_for(dir: &Path, folder: &str, files: &[PathBuf]) -> io::Result<S
             } else {
                 let to = pictures_dir(dir, folder);
                 disk::create_dir_all(&to)?;
-                let path = free_name(&to, &name);
+                let path = crate::system_clipboard::free_name(&to, &name);
                 disk::copy(file, &path)?;
                 path
             };
@@ -136,7 +116,6 @@ fn escape(text: &str) -> String {
 }
 
 /// Saves a pasted picture, and returns the markdown for it.
-#[cfg(any(test, not(any(target_os = "android", target_arch = "wasm32"))))]
 pub fn save_pasted(
     dir: &Path,
     folder: &str,
@@ -144,29 +123,9 @@ pub fn save_pasted(
     height: u32,
     rgba: Vec<u8>,
 ) -> io::Result<String> {
-    let image = image::RgbaImage::from_raw(width, height, rgba)
-        .ok_or_else(|| io::Error::other("the picture on the clipboard is malformed"))?;
-    let mut png = Vec::new();
-    image
-        .write_to(&mut io::Cursor::new(&mut png), image::ImageFormat::Png)
-        .map_err(io::Error::other)?;
     let to = pictures_dir(dir, folder);
-    disk::create_dir_all(&to)?;
-    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
-    let path = free_name(&to, &format!("pasted-{stamp}.png"));
-    disk::write(&path, png)?;
+    let path = crate::system_clipboard::save_picture(&to, width, height, rgba)?;
     Ok(format!("![pasted image]({})", link_to(dir, &path)))
-}
-
-/// The picture on the system's clipboard, as size and RGBA bytes.
-#[cfg(not(any(target_os = "android", target_arch = "wasm32")))]
-pub fn clipboard_picture() -> Option<(u32, u32, Vec<u8>)> {
-    let image = arboard::Clipboard::new().ok()?.get_image().ok()?;
-    Some((
-        u32::try_from(image.width).ok()?,
-        u32::try_from(image.height).ok()?,
-        image.bytes.into_owned(),
-    ))
 }
 
 #[cfg(test)]

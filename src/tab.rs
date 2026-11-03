@@ -724,9 +724,11 @@ impl BrowserTab {
                     egui::Event::Copy if shift => actions.push(Action::Compress),
                     egui::Event::Copy => actions.push(Action::Copy),
                     egui::Event::Cut => actions.push(Action::Cut),
-                    egui::Event::Paste(_) => actions.push(Action::Paste),
                     _ => {}
                 }
+            }
+            if crate::system_clipboard::paste_pressed(i) {
+                actions.push(Action::Paste);
             }
         });
     }
@@ -1566,8 +1568,8 @@ impl BrowserTab {
                     cut: matches!(action, Action::Cut),
                 });
             }
-            Action::Paste => paste(shared, self.path.clone()),
-            Action::PasteInto(dest) => paste(shared, dest),
+            Action::Paste => self.error = paste(shared, self.path.clone()),
+            Action::PasteInto(dest) => self.error = paste(shared, dest),
             Action::CopyFolderPath => ctx.copy_text(self.path.display().to_string()),
             Action::StartJob(job) => shared.jobs.start(job),
             Action::SetSelection(selection) => {
@@ -1650,17 +1652,47 @@ impl BrowserTab {
     }
 }
 
-/// Starts copying or moving the clipboard contents into `dest`.
-fn paste(shared: &mut Shared, dest: PathBuf) {
-    let Some(clipboard) = &shared.clipboard else {
-        return;
-    };
-    let sources = clipboard.paths.clone();
-    if clipboard.cut {
-        shared.clipboard = None;
-        shared.jobs.start(JobKind::Move { sources, dest });
+/// Starts copying or moving the clipboard contents into `dest`, or saves the
+/// picture on it there. Returns what went wrong, if anything did.
+fn paste(shared: &mut Shared, dest: PathBuf) -> Option<String> {
+    use crate::system_clipboard::{self, Pasted};
+    // On Windows, files copied here are on the system's clipboard too, marked
+    // if they were cut, and come back as `shared.clipboard` (`file_clipboard`).
+    // Elsewhere only their paths are, as text: so if there's anything else on
+    // it, it was copied since, and is what's meant.
+    let ours_first = cfg!(windows) && shared.clipboard.is_some();
+    let system = if ours_first {
+        None
     } else {
-        shared.jobs.start(JobKind::Copy { sources, dest });
+        system_clipboard::read()
+    };
+    match system {
+        Some(Pasted::Files(sources)) => {
+            shared.clipboard = None;
+            shared.jobs.start(JobKind::Copy { sources, dest });
+            None
+        }
+        Some(Pasted::Picture {
+            width,
+            height,
+            rgba,
+        }) => {
+            shared.clipboard = None;
+            system_clipboard::save_picture(&dest, width, height, rgba)
+                .err()
+                .map(|err| format!("Could not save the picture: {err}"))
+        }
+        None => {
+            let clipboard = shared.clipboard.as_ref()?;
+            let sources = clipboard.paths.clone();
+            if clipboard.cut {
+                shared.clipboard = None;
+                shared.jobs.start(JobKind::Move { sources, dest });
+            } else {
+                shared.jobs.start(JobKind::Copy { sources, dest });
+            }
+            None
+        }
     }
 }
 

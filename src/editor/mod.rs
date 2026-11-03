@@ -521,8 +521,8 @@ enum Command {
     Table(TableAction),
     /// Text that looks like an address, pasted.
     PasteUrl(String),
-    /// Ctrl+V with no text on the clipboard.
-    PasteImage,
+    /// Files or a picture on the clipboard, with the text that came with them.
+    PasteClipboard(Option<String>),
 }
 
 impl EditorTab {
@@ -769,6 +769,7 @@ impl EditorTab {
                 text_focused && editable && can_edit_text,
                 is_markdown,
                 self.md.view.lightbox_is_open(),
+                is_markdown && editable && !ctx.egui_wants_keyboard_input(),
             )
         } else {
             Vec::new()
@@ -784,6 +785,7 @@ impl EditorTab {
                         | Command::Back
                         | Command::Forward
                         | Command::ToggleOutline
+                        | Command::PasteClipboard(_)
                         | Command::Find { .. }
                         | Command::FindNext { .. }
                 )
@@ -1314,7 +1316,7 @@ impl EditorTab {
                     .unwrap_or_else(|| ops::insert(&buffer.text, selection, &pasted));
                 self.apply_edit(ctx, edit);
             }
-            Command::PasteImage => self.paste_picture(ctx),
+            Command::PasteClipboard(text) => self.paste_from_clipboard(ctx, text),
             Command::Find { replace } => {
                 // What's selected in the source isn't what's being read.
                 let selected = (selection.start != selection.end
@@ -1476,26 +1478,47 @@ impl EditorTab {
         self.focus_text = true;
     }
 
-    /// Saves the picture on the clipboard beside the document and adds it.
-    fn paste_picture(&mut self, ctx: &Context) {
-        #[cfg(not(any(target_os = "android", target_arch = "wasm32")))]
-        {
-            let Some((width, height, rgba)) = markdown::assets::clipboard_picture() else {
-                return;
-            };
-            let dir = self.dir().unwrap_or_default();
-            let folder = self.md.image_folder.clone();
-            match markdown::assets::save_pasted(&dir, &folder, width, height, rgba) {
-                Ok(text) => self.insert_block(ctx, &text),
-                Err(err) => {
-                    if let Doc::Ready(buffer) = &mut self.doc {
-                        buffer.error = Some(format!("Could not save the picture: {err}"));
+    /// Puts what's on the clipboard into the document: copied files, or a
+    /// picture, saved beside it. Failing that, the text it came with.
+    fn paste_from_clipboard(&mut self, ctx: &Context, text: Option<String>) {
+        use crate::system_clipboard::{self, Pasted};
+        let problem = match system_clipboard::read() {
+            Some(Pasted::Files(files)) => {
+                self.drop_files(ctx, files);
+                None
+            }
+            Some(Pasted::Picture {
+                width,
+                height,
+                rgba,
+            }) => {
+                let dir = self.dir().unwrap_or_default();
+                let folder = self.md.image_folder.clone();
+                match markdown::assets::save_pasted(&dir, &folder, width, height, rgba) {
+                    Ok(markdown) => {
+                        self.insert_block(ctx, &markdown);
+                        None
                     }
+                    Err(err) => Some(format!("Could not save the picture: {err}")),
                 }
             }
+            None => match (text, &self.doc) {
+                // Only a text field can take it, at a cursor.
+                (Some(text), Doc::Ready(buffer)) if self.shown_mode != Mode::Preview => {
+                    let selection = self.selection(ctx);
+                    let edit = ops::insert(&buffer.text, selection, &text);
+                    self.apply_edit(ctx, edit);
+                    None
+                }
+                (Some(_), _) => {
+                    Some("Text can't be pasted while reading: open the source.".to_owned())
+                }
+                (None, _) => Some("The clipboard has no picture or files.".to_owned()),
+            },
+        };
+        if let (Some(problem), Doc::Ready(buffer)) = (problem, &mut self.doc) {
+            buffer.error = Some(problem);
         }
-        #[cfg(any(target_os = "android", target_arch = "wasm32"))]
-        let _ = ctx;
     }
 
     /// Replaces the current match and moves on, or replaces every match.
@@ -1579,6 +1602,7 @@ fn shortcuts(
     text_focused: bool,
     is_markdown: bool,
     lightbox_open: bool,
+    takes_paste: bool,
 ) -> Vec<Command> {
     use crate::keymap::Command as Global;
     let cmd = Modifiers::COMMAND;
@@ -1643,11 +1667,24 @@ fn shortcuts(
         if !lightbox_open {
             key(Modifiers::NONE, Key::Escape, Command::CloseBars);
         }
+        // With no text field to take it, it's for the document as a whole.
+        if takes_paste && !text_focused && crate::system_clipboard::paste_pressed(i) {
+            let pasted = i.events.iter().find_map(|event| match event {
+                egui::Event::Paste(pasted) if !pasted.is_empty() => Some(pasted.clone()),
+                _ => None,
+            });
+            commands.push(Command::PasteClipboard(pasted));
+        }
         if text_focused {
             // Instead of the text field inserting a plain tab or line break.
             i.events.retain(|event| match event {
                 egui::Event::Paste(pasted) if is_markdown && looks_like_address(pasted) => {
                     commands.push(Command::PasteUrl(pasted.clone()));
+                    false
+                }
+                // Copied files can come as text naming them.
+                egui::Event::Paste(pasted) if is_markdown && pasted.starts_with("file://") => {
+                    commands.push(Command::PasteClipboard(Some(pasted.clone())));
                     false
                 }
                 egui::Event::Key {
@@ -1657,7 +1694,7 @@ fn shortcuts(
                     modifiers,
                     ..
                 } if is_markdown && modifiers.command => {
-                    commands.push(Command::PasteImage);
+                    commands.push(Command::PasteClipboard(None));
                     false
                 }
                 egui::Event::Key {
@@ -2806,6 +2843,94 @@ mod tests {
                 h.tab.is_dirty()
             }
         );
+    }
+
+    fn on_clipboard(pasted: crate::system_clipboard::Pasted) {
+        crate::system_clipboard::TEST_CLIPBOARD.with(|c| *c.borrow_mut() = Some(pasted));
+    }
+
+    fn ctrl_v() -> Event {
+        press(Key::V, Modifiers::COMMAND)
+    }
+
+    #[test]
+    fn a_copied_file_pastes_into_a_document_being_read() {
+        let mut h = Harness::with_file("md-paste-file", "a.md", "text\n");
+        h.tab.mode = Mode::Preview;
+        h.frame(vec![]);
+        h.frame(vec![]);
+        let elsewhere = std::env::temp_dir().join(format!("elsewhere-{}.jpg", std::process::id()));
+        disk::write(&elsewhere, "pixels").unwrap();
+        on_clipboard(crate::system_clipboard::Pasted::Files(vec![
+            elsewhere.clone(),
+        ]));
+        // Windows reports it as an event instead.
+        let event = if cfg!(windows) {
+            Event::Paste(String::new())
+        } else {
+            ctrl_v()
+        };
+        h.frame(vec![event]);
+        h.frame(vec![]);
+        let name = elsewhere
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            text_of(&h).contains(&format!("]({name})")),
+            "{}",
+            text_of(&h)
+        );
+        assert!(disk::path_exists(h.dir.join(&name)), "copied in beside it");
+        let _ = disk::remove_file(&elsewhere);
+    }
+
+    #[test]
+    fn a_pasted_picture_is_saved_beside_the_source() {
+        let mut h = Harness::with_file("md-paste-picture", "a.md", "text\n");
+        h.tab.mode = Mode::Source;
+        h.frame(vec![]);
+        select(&mut h, 4..4);
+        on_clipboard(crate::system_clipboard::Pasted::Picture {
+            width: 1,
+            height: 1,
+            rgba: vec![1, 2, 3, 255],
+        });
+        h.frame(vec![ctrl_v()]);
+        h.frame(vec![]);
+        assert!(
+            text_of(&h).contains("![pasted image](pasted-"),
+            "{}",
+            text_of(&h)
+        );
+    }
+
+    #[test]
+    fn files_named_in_pasted_text_are_pasted_as_files() {
+        let mut h = Harness::with_file("md-paste-uri", "a.md", "text\n");
+        h.tab.mode = Mode::Source;
+        h.frame(vec![]);
+        select(&mut h, 4..4);
+        let file = h.dir.join("p.png");
+        disk::write(&file, "pixels").unwrap();
+        on_clipboard(crate::system_clipboard::Pasted::Files(vec![file]));
+        h.frame(vec![Event::Paste("file:///somewhere/p.png".into())]);
+        h.frame(vec![]);
+        assert!(text_of(&h).contains("![p](p.png)"), "{}", text_of(&h));
+        assert!(!text_of(&h).contains("file://"));
+    }
+
+    #[test]
+    fn an_empty_clipboard_says_so() {
+        let mut h = Harness::with_file("md-paste-none", "a.md", "text\n");
+        h.tab.mode = Mode::Source;
+        h.frame(vec![]);
+        select(&mut h, 0..0);
+        h.frame(vec![ctrl_v()]);
+        h.frame(vec![]);
+        assert_eq!(text_of(&h), "text\n");
+        assert!(matches!(&h.tab.doc, Doc::Ready(b) if b.error.is_some()));
     }
 
     #[test]
