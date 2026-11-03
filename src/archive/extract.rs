@@ -31,7 +31,7 @@ impl Drop for Staging {
     }
 }
 
-pub fn extract(job: ExtractJob, p: &Progress) {
+pub async fn extract(job: ExtractJob, p: &Progress) {
     let ExtractJob {
         archive,
         dest,
@@ -65,14 +65,19 @@ pub fn extract(job: ExtractJob, p: &Progress) {
             selection.as_ref(),
             password.as_deref(),
             p,
-        ) {
+        )
+        .await
+        {
             Ok(()) => break,
             Err(err @ (Error::NeedsPassword | Error::WrongPassword)) => {
                 let wrong = matches!(err, Error::WrongPassword);
-                let Some(Answer::Password(answer)) = p.ask(Prompt::Password {
-                    archive: archive.clone(),
-                    wrong,
-                }) else {
+                let Some(Answer::Password(answer)) = p
+                    .ask(Prompt::Password {
+                        archive: archive.clone(),
+                        wrong,
+                    })
+                    .await
+                else {
                     return;
                 };
                 password = Some(answer);
@@ -108,7 +113,7 @@ pub fn extract(job: ExtractJob, p: &Progress) {
         }
         ExtractMode::Smart if children.len() == 1 => {
             let child = &children[0];
-            place(child, &dest.join(name(child)), &mut resolver, p)
+            place(child, &dest.join(name(child)), &mut resolver, p).await
         }
         ExtractMode::Smart => {
             let folder = unique_path(&dest, OsStr::new(&stem(&archive)));
@@ -120,16 +125,16 @@ pub fn extract(job: ExtractJob, p: &Progress) {
                 move_staging(&staging.0, &folder, p)
             } else {
                 for child in &children {
-                    place(child, &folder.join(name(child)), &mut resolver, p);
+                    place(child, &folder.join(name(child)), &mut resolver, p).await;
                 }
                 Some(folder)
             }
         }
         ExtractMode::Into => {
-            let mut placed: Vec<_> = children
-                .iter()
-                .filter_map(|child| place(child, &dest.join(name(child)), &mut resolver, p))
-                .collect();
+            let mut placed = Vec::new();
+            for child in &children {
+                placed.extend(place(child, &dest.join(name(child)), &mut resolver, p).await);
+            }
             placed.sort();
             placed.into_iter().next()
         }
@@ -164,29 +169,35 @@ fn move_staging(staging: &Path, folder: &Path, p: &Progress) -> Option<PathBuf> 
 
 /// Moves `src` to `dst`, merging folders and asking about files that exist.
 /// Returns where it ended up, or `None` if it was skipped or failed.
-fn place(src: &Path, dst: &Path, resolver: &mut Resolver, p: &Progress) -> Option<PathBuf> {
+async fn place(src: &Path, dst: &Path, resolver: &mut Resolver, p: &Progress) -> Option<PathBuf> {
     if p.cancelled() {
         return None;
     }
     let Ok(existing) = disk::symlink_metadata(dst) else {
-        return rename(src, dst, p).then(|| dst.to_path_buf());
+        return rename(src, dst, p).await.then(|| dst.to_path_buf());
     };
     let src_is_dir = disk::symlink_metadata(src).is_ok_and(|m| m.is_dir());
     if src_is_dir && existing.is_dir() {
         match disk::read_dir(src) {
             Ok(entries) => {
                 for entry in entries.flatten() {
-                    place(&entry.path(), &dst.join(entry.file_name()), resolver, p);
+                    Box::pin(place(
+                        &entry.path(),
+                        &dst.join(entry.file_name()),
+                        resolver,
+                        p,
+                    ))
+                    .await;
                 }
             }
             Err(err) => p.error(src, err),
         }
         return Some(dst.to_path_buf());
     }
-    match resolver.choose(src, dst, p)? {
+    match resolver.choose(src, dst, p).await? {
         ConflictChoice::Skip => None,
         ConflictChoice::Overwrite => match jobs::remove_all(dst) {
-            Ok(()) => rename(src, dst, p).then(|| dst.to_path_buf()),
+            Ok(()) => rename(src, dst, p).await.then(|| dst.to_path_buf()),
             Err(err) => {
                 p.error(dst, err);
                 None
@@ -194,19 +205,19 @@ fn place(src: &Path, dst: &Path, resolver: &mut Resolver, p: &Progress) -> Optio
         },
         ConflictChoice::KeepBoth => {
             let other = unique_path(dst.parent()?, name(dst));
-            rename(src, &other, p).then_some(other)
+            rename(src, &other, p).await.then_some(other)
         }
     }
 }
 
 /// Renames, or copies when the destination is on another drive (a mount
 /// point inside the destination).
-fn rename(src: &Path, dst: &Path, p: &Progress) -> bool {
+async fn rename(src: &Path, dst: &Path, p: &Progress) -> bool {
     match disk::rename(src, dst) {
         Ok(()) => true,
         Err(err) if err.kind() == io::ErrorKind::CrossesDevices => {
             let mut buffer = vec![0; 1 << 20];
-            jobs::copy_tree(src, dst, p, &mut buffer)
+            jobs::copy_tree(src, dst, p, &mut buffer).await
         }
         Err(err) => {
             p.error(dst, err);

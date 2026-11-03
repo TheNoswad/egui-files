@@ -36,7 +36,7 @@ struct Item {
     meta: Metadata,
 }
 
-pub fn compress(job: CompressJob, p: &Progress) {
+pub async fn compress(job: CompressJob, p: &Progress) {
     let CompressJob {
         sources,
         dest,
@@ -61,15 +61,16 @@ pub fn compress(job: CompressJob, p: &Progress) {
         return;
     }
     let password = password.filter(|pw| !pw.is_empty() && format.supports_password());
-    let result = File::create_new(&dest).and_then(|file| {
+    let result = async {
+        let file = File::create_new(&dest)?;
         let out = BufWriter::with_capacity(1 << 20, file);
         match format {
-            Format::Zip => write_zip(out, &items, level, password.as_deref(), p),
+            Format::Zip => write_zip(out, &items, level, password.as_deref(), p).await,
             Format::SevenZ => write_7z(out, &items, level, password.as_deref(), encrypt_names, p),
-            Format::Tar => finish(write_tar(out, &items, p)?),
+            Format::Tar => finish(write_tar(out, &items, p).await?),
             Format::TarGz => {
                 let gz = flate2::write::GzEncoder::new(out, flate2::Compression::new(level));
-                finish(write_tar(gz, &items, p)?.finish()?)
+                finish(write_tar(gz, &items, p).await?.finish()?)
             }
             Format::TarXz => {
                 let mut options = lzma_rust2::XzOptions::with_preset(level);
@@ -80,7 +81,7 @@ pub fn compress(job: CompressJob, p: &Progress) {
                 // The browser can't start the threads.
                 #[cfg(target_arch = "wasm32")]
                 let xz = lzma_rust2::XzWriter::new(out, options)?;
-                finish(write_tar(xz, &items, p)?.finish()?)
+                finish(write_tar(xz, &items, p).await?.finish()?)
             }
             #[cfg(target_arch = "wasm32")]
             Format::TarZst => Err(io::Error::new(
@@ -91,12 +92,12 @@ pub fn compress(job: CompressJob, p: &Progress) {
             Format::TarZst => {
                 let mut zst = zstd::Encoder::new(out, zstd_level(level))?;
                 zst.multithread(threads())?;
-                finish(write_tar(zst, &items, p)?.finish()?)
+                finish(write_tar(zst, &items, p).await?.finish()?)
             }
             Format::TarBz2 => {
                 let bz =
                     bzip2::write::BzEncoder::new(out, bzip2::Compression::new(level.clamp(1, 9)));
-                finish(write_tar(bz, &items, p)?.finish()?)
+                finish(write_tar(bz, &items, p).await?.finish()?)
             }
             Format::Rar | Format::Gz | Format::Xz | Format::Zst | Format::Bz2 => {
                 Err(io::Error::new(
@@ -105,7 +106,8 @@ pub fn compress(job: CompressJob, p: &Progress) {
                 ))
             }
         }
-    });
+    }
+    .await;
     match result {
         Ok(()) if !p.cancelled() => p.set_outcome(Outcome::Reveal(dest)),
         Ok(()) => {
@@ -241,7 +243,7 @@ fn zip_time(time: Option<SystemTime>) -> zip::DateTime {
     .unwrap_or_default()
 }
 
-fn write_zip<W: Write + io::Seek>(
+async fn write_zip<W: Write + io::Seek>(
     out: W,
     items: &[Item],
     level: u32,
@@ -258,6 +260,7 @@ fn write_zip<W: Write + io::Seek>(
             .compression_level(Some(level.into()))
     };
     for item in items {
+        p.pause().await;
         let options = base
             .last_modified_time(zip_time(item.meta.modified().ok()))
             .unix_permissions(mode(&item.meta) & 0o7777);
@@ -320,10 +323,11 @@ fn set_metadata(header: &mut tar::Header, meta: &Metadata) {
     }
 }
 
-fn write_tar<W: Write>(out: W, items: &[Item], p: &Progress) -> io::Result<W> {
+async fn write_tar<W: Write>(out: W, items: &[Item], p: &Progress) -> io::Result<W> {
     let mut tar = tar::Builder::new(out);
     tar.follow_symlinks(false);
     for item in items {
+        p.pause().await;
         let mut header = tar::Header::new_gnu();
         set_metadata(&mut header, &item.meta);
         match &item.kind {

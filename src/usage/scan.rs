@@ -884,62 +884,78 @@ impl Scan {
         }
         let mut queue = self.queue.lock().unwrap();
         queue.work.extend(work);
-        let wanted = std::thread::available_parallelism()
-            .map_or(4, |n| n.get())
-            .clamp(2, 8);
-        while queue.workers < wanted {
-            queue.workers += 1;
-            let scan = self.clone();
-            let spawned = std::thread::Builder::new()
-                .name("disk-usage".into())
-                .spawn(move || scan.work());
-            if spawned.is_err() {
-                queue.workers -= 1;
-                break;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let wanted = std::thread::available_parallelism()
+                .map_or(4, |n| n.get())
+                .clamp(2, 8);
+            while queue.workers < wanted {
+                queue.workers += 1;
+                let scan = self.clone();
+                let spawned = std::thread::Builder::new()
+                    .name("disk-usage".into())
+                    .spawn(move || while scan.work() {});
+                if spawned.is_err() {
+                    queue.workers -= 1;
+                    break;
+                }
             }
+        }
+        // The browser has no threads: one worker, sharing the page's, which
+        // never finds the queue empty with another still busy.
+        #[cfg(target_arch = "wasm32")]
+        if queue.workers == 0 {
+            queue.workers = 1;
+            let scan = self.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                while scan.work() {
+                    crate::background::pause().await;
+                }
+            });
         }
         self.wake.notify_all();
     }
 
-    fn work(&self) {
-        loop {
-            let job = {
-                let mut queue = self.queue.lock().unwrap();
-                loop {
-                    if self.cancelled() {
-                        break None;
-                    }
-                    if let Some(job) = queue.work.pop() {
-                        queue.busy += 1;
-                        break Some(job);
-                    }
-                    if queue.busy == 0 {
-                        break None;
-                    }
-                    queue = self.wake.wait(queue).unwrap();
-                }
-            };
-            let Some(job) = job else {
-                let mut queue = self.queue.lock().unwrap();
-                queue.workers -= 1;
-                if queue.workers == 0 {
-                    self.finish_timing();
-                }
-                self.wake.notify_all();
-                self.ctx.request_repaint();
-                return;
-            };
-            let more = match job {
-                Work::Scan(id, path) => self.scan_dir(id, &path),
-                Work::Refresh(id, path) => self.refresh_dir(id, &path),
-            };
+    /// Does one piece of work, waiting for some if others are still busy.
+    /// False once there's none left, when this worker has ended.
+    fn work(&self) -> bool {
+        let job = {
             let mut queue = self.queue.lock().unwrap();
-            queue.busy -= 1;
-            queue.work.extend(more);
+            loop {
+                if self.cancelled() {
+                    break None;
+                }
+                if let Some(job) = queue.work.pop() {
+                    queue.busy += 1;
+                    break Some(job);
+                }
+                if queue.busy == 0 {
+                    break None;
+                }
+                queue = self.wake.wait(queue).unwrap();
+            }
+        };
+        let Some(job) = job else {
+            let mut queue = self.queue.lock().unwrap();
+            queue.workers -= 1;
+            if queue.workers == 0 {
+                self.finish_timing();
+            }
             self.wake.notify_all();
-            drop(queue);
-            self.ctx.request_repaint_after(Duration::from_millis(100));
-        }
+            self.ctx.request_repaint();
+            return false;
+        };
+        let more = match job {
+            Work::Scan(id, path) => self.scan_dir(id, &path),
+            Work::Refresh(id, path) => self.refresh_dir(id, &path),
+        };
+        let mut queue = self.queue.lock().unwrap();
+        queue.busy -= 1;
+        queue.work.extend(more);
+        self.wake.notify_all();
+        drop(queue);
+        self.ctx.request_repaint_after(Duration::from_millis(100));
+        true
     }
 
     fn scan_dir(&self, id: u32, path: &Path) -> Vec<Work> {

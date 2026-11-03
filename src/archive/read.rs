@@ -197,7 +197,7 @@ fn single_file_size(path: &Path, format: Format) -> Option<u64> {
 // Unpacking
 
 /// Unpacks `archive` into `root`, which should be empty.
-pub fn unpack(
+pub async fn unpack(
     archive: &Path,
     root: &Path,
     selection: Option<&Selection>,
@@ -217,7 +217,7 @@ pub fn unpack(
     let result = match format {
         Format::Zip => {
             p.add_totals(size, 0);
-            unpack_zip(archive, password, &mut out)
+            unpack_zip(archive, password, &mut out).await
         }
         Format::SevenZ => {
             p.add_totals(size, 0);
@@ -239,7 +239,7 @@ pub fn unpack(
         }
         Format::Tar | Format::TarGz | Format::TarXz | Format::TarZst | Format::TarBz2 => {
             p.add_totals(size, 0);
-            unpack_tar(archive, format, &mut out)
+            unpack_tar(archive, format, &mut out).await
         }
     };
     let result = result.and_then(|()| out.finish());
@@ -425,10 +425,15 @@ fn make_symlink(target: &Path, path: &Path) -> io::Result<()> {
     std::os::windows::fs::symlink_file(target, path)
 }
 
-fn unpack_zip(path: &Path, password: Option<&str>, out: &mut Unpacker) -> Result<(), Error> {
+async fn unpack_zip(
+    path: &Path,
+    password: Option<&str>,
+    out: &mut Unpacker<'_>,
+) -> Result<(), Error> {
     let mut archive = zip::ZipArchive::new(open(path, Some(out.p))?).map_err(zip_error)?;
     out.p.add_totals(0, archive.len() as u64);
     for i in 0..archive.len() {
+        out.p.pause().await;
         let encrypted = archive.by_index_raw(i).map_err(zip_error)?.encrypted();
         let mut file = if encrypted {
             let password = password.ok_or(Error::NeedsPassword)?;
@@ -476,9 +481,10 @@ fn decoder<'a, R: Read + 'a>(format: Format, inner: R) -> Result<Box<dyn Read + 
     })
 }
 
-fn unpack_tar(path: &Path, format: Format, out: &mut Unpacker) -> Result<(), Error> {
+async fn unpack_tar(path: &Path, format: Format, out: &mut Unpacker<'_>) -> Result<(), Error> {
     let mut archive = tar::Archive::new(decoder(format, open(path, Some(out.p))?)?);
     for entry in archive.entries()? {
+        out.p.pause().await;
         let mut entry = entry?;
         // The total isn't known up front, so it grows along.
         out.p.add_totals(0, 1);

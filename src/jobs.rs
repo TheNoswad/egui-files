@@ -1,6 +1,11 @@
 //! Long-running file operations (copy, move, trash, archives) on background
 //! threads, with progress, cancellation, questions for the user, and a status
 //! bar UI.
+//!
+//! Jobs are async so the browser, which has no threads to give them, can run
+//! them on the page's: they wait for answers there, and let it draw now and
+//! then ([`Progress::pause`]). Everywhere else they have a thread, nothing ever
+//! suspends, and [`block_on`] just runs them.
 
 // Android has no trash of its own; see android/trash.
 #[cfg(any(target_os = "android", target_arch = "wasm32"))]
@@ -28,6 +33,18 @@ use crate::{
 };
 
 const BUFFER_SIZE: usize = 1 << 20;
+
+/// Runs a job to the end on this thread. Nothing suspends outside the browser:
+/// questions wait on the thread instead, and pausing does nothing.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn block_on<T>(future: impl Future<Output = T>) -> T {
+    use std::task::{Context, Poll, Waker};
+    let future = std::pin::pin!(future);
+    match future.poll(&mut Context::from_waker(Waker::noop())) {
+        Poll::Ready(value) => value,
+        Poll::Pending => unreachable!("only the browser's jobs suspend"),
+    }
+}
 const MAX_ERRORS: usize = 50;
 /// How long successful jobs stay in the bar after finishing.
 const LINGER: Duration = Duration::from_secs(4);
@@ -149,7 +166,7 @@ pub(crate) struct Resolver {
 impl Resolver {
     /// What to do with `incoming` where `existing` is; `None` if the user
     /// cancelled.
-    pub(crate) fn choose(
+    pub(crate) async fn choose(
         &mut self,
         incoming: &Path,
         existing: &Path,
@@ -163,10 +180,12 @@ impl Resolver {
         if let Some(choice) = *always {
             return Some(choice);
         }
-        let Answer::Conflict { choice, all } = p.ask(Prompt::Conflict {
-            incoming: incoming.to_path_buf(),
-            existing: existing.to_path_buf(),
-        })?
+        let Answer::Conflict { choice, all } = p
+            .ask(Prompt::Conflict {
+                incoming: incoming.to_path_buf(),
+                existing: existing.to_path_buf(),
+            })
+            .await?
         else {
             return None;
         };
@@ -235,7 +254,7 @@ impl Progress {
 
     /// Asks the user and waits for the answer; `None` if the job was cancelled.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn ask(&self, prompt: Prompt) -> Option<Answer> {
+    pub(crate) async fn ask(&self, prompt: Prompt) -> Option<Answer> {
         *self.prompt.lock().expect("prompt poisoned") = Some(prompt);
         let mut answer = self.answer.lock().expect("answer poisoned");
         loop {
@@ -255,17 +274,31 @@ impl Progress {
         }
     }
 
-    /// The browser runs jobs on the UI thread, which can't wait for the user
-    /// there: conflicts keep both, which loses nothing, and passwords cancel.
+    /// Asks the user and waits for the answer; `None` if the job was cancelled.
     #[cfg(target_arch = "wasm32")]
-    pub(crate) fn ask(&self, prompt: Prompt) -> Option<Answer> {
-        match prompt {
-            Prompt::Conflict { .. } => Some(Answer::Conflict {
-                choice: ConflictChoice::KeepBoth,
-                all: false,
-            }),
-            Prompt::Password { .. } => None,
+    pub(crate) async fn ask(&self, prompt: Prompt) -> Option<Answer> {
+        *self.prompt.lock().expect("prompt poisoned") = Some(prompt);
+        loop {
+            let answer = self.answer.lock().expect("answer poisoned").take();
+            if answer.is_some() {
+                return answer;
+            }
+            if self.cancelled() {
+                *self.prompt.lock().expect("prompt poisoned") = None;
+                return None;
+            }
+            crate::background::sleep(50).await;
         }
+    }
+
+    /// Lets others run, if it's been a while. Nothing to do with a thread.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) async fn pause(&self) {}
+
+    /// Lets the page draw and take input, if it's been most of a frame.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) async fn pause(&self) {
+        crate::background::pause().await;
     }
 
     fn reply(&self, answer: Answer) {
@@ -377,8 +410,8 @@ impl Jobs {
         let title = kind.title();
         let worker_progress = progress.clone();
         let ctx = self.ctx.clone();
-        let work = move || {
-            run(kind, &worker_progress);
+        let work = move || async move {
+            run(kind, &worker_progress).await;
             worker_progress.finished.store(true, Relaxed);
             ctx.request_repaint();
         };
@@ -388,12 +421,12 @@ impl Jobs {
         let handle = Some(
             std::thread::Builder::new()
                 .name("file-job".to_owned())
-                .spawn(work)
+                .spawn(move || block_on(work()))
                 .expect("failed to spawn file job thread"),
         );
         #[cfg(target_arch = "wasm32")]
         let handle = {
-            crate::background::spawn("file-job", work);
+            wasm_bindgen_futures::spawn_local(work());
             None
         };
         self.jobs.push(Job {
@@ -686,7 +719,7 @@ impl Job {
 // ---------------------------------------------------------------------------
 // Worker
 
-fn run(kind: JobKind, p: &Progress) {
+async fn run(kind: JobKind, p: &Progress) {
     match kind {
         JobKind::Copy { sources, dest } => {
             if let Err(err) = check_not_into_itself(&sources, &dest) {
@@ -703,8 +736,8 @@ fn run(kind: JobKind, p: &Progress) {
                 let target = dest.join(name);
                 if target == *src {
                     // Pasted where it came from: a copy beside it.
-                    copy_tree(src, &unique_path(&dest, name), p, &mut paste.buffer);
-                } else if !paste.place(src, &target) {
+                    copy_tree(src, &unique_path(&dest, name), p, &mut paste.buffer).await;
+                } else if !paste.place(src, &target).await {
                     return;
                 }
             }
@@ -722,13 +755,14 @@ fn run(kind: JobKind, p: &Progress) {
                 };
                 if src.parent() != Some(dest.as_path()) {
                     p.set_current(src);
-                    if !paste.place(src, &dest.join(name)) {
+                    if !paste.place(src, &dest.join(name)).await {
                         return;
                     }
                 }
                 p.done_items.fetch_add(1, Relaxed);
+                p.pause().await;
             }
-            paste.finish_moves();
+            paste.finish_moves().await;
         }
         JobKind::Restore { items } => {
             p.total_items.store(items.len() as u64, Relaxed);
@@ -742,6 +776,7 @@ fn run(kind: JobKind, p: &Progress) {
                     p.error(&original, restore_error(err));
                 }
                 p.done_items.fetch_add(1, Relaxed);
+                p.pause().await;
             }
         }
         JobKind::Purge { items } => {
@@ -756,6 +791,7 @@ fn run(kind: JobKind, p: &Progress) {
                     p.error(&original, err);
                 }
                 p.done_items.fetch_add(1, Relaxed);
+                p.pause().await;
             }
         }
         JobKind::Eject { drive, .. } => {
@@ -767,8 +803,8 @@ fn run(kind: JobKind, p: &Progress) {
                 p.error(&drive, err);
             }
         }
-        JobKind::Compress(job) => archive::compress(job, p),
-        JobKind::Extract(job) => archive::extract(job, p),
+        JobKind::Compress(job) => archive::compress(job, p).await,
+        JobKind::Extract(job) => archive::extract(job, p).await,
         JobKind::Trash { paths } => {
             p.total_items.store(paths.len() as u64, Relaxed);
             for path in paths {
@@ -780,20 +816,21 @@ fn run(kind: JobKind, p: &Progress) {
                     p.error(&path, err);
                 }
                 p.done_items.fetch_add(1, Relaxed);
+                p.pause().await;
             }
         }
     }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Transfer {
+pub(crate) enum Transfer {
     Copy,
     Move,
 }
 
 /// Puts pasted (or dropped) items in place, asking about names already
 /// taken.
-struct Paste<'a> {
+pub(crate) struct Paste<'a> {
     how: Transfer,
     p: &'a Progress,
     resolver: Resolver,
@@ -806,7 +843,7 @@ struct Paste<'a> {
 }
 
 impl<'a> Paste<'a> {
-    fn new(how: Transfer, p: &'a Progress) -> Self {
+    pub(crate) fn new(how: Transfer, p: &'a Progress) -> Self {
         Self {
             how,
             p,
@@ -819,36 +856,38 @@ impl<'a> Paste<'a> {
 
     /// Puts `src` at `dst`, asking first if something is there. False once
     /// the job is cancelled.
-    fn place(&mut self, src: &Path, dst: &Path) -> bool {
+    pub(crate) async fn place(&mut self, src: &Path, dst: &Path) -> bool {
         if self.p.cancelled() {
             return false;
         }
         if disk::symlink_metadata(dst).is_err() {
-            self.put(src, dst, None);
+            self.put(src, dst, None).await;
             return true;
         }
         let (Some(dir), Some(name)) = (dst.parent(), dst.file_name()) else {
             return true;
         };
-        let Some(choice) = self.resolver.choose(src, dst, self.p) else {
+        let Some(choice) = self.resolver.choose(src, dst, self.p).await else {
             return false;
         };
         match choice {
             ConflictChoice::Skip => self.skip(src),
-            ConflictChoice::KeepBoth => self.put(src, &unique_path(dir, name), None),
+            ConflictChoice::KeepBoth => self.put(src, &unique_path(dir, name), None).await,
             ConflictChoice::Overwrite if src.starts_with(dst) => {
                 self.p.error(src, "it's inside the folder it would go over");
                 self.skip(src);
             }
-            ConflictChoice::Overwrite if is_dir(src) && is_dir(dst) => return self.merge(src, dst),
+            ConflictChoice::Overwrite if is_dir(src) && is_dir(dst) => {
+                return Box::pin(self.merge(src, dst)).await;
+            }
             // Beside it first, so a failed copy leaves the old one alone.
-            ConflictChoice::Overwrite => self.put(src, &unique_path(dir, name), Some(dst)),
+            ConflictChoice::Overwrite => self.put(src, &unique_path(dir, name), Some(dst)).await,
         }
         true
     }
 
     /// Places what's in folder `src` into folder `dst`.
-    fn merge(&mut self, src: &Path, dst: &Path) -> bool {
+    async fn merge(&mut self, src: &Path, dst: &Path) -> bool {
         let entries = match disk::read_dir(src) {
             Ok(entries) => entries,
             Err(err) => {
@@ -857,7 +896,10 @@ impl<'a> Paste<'a> {
             }
         };
         for entry in entries.flatten() {
-            if !self.place(&entry.path(), &dst.join(entry.file_name())) {
+            if !self
+                .place(&entry.path(), &dst.join(entry.file_name()))
+                .await
+            {
                 return false;
             }
         }
@@ -868,10 +910,10 @@ impl<'a> Paste<'a> {
     }
 
     /// Copies or moves `src` to the free `dst`, then puts it over `replace`.
-    fn put(&mut self, src: &Path, dst: &Path, replace: Option<&Path>) {
+    async fn put(&mut self, src: &Path, dst: &Path, replace: Option<&Path>) {
         match self.how {
             Transfer::Copy => {
-                if copy_tree(src, dst, self.p, &mut self.buffer)
+                if copy_tree(src, dst, self.p, &mut self.buffer).await
                     && let Some(replace) = replace
                 {
                     self.swap(dst, replace);
@@ -918,7 +960,7 @@ impl<'a> Paste<'a> {
 
     /// Copies (then deletes) what couldn't be renamed across drives, and
     /// removes the folders merging emptied.
-    fn finish_moves(mut self) {
+    pub(crate) async fn finish_moves(mut self) {
         let later = std::mem::take(&mut self.later);
         if !later.is_empty() {
             // Re-count progress in terms of the files that need copying.
@@ -927,7 +969,7 @@ impl<'a> Paste<'a> {
                 scan(src, self.p);
             }
             for (src, dst, replace) in later {
-                if !copy_tree(&src, &dst, self.p, &mut self.buffer) {
+                if !copy_tree(&src, &dst, self.p, &mut self.buffer).await {
                     continue;
                 }
                 if let Err(err) = remove_all(&src) {
@@ -991,7 +1033,7 @@ fn measure(path: &Path, p: &Progress) -> (u64, u64) {
 }
 
 /// Recursively copies `src` to `dst`. Returns true if everything was copied.
-pub(crate) fn copy_tree(src: &Path, dst: &Path, p: &Progress, buffer: &mut [u8]) -> bool {
+pub(crate) async fn copy_tree(src: &Path, dst: &Path, p: &Progress, buffer: &mut [u8]) -> bool {
     if p.cancelled() {
         return false;
     }
@@ -1033,7 +1075,13 @@ pub(crate) fn copy_tree(src: &Path, dst: &Path, p: &Progress, buffer: &mut [u8])
         for entry in entries {
             match entry {
                 Ok(entry) => {
-                    ok &= copy_tree(&entry.path(), &dst.join(entry.file_name()), p, buffer)
+                    ok &= Box::pin(copy_tree(
+                        &entry.path(),
+                        &dst.join(entry.file_name()),
+                        p,
+                        buffer,
+                    ))
+                    .await;
                 }
                 Err(err) => {
                     p.error(src, err);
@@ -1044,11 +1092,11 @@ pub(crate) fn copy_tree(src: &Path, dst: &Path, p: &Progress, buffer: &mut [u8])
         let _ = disk::set_permissions(dst, meta.permissions());
         ok
     } else {
-        copy_file(src, dst, &meta, p, buffer)
+        copy_file(src, dst, &meta, p, buffer).await
     }
 }
 
-fn copy_file(
+async fn copy_file(
     src: &Path,
     dst: &Path,
     meta: &disk::Metadata,
@@ -1056,7 +1104,7 @@ fn copy_file(
     buffer: &mut [u8],
 ) -> bool {
     p.set_current(src);
-    let result = (|| -> io::Result<()> {
+    let result = async {
         let mut from = disk::File::open(src)?;
         let mut to = disk::File::create_new(dst)?;
         loop {
@@ -1069,12 +1117,14 @@ fn copy_file(
             }
             to.write_all(&buffer[..n])?;
             p.done_bytes.fetch_add(n as u64, Relaxed);
+            p.pause().await;
         }
         if let Ok(modified) = meta.modified() {
             let _ = to.set_modified(modified);
         }
         to.set_permissions(meta.permissions())
-    })();
+    }
+    .await;
     p.done_items.fetch_add(1, Relaxed);
     match result {
         Ok(()) => true,
@@ -1127,7 +1177,7 @@ mod tests {
         let p = Arc::new(Progress::default());
         let worker = {
             let p = p.clone();
-            std::thread::spawn(move || run(kind, &p))
+            std::thread::spawn(move || block_on(run(kind, &p)))
         };
         let mut asked = Vec::new();
         while !worker.is_finished() {

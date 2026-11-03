@@ -5,7 +5,7 @@ use std::{
 };
 
 use super::*;
-use crate::jobs::{Answer, ConflictChoice, Outcome, Progress, Prompt};
+use crate::jobs::{Answer, ConflictChoice, Outcome, Progress, Prompt, block_on};
 
 fn scratch(name: &str) -> PathBuf {
     let root =
@@ -78,7 +78,7 @@ fn compress_to(
     password: Option<&str>,
 ) -> PathBuf {
     let p = Progress::default();
-    compress(
+    block_on(compress(
         CompressJob {
             sources,
             dest,
@@ -88,7 +88,7 @@ fn compress_to(
             encrypt_names: true,
         },
         &p,
-    );
+    ));
     assert_eq!(p.errors(), Vec::<String>::new());
     match p.take_outcome() {
         Some(Outcome::Reveal(path)) => path,
@@ -104,7 +104,7 @@ fn extract_with(
     let p = std::sync::Arc::new(Progress::default());
     let worker = {
         let p = p.clone();
-        std::thread::spawn(move || extract(job, &p))
+        std::thread::spawn(move || block_on(extract(job, &p)))
     };
     for _ in 0..prompts {
         p.answer(&answer);
@@ -360,10 +360,10 @@ fn trash_after_extract_only_on_success() {
     // Cancelled jobs keep the archive.
     let p = Progress::default();
     p.cancel_for_test();
-    extract(
+    block_on(extract(
         ExtractJob::new(archive.clone(), root.join("d"), ExtractMode::Smart, true),
         &p,
-    );
+    ));
     assert!(archive.exists());
     assert!(!root.join("d/project").exists());
     disk::remove_dir_all(root).unwrap();

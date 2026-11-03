@@ -1091,7 +1091,7 @@ mod tests {
         disk::write(root.join("music/notes.txt"), "notes").unwrap();
         let archive = root.join("music.7z");
         let p = Progress::default();
-        compress(
+        crate::jobs::block_on(compress(
             CompressJob {
                 sources: vec![root.join("music")],
                 dest: archive.clone(),
@@ -1101,7 +1101,7 @@ mod tests {
                 encrypt_names: true,
             },
             &p,
-        );
+        ));
         assert!(archive.is_file());
 
         let ctx = Context::default();
