@@ -58,8 +58,7 @@
 - [ ] Phase 3: math and Mermaid (their source is shown until then)
 - [x] Editing while reading: double-click a block in Preview to edit its markdown in place, with the formatting commands; a double-click below the last one adds a paragraph (`block_edit.rs`). One splice of the source per block, and one undo step
 - [ ] Editing a list or quote is of the whole of it: smaller blocks, down to the item, would jump less
-- [ ] Phase 4: Live view, or does editing while reading cover it?
-- [ ] Phase 5: WYSIWYG, editing the rendered text itself rather than its markdown
+- [ ] WYSIWYG: edit the rendered text itself, with a cursor in the page rather than its markdown in a box. Still only splices the source: untouched bytes never change. Double-click block editing stays. Live view isn't needed: block editing covers it
 - [ ] Phase 6: updating links in documents when files move in the app
 - [ ] Raw HTML: a subset (img, br, details/summary, kbd, sub/sup, center); shown as written, dimmed, until then
 - [ ] Export (HTML, rich text, PDF)
