@@ -7,6 +7,14 @@ fn android_main(app: egui_winit::winit::platform::android::activity::AndroidApp)
     android_logger::init_once(
         android_logger::Config::default()
             .with_max_level(log::LevelFilter::Info)
+            .with_filter(
+                android_logger::FilterBuilder::new()
+                    .filter_level(log::LevelFilter::Info)
+                    // With OpenGL, Mali's driver warns of flushed
+                    // submissions on nearly every frame.
+                    .filter_module("wgpu_hal::gles", log::LevelFilter::Error)
+                    .build(),
+            )
             .with_tag("egui-files"),
     );
     // Panics would otherwise vanish: Android drops stderr.

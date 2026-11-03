@@ -34,6 +34,7 @@
     - [x] Check on a real touchscreen that egui's own long touch and ours don't both fire
     - [x] Dialogs, the theme editor and the About window sized for a phone
     - [x] Haptic feedback (`src/haptics.rs`): a long press, each item a drag selection takes in, a pinch reaching its smallest or largest size, and a drop onto a folder. Checked on the Pixel (`dumpsys vibrator_manager`): the long press and the selection ticks; not yet the pinch or the drop
+    - [ ] Moto G20 (Unisoc T700, Mali-G52, Android 11): noise at the bottom while scrolling with Vulkan, gone with "Disable HW overlays", so its display hardware mishandles the Vulkan driver's buffers. Settings → Appearance → Renderer → OpenGL is the workaround (checked on the Pixel that OpenGL runs); confirm it fixes the G20, and if so consider OpenGL by default on such phones
     - [ ] Haptics on Windows: `InputHapticsManager` (`Windows.Devices.Haptics`, SDK 10.0.28000, for haptic touchpads, mice and pens) once the `windows` crate has it (0.62.2 doesn't). Linux has no API for it
 
 ## Proton Drive

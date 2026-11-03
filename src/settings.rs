@@ -216,6 +216,42 @@ fn new_tabs(ui: &mut Ui, new: &mut NewTabs) {
         });
 }
 
+/// Vulkan or OpenGL, for the next start.
+#[cfg(target_os = "android")]
+fn renderer(ui: &mut Ui) {
+    use crate::renderer::Renderer;
+    group(ui, "Renderer");
+    let id = egui::Id::new("settings-renderer");
+    let (mut chosen, mut error) = ui
+        .data(|d| d.get_temp::<(Renderer, Option<String>)>(id))
+        .unwrap_or_else(|| (Renderer::saved(), None));
+    ui.horizontal(|ui| {
+        for (renderer, label) in Renderer::ALL {
+            if ui.selectable_value(&mut chosen, renderer, label).changed() {
+                error = chosen
+                    .save()
+                    .err()
+                    .map(|err| format!("Couldn't save it: {err}"));
+            }
+        }
+    });
+    ui.label(
+        RichText::new(
+            "OpenGL works around glitches some phones show with Vulkan, \
+             such as noise while scrolling",
+        )
+        .weak(),
+    );
+    if let Some(error) = &error {
+        ui.colored_label(ui.visuals().error_fg_color, error);
+    } else if chosen != Renderer::started() {
+        ui.label(
+            "Takes effect when the app starts again: swipe it away in recent apps, then open it",
+        );
+    }
+    ui.data_mut(|d| d.insert_temp(id, (chosen, error)));
+}
+
 fn appearance(ui: &mut Ui, app: &mut Access) {
     group(ui, "Theme");
     egui::widgets::global_theme_preference_buttons(ui);
@@ -234,6 +270,9 @@ fn appearance(ui: &mut Ui, app: &mut Access) {
             app.themes.open_editor(ui.ctx());
         }
     });
+
+    #[cfg(target_os = "android")]
+    renderer(ui);
 
     // A phone's app has no window of its own to dress.
     if !cfg!(target_os = "android") {

@@ -26,6 +26,8 @@ mod pane_sizes;
 mod places;
 mod preview;
 mod properties;
+#[cfg(target_os = "android")]
+mod renderer;
 mod settings;
 mod sidebar;
 mod system_theme;
@@ -77,7 +79,7 @@ pub fn run() -> eframe::Result {
                 app::DESKTOP_MIN_SIZE
             })
             .with_decorations(mobile || !titlebar::saved_enabled("egui-files")),
-        wgpu_options: wgpu_options(),
+        wgpu_options: wgpu_options(false),
         ..Default::default()
     };
     eframe::run_native(
@@ -107,7 +109,7 @@ pub fn run_android(android_app: egui_winit::winit::platform::android::activity::
     let options = eframe::NativeOptions {
         android_app: Some(android_app),
         persistence_path: data.map(|d| d.join("app.ron")),
-        wgpu_options: wgpu_options(),
+        wgpu_options: wgpu_options(renderer::Renderer::start() == renderer::Renderer::OpenGl),
         ..Default::default()
     };
     if let Err(err) = eframe::run_native(
@@ -122,14 +124,18 @@ pub fn run_android(android_app: egui_winit::winit::platform::android::activity::
 /// egui-wgpu enables the GL backend alongside Vulkan/DX12/Metal by default,
 /// which loads the whole OpenGL driver (~20 MB on Mesa) even though it is never
 /// used. Only fall back to GL when no primary backend has an adapter.
-/// `WGPU_BACKEND` still overrides this.
-fn wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
+/// `WGPU_BACKEND` still overrides this, as `opengl` (asking for GL) does.
+fn wgpu_options(opengl: bool) -> eframe::egui_wgpu::WgpuConfiguration {
     use eframe::egui_wgpu::{WgpuConfiguration, WgpuSetup, wgpu};
 
     let mut config = WgpuConfiguration::default();
     if let WgpuSetup::CreateNew(setup) = &mut config.wgpu_setup
         && wgpu::Backends::from_env().is_none()
     {
+        if opengl {
+            setup.instance_descriptor.backends = wgpu::Backends::GL;
+            return config;
+        }
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::PRIMARY,
             ..wgpu::InstanceDescriptor::new_without_display_handle()
