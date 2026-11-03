@@ -21,6 +21,7 @@ use crate::{
     open_with::{self, OpenWith},
     places,
     preview::TextCache,
+    remote::{self, Listing},
     video::Videos,
     views::{self, ViewMode},
 };
@@ -208,6 +209,10 @@ pub struct BrowserTab {
     stale: bool,
     #[serde(skip)]
     error: Option<String>,
+    /// A server's folder is being listed; the entries are what was there
+    /// before, if anything.
+    #[serde(skip)]
+    loading: bool,
     #[serde(skip)]
     pub selection: HashSet<PathBuf>,
     /// Selecting by touch, after a long press: taps add and remove items
@@ -268,6 +273,7 @@ impl BrowserTab {
             entries: None,
             stale: false,
             error: None,
+            loading: false,
             selection: HashSet::new(),
             toolbar_height: 0.0,
             selecting: false,
@@ -334,9 +340,31 @@ impl BrowserTab {
 
     fn reload(&mut self) {
         self.column_cache.clear();
+        self.loading = false;
+        // A server's folder is read once it's here, without waiting for it.
+        match remote::listing(&self.path) {
+            Listing::Ready => {}
+            Listing::Loading => {
+                self.loading = true;
+                self.error = None;
+                self.entries.get_or_insert_default();
+                return;
+            }
+            Listing::Moved(to) => {
+                // `~`, now that it's known where that is.
+                self.path = to;
+                return self.reload();
+            }
+            Listing::Failed(why) => {
+                self.entries = Some(Vec::new());
+                self.error = Some(format!("Cannot read {}: {why}", self.path.display()));
+                return;
+            }
+        }
         // If the folder was deleted or renamed away, fall back to the nearest parent.
         let mut gone = None;
-        if !disk::is_dir(&self.path)
+        if !remote::is_remote(&self.path)
+            && !disk::is_dir(&self.path)
             && let Some(existing) = self.path.ancestors().skip(1).find(|p| disk::is_dir(p))
         {
             gone = Some(self.path.clone());
@@ -441,7 +469,8 @@ impl BrowserTab {
         if path == self.path {
             return;
         }
-        if !disk::is_dir(&path) {
+        // A server's folder may take a while to check; showing it does.
+        if !remote::is_remote(&path) && !disk::is_dir(&path) {
             self.error = Some(format!("Not a folder: {}", path.display()));
             return;
         }
@@ -488,12 +517,19 @@ impl BrowserTab {
 
     /// Loads the ancestor and preview listings the columns view needs and drops the rest.
     fn prepare_columns(&mut self) {
-        let mut needed: Vec<PathBuf> = self.path.ancestors().skip(1).map(PathBuf::from).collect();
+        let mut needed: Vec<PathBuf> = remote::ancestors(&self.path)
+            .skip(1)
+            .map(PathBuf::from)
+            .collect();
         if let Some(entry) = self.preview_entry().filter(|e| e.is_dir) {
             needed.push(entry.path.clone());
         }
         self.column_cache.retain(|dir, _| needed.contains(dir));
         for dir in needed {
+            // A server's, once it's here (it repaints then).
+            if self.column_cache.contains_key(&dir) || remote::listing(&dir) != Listing::Ready {
+                continue;
+            }
             self.column_cache.entry(dir).or_insert_with_key(|dir| {
                 let mut entries = fs::read_dir(dir).unwrap_or_default();
                 fs::sort_entries(&mut entries, self.sort);
@@ -521,6 +557,10 @@ impl BrowserTab {
 
     pub fn ui(&mut self, ui: &mut Ui, shared: &mut Shared) {
         ui.style_mut().interaction.selectable_labels = false;
+        // A server's folder that's come in since.
+        if self.loading && remote::listing(&self.path) != Listing::Loading {
+            self.stale = true;
+        }
         if self.entries.is_none() {
             self.reload();
         } else if self.stale {
@@ -567,7 +607,18 @@ impl BrowserTab {
                     egui::Sense::click_and_drag(),
                 );
                 let drag_select = background.drag_started_by(egui::PointerButton::Primary);
-                if visible.is_empty() && self.view != ViewMode::Columns {
+                if self.loading && visible.is_empty() {
+                    ui.centered_and_justified(|ui| {
+                        ui.horizontal_centered(|ui| {
+                            ui.spinner();
+                            ui.weak(if remote::connecting(&self.path) {
+                                "Connecting…"
+                            } else {
+                                "Loading…"
+                            });
+                        });
+                    });
+                } else if visible.is_empty() && self.view != ViewMode::Columns {
                     ui.centered_and_justified(|ui| {
                         ui.weak(if self.filter.is_empty() {
                             "Empty folder"
@@ -824,7 +875,7 @@ impl BrowserTab {
         }
         if nav(
             ui,
-            self.path.parent().is_some(),
+            remote::parent(&self.path).is_some(),
             icon::ARROW_UP,
             hint("Up", C::Up),
         ) {
@@ -1028,7 +1079,7 @@ impl BrowserTab {
         );
         item(
             ui,
-            self.path.parent().is_some(),
+            remote::parent(&self.path).is_some(),
             format!("{} Compress this folder…", icon::FILE_ZIP),
             "",
             Action::CompressFolder,
@@ -1137,7 +1188,7 @@ impl BrowserTab {
             }
             if response.lost_focus() {
                 if ui.input(|i| i.key_pressed(Key::Enter)) {
-                    actions.push(Action::Navigate(PathBuf::from(text.trim())));
+                    actions.push(Action::Navigate(remote::typed(PathBuf::from(text.trim()))));
                 }
                 self.path_edit = None;
             }
@@ -1174,7 +1225,7 @@ impl BrowserTab {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 2.0;
-                    let mut crumbs: Vec<_> = self.path.ancestors().collect();
+                    let mut crumbs: Vec<_> = remote::ancestors(&self.path).collect();
                     crumbs.reverse();
                     for (i, crumb) in crumbs.iter().enumerate() {
                         if i > 0 {
@@ -1403,7 +1454,7 @@ impl BrowserTab {
                 }
             }
             Action::CompressFolder => {
-                if self.path.parent().is_some() {
+                if remote::parent(&self.path).is_some() {
                     let id = Id::new(("compress-dialog", self.id));
                     let paths = vec![self.path.clone()];
                     self.compress = Some(CompressDialog::new(id, paths, &shared.archive_prefs));
@@ -1469,13 +1520,17 @@ impl BrowserTab {
                 }
             }
             Action::Up => {
-                if let Some(parent) = self.path.parent().map(PathBuf::from) {
+                if let Some(parent) = remote::parent(&self.path).map(PathBuf::from) {
                     let child = self.path.clone();
                     self.navigate(parent);
                     self.select_path(&child, shared.show_hidden);
                 }
             }
-            Action::Refresh => self.refresh(shared.show_hidden),
+            Action::Refresh => {
+                // A server's folder is asked for again, as is one that failed.
+                remote::retry(&self.path);
+                self.refresh(shared.show_hidden);
+            }
             Action::SortBy(key) => {
                 if self.sort.key == key {
                     self.sort.ascending = !self.sort.ascending;

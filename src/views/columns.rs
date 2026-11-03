@@ -41,7 +41,7 @@ pub fn show(
         .stick_to_right(true)
         .show(ui, |ui| {
             ui.horizontal_top(|ui| {
-                let mut chain: Vec<&Path> = tab.path.ancestors().collect();
+                let mut chain: Vec<&Path> = crate::remote::ancestors(&tab.path).collect();
                 chain.reverse();
                 for pair in chain.windows(2) {
                     column(ui, height, |ui| {

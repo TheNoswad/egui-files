@@ -60,11 +60,13 @@ impl DirWatcher {
         }
     }
 
-    /// Watches exactly `dirs` (non-recursively).
-    pub fn set_watched(&mut self, dirs: HashSet<PathBuf>) {
+    /// Watches exactly `dirs` (non-recursively). Servers' folders can't be
+    /// watched; what changes there through disk is noted instead.
+    pub fn set_watched(&mut self, mut dirs: HashSet<PathBuf>) {
         let Some(watcher) = &mut self.watcher else {
             return;
         };
+        dirs.retain(|dir| !crate::remote::is_remote(dir));
         for dir in self.watched.difference(&dirs) {
             let _ = watcher.unwatch(dir);
         }
@@ -107,8 +109,8 @@ impl DirWatcher {
             }
             changed.extend(event.paths);
         }
-        // The browser's files are in memory, which notes its own changes.
-        #[cfg(target_arch = "wasm32")]
+        // The browser's files are in memory, and servers' far away: either
+        // way, nothing watches them, but what's changed through disk is noted.
         changed.extend(disk::take_changes());
         if !changed.is_empty() {
             for path in changed {

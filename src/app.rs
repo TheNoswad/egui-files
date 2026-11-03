@@ -445,6 +445,7 @@ impl FilesApp {
         let mut fonts = egui::FontDefinitions::default();
         egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
         cc.egui_ctx.set_fonts(fonts);
+        crate::remote::init(&cc.egui_ctx);
 
         #[cfg(not(target_arch = "wasm32"))]
         let persisted: Option<Persisted> = cc
@@ -2763,6 +2764,7 @@ impl FilesApp {
             self.act(&ctx, window, action);
         }
         self.confirm_close_ui(&ctx);
+        crate::remote::prompts_ui(&ctx);
         if let Some((request, target)) = self.shared.open_with.ui(&ctx) {
             self.open_with(&ctx, request, target);
         }
