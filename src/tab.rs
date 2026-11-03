@@ -600,6 +600,19 @@ impl BrowserTab {
         }
         let visible = self.visible(shared.show_hidden);
         Panel::bottom(Id::new(("status", self.id))).show(ui, |ui| self.status_bar(ui, &visible));
+        if self.loading {
+            Panel::top(Id::new(("loading", self.id))).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    let server = remote::authority(&self.path).unwrap_or_default();
+                    ui.weak(if remote::connecting(&self.path) {
+                        format!("Connecting to {server}…")
+                    } else {
+                        format!("Loading from {server}…")
+                    });
+                });
+            });
+        }
         CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
@@ -611,17 +624,8 @@ impl BrowserTab {
                     egui::Sense::click_and_drag(),
                 );
                 let drag_select = background.drag_started_by(egui::PointerButton::Primary);
+                // While loading, the bar above says so.
                 if self.loading && visible.is_empty() {
-                    ui.centered_and_justified(|ui| {
-                        ui.horizontal_centered(|ui| {
-                            ui.spinner();
-                            ui.weak(if remote::connecting(&self.path) {
-                                "Connecting…"
-                            } else {
-                                "Loading…"
-                            });
-                        });
-                    });
                 } else if visible.is_empty() && self.view != ViewMode::Columns {
                     ui.centered_and_justified(|ui| {
                         ui.weak(if self.filter.is_empty() {
