@@ -39,7 +39,7 @@
 
 ## Web demo
 
-`web/build.sh` builds the site into `target/site`: the landing page (`web/index.html`), and the demo in `demo/` (`web/demo/`, built by trunk for wasm32-unknown-unknown, with the `web` profile, for size). Files are in memory (`disk/`), made up by `src/demo.rs`, plus what's in `web/demo-files/`, fetched when first opened. clippy.toml warns, in the wasm build only, of what fails or panics in a browser.
+`web/build.sh` builds the site into `target/site`: the landing page (`web/index.html`), and the demo in `demo/` (`web/demo/`, built by trunk for wasm32-unknown-unknown, with the `web` profile, for size). The demo's files are in `web/demo-files/`: `web/demo-files.sh` puts them beside the page with a manifest, `src/demo.rs` lists them at startup, and each is fetched when first opened, into memory (`disk/`). clippy.toml warns, in the wasm build only, of what fails or panics in a browser.
 
 - [x] Builds and starts in the browser; the terminal, video, libmpv, RAR and zstd say they need the desktop app
 - [x] Files in memory, with a demo home: browsing, thumbnails, previews with highlighting, archives, copy/move/trash/restore, extracting
@@ -51,8 +51,8 @@
 - [x] Fetch files from the server when they're first opened (`web/demo-files/`, listed in a manifest by `web/demo-files.sh`)
 - [x] Size: 11.5 MB of wasm, 4.3 MB with brotli, down from 18 and 6: built for size, WebGL through glow instead of wgpu, no persistence
 - [x] Tried in Firefox: disk usage, compressing (zip, tar.xz, 7z with a password), and saving in the editor
-- [ ] Publishing (GitHub Pages or Cloudflare Pages), from CI; the site is static, with relative URLs. Check the host compresses the wasm
-- [ ] Real files for `web/demo-files/`: there are none yet, so nothing is fetched in the demo as it stands
+- [ ] Publishing (GitHub Pages or Cloudflare Pages), from CI; the site is static, with relative URLs. Check the host compresses the wasm, and serves the dotfiles in `demo/files/` (`.profile`, `.gitignore`)
+- [ ] Better content for `web/demo-files/`: real photos and such, instead of pictures drawn by code. `Projects/egui-files` is a copy of some of the source, and `Downloads/` packs some of these files, so they don't follow changes
 - [ ] A fetched file stops the page until it's here (a synchronous request, as its readers can't wait): fine for small ones, not for a big photo on a slow connection. Fetch the current folder's files in the background first, or use Range requests
 - [ ] A job still stops the page inside one archive entry: extracting pauses between entries of zip and tar, compressing between files of zip and tar, and 7z not at all (its crate's callback can't wait)
 - [ ] Try folders brought in for real: dropped folders and the folder dialog were only checked with stand-ins, as WebDriver can't provide either

@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>egui-files demo</title>
+    <!-- Trunk builds the app's binary for wasm32 and loads it here, through
+         loading.js for the progress bar. -->
+    <link data-trunk rel="rust" href="../../Cargo.toml" data-bin="egui-files" data-wasm-opt="z"
+          data-initializer="loading.js">
+    <script>
+        // Firefox's phone emulation (responsive design mode) reports
+        // devicePixelContentBoxSize in CSS pixels, not the device's. eframe
+        // sizes the canvas by it, so the app would draw at a fraction of the
+        // resolution, laid out as if the screen were that much smaller. Where
+        // it disagrees with the pixel ratio, it's taken away, and eframe works
+        // the size out from the CSS size instead. Long done before eframe
+        // starts: the app is a big download.
+        (() => {
+            if (!window.ResizeObserverEntry
+                || !("devicePixelContentBoxSize" in ResizeObserverEntry.prototype)) {
+                return;
+            }
+            const probe = document.createElement("div");
+            probe.style.cssText = "position:fixed;top:0;left:0;width:100px;height:1px;visibility:hidden";
+            const observer = new ResizeObserver(([entry]) => {
+                observer.disconnect();
+                probe.remove();
+                const device = entry.devicePixelContentBoxSize?.[0]?.inlineSize;
+                if (device !== undefined && Math.abs(device - 100 * devicePixelRatio) > 1) {
+                    delete ResizeObserverEntry.prototype.devicePixelContentBoxSize;
+                }
+            });
+            observer.observe(probe);
+            document.documentElement.append(probe);
+        })();
+    </script>
+    <style>
+        :root {
+            color-scheme: light dark;
+            --bg: #f7f7f7;
+            --fg: #3c3c3c;
+            --muted: #8a8a8a;
+            --track: #e2e2e2;
+            --bar: #2b7fd8;
+        }
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg: #1b1b1b;
+                --fg: #d6d6d6;
+                --muted: #8a8a8a;
+                --track: #333;
+                --bar: #5aa3f0;
+            }
+        }
+        html, body {
+            margin: 0;
+            height: 100%;
+            overflow: hidden;
+            background: var(--bg);
+        }
+        /* eframe sizes the canvas to its parent. */
+        #app {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+        #loading {
+            position: fixed;
+            inset: 0;
+            display: grid;
+            place-content: center;
+            gap: 12px;
+            font: 15px/1.4 system-ui, sans-serif;
+            color: var(--fg);
+            text-align: center;
+        }
+        #loading progress {
+            width: min(280px, 70vw);
+            height: 6px;
+            appearance: none;
+            border: none;
+            border-radius: 3px;
+            background: var(--track);
+            overflow: hidden;
+        }
+        #loading progress::-webkit-progress-bar { background: var(--track); }
+        #loading progress::-webkit-progress-value { background: var(--bar); }
+        #loading progress::-moz-progress-bar { background: var(--bar); }
+        #loading .detail { color: var(--muted); font-size: 13px; }
+    </style>
+</head>
+<body>
+    <canvas id="app"></canvas>
+    <div id="loading" role="status">
+        <div>Loading egui-files…</div>
+        <progress max="1" value="0"></progress>
+        <div class="detail"></div>
+    </div>
+</body>
+</html>
