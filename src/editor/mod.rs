@@ -4,6 +4,7 @@
 pub mod document;
 pub mod highlight;
 pub mod ops;
+pub mod table;
 
 use std::{
     collections::HashSet,
