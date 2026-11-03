@@ -98,7 +98,10 @@ const PROJECT: &[(&str, &str)] = &[
     ("disk/Cargo.toml", include_str!("../disk/Cargo.toml")),
     ("disk/src/lib.rs", include_str!("../disk/src/lib.rs")),
     ("disk/src/memory.rs", include_str!("../disk/src/memory.rs")),
-    ("web/index.html", include_str!("../web/index.html")),
+    (
+        "web/demo/index.html",
+        include_str!("../web/demo/index.html"),
+    ),
 ];
 
 /// Makes the demo's home folder. The pictures and archives take a moment,

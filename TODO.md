@@ -39,16 +39,17 @@
 
 ## Web demo
 
-`trunk build web/index.html` (wasm32-unknown-unknown). Files are in memory (`disk/`), made up by `src/demo.rs`; clippy.toml warns, in the wasm build only, of what fails or panics in a browser.
+`web/build.sh` builds the site into `target/site`: the landing page (`web/index.html`), and the demo in `demo/` (`web/demo/`, built by trunk for wasm32-unknown-unknown). Files are in memory (`disk/`), made up by `src/demo.rs`; clippy.toml warns, in the wasm build only, of what fails or panics in a browser.
 
 - [x] Builds and starts in the browser; the terminal, video, libmpv, RAR and zstd say they need the desktop app
 - [x] Files in memory, with a demo home: browsing, thumbnails, previews with highlighting, archives, copy/move/trash/restore, extracting
 - [x] "Open" shows pictures, text, PDFs, audio and video in a browser tab, and saves anything else
-- [ ] A page around it, and publishing (GitHub Pages or Cloudflare Pages) from CI
+- [x] A landing page with the demo embedded: a screenshot until "Start the demo" loads it in an iframe, with a progress bar
+- [ ] Publishing (GitHub Pages or Cloudflare Pages), from CI; the site is static, with relative URLs
 - [ ] Jobs run in one go on the UI thread: no progress or cancelling while they run, and a big one freezes the page. Conflicts keep both and password prompts cancel, since nothing can wait for an answer (`Progress::ask`)
 - [ ] Bring files in (drop them on the page, or a file picker) and save files out
 - [ ] Keep changes across reloads (IndexedDB), or say clearly that they're lost
-- [ ] Size: 16 MB of wasm (6.3 MB gzipped); the syntaxes and license texts are likely most of it
+- [ ] Size: 18 MB of wasm (Cloudflare Pages takes up to 25 MB a file); the syntaxes and license texts are likely most of it
 - [ ] About's credits list the native build's crates (unrar, alacritty_terminal), not the web build's
 
 ## Proton Drive

@@ -4,24 +4,286 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>egui-files</title>
-    <!-- Trunk builds the app's binary for wasm32 and loads it here. -->
-    <link data-trunk rel="rust" href="../Cargo.toml" data-bin="egui-files" data-wasm-opt="z">
+    <meta name="description" content="A tabbed file browser for Linux, Windows and Android, written in Rust with egui. Try it in your browser.">
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 256 256'%3E%3Cpath fill='%232b7fd8' d='M216 72h-84.7L104 44.7A16 16 0 0 0 92.7 40H40a16 16 0 0 0-16 16v144.6A15.4 15.4 0 0 0 39.4 216h177.5a15.1 15.1 0 0 0 15.1-15.1V88a16 16 0 0 0-16-16Z'/%3E%3C/svg%3E">
     <style>
-        html, body {
-            margin: 0;
-            height: 100%;
-            overflow: hidden;
-            background: #1b1b1b;
+        :root {
+            color-scheme: light dark;
+            --bg: #fbfbfa;
+            --surface: #ffffff;
+            --fg: #1f2328;
+            --muted: #5d6670;
+            --line: #e3e5e8;
+            --accent: #2b7fd8;
+            --accent-fg: #ffffff;
+            --shadow: 0 1px 2px rgb(0 0 0 / 6%), 0 12px 32px rgb(0 0 0 / 10%);
         }
-        /* eframe sizes the canvas to its parent. */
-        #app {
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg: #151618;
+                --surface: #1e2023;
+                --fg: #e6e8eb;
+                --muted: #9aa3ad;
+                --line: #2e3136;
+                --accent: #5aa3f0;
+                --accent-fg: #0d1117;
+                --shadow: 0 1px 2px rgb(0 0 0 / 30%), 0 12px 32px rgb(0 0 0 / 40%);
+            }
+        }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            background: var(--bg);
+            color: var(--fg);
+            font: 16px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        }
+        a { color: var(--accent); }
+        .wrap {
+            max-width: 1120px;
+            margin: 0 auto;
+            padding: 0 16px;
+        }
+
+        header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding-block: 20px;
+        }
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-weight: 650;
+            font-size: 18px;
+            color: var(--fg);
+            text-decoration: none;
+        }
+        .brand svg { width: 28px; height: 28px; color: var(--accent); }
+        nav { display: flex; gap: 20px; font-size: 15px; }
+        nav a { color: var(--muted); text-decoration: none; }
+        nav a:hover { color: var(--fg); }
+
+        .hero {
+            padding-block: 48px 32px;
+            max-width: 720px;
+        }
+        h1 {
+            font-size: clamp(34px, 6vw, 52px);
+            line-height: 1.1;
+            letter-spacing: -0.02em;
+            margin: 0 0 16px;
+        }
+        .lede {
+            font-size: clamp(17px, 2.2vw, 20px);
+            color: var(--muted);
+            margin: 0 0 28px;
+        }
+        .button {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 11px 20px;
+            border-radius: 8px;
+            border: none;
+            background: var(--accent);
+            color: var(--accent-fg);
+            font: inherit;
+            font-weight: 600;
+            text-decoration: none;
+            cursor: pointer;
+        }
+        .button:hover { filter: brightness(1.08); }
+        .button:focus-visible { outline: 3px solid color-mix(in srgb, var(--accent) 40%, transparent); outline-offset: 2px; }
+
+        /* The demo: a screenshot until it's started, then the app itself. */
+        .demo { padding-block: 8px 24px; }
+        .frame {
+            position: relative;
+            border: 1px solid var(--line);
+            border-radius: 10px;
+            overflow: hidden;
+            background: var(--surface);
+            box-shadow: var(--shadow);
+            aspect-ratio: 1366 / 682;
+            max-height: 82vh;
+            width: 100%;
+        }
+        .frame img, .frame iframe {
             display: block;
             width: 100%;
             height: 100%;
+            border: 0;
+        }
+        .frame img { object-fit: cover; object-position: top left; }
+        .start {
+            position: absolute;
+            inset: 0;
+            display: grid;
+            place-content: center;
+            justify-items: center;
+            gap: 10px;
+            background: color-mix(in srgb, var(--bg) 35%, transparent);
+            backdrop-filter: blur(2px);
+            text-align: center;
+            padding: 16px;
+        }
+        .start .button { font-size: 18px; padding: 14px 26px; }
+        .start p { margin: 0; font-size: 14px; color: var(--fg); max-width: 34em; }
+        .demo-notes {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: space-between;
+            gap: 8px 24px;
+            margin-top: 12px;
+            font-size: 14px;
+            color: var(--muted);
+        }
+
+        section h2 {
+            font-size: 26px;
+            letter-spacing: -0.01em;
+            margin: 0 0 20px;
+        }
+        .features { padding-block: 48px; }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+            gap: 16px;
+        }
+        .card {
+            background: var(--surface);
+            border: 1px solid var(--line);
+            border-radius: 10px;
+            padding: 18px 20px;
+        }
+        .card h3 { margin: 0 0 6px; font-size: 16px; }
+        .card p { margin: 0; color: var(--muted); font-size: 15px; }
+
+        .desktop { padding-block: 0 48px; max-width: 720px; }
+        .desktop p { color: var(--muted); margin: 0; }
+
+        footer {
+            border-top: 1px solid var(--line);
+            padding-block: 24px 40px;
+            font-size: 14px;
+            color: var(--muted);
+        }
+        footer p { margin: 0; }
+
+        @media (max-width: 640px) {
+            nav { display: none; }
+            .hero { padding-block: 24px 20px; }
+            /* A phone gets the app's mobile layout: give it the height. */
+            .frame { aspect-ratio: auto; height: 78vh; }
         }
     </style>
 </head>
 <body>
-    <canvas id="app"></canvas>
+    <div class="wrap">
+        <header>
+            <a class="brand" href="#">
+                <svg viewBox="0 0 256 256" aria-hidden="true"><path fill="currentColor" d="M216 72h-84.7L104 44.7A16 16 0 0 0 92.7 40H40a16 16 0 0 0-16 16v144.6A15.4 15.4 0 0 0 39.4 216h177.5a15.1 15.1 0 0 0 15.1-15.1V88a16 16 0 0 0-16-16Z"/></svg>
+                egui-files
+            </a>
+            <nav>
+                <a href="#demo">Demo</a>
+                <a href="#features">Features</a>
+            </nav>
+        </header>
+
+        <section class="hero">
+            <h1>A tabbed file browser</h1>
+            <p class="lede">Tabs you can split side by side, previews, archives, a terminal that
+                follows along, and themes. For Linux, Windows and Android, written in Rust
+                with egui.</p>
+            <a class="button" href="#demo">Try it in your browser</a>
+        </section>
+
+        <section class="demo" id="demo" aria-label="Demo">
+            <div class="frame" id="frame">
+                <img src="screenshot.png" alt="egui-files showing a folder of pictures as thumbnails, with a sunset previewed beside it" width="1366" height="682">
+                <div class="start">
+                    <button class="button" id="start" type="button">
+                        <svg width="18" height="18" viewBox="0 0 256 256" aria-hidden="true"><path fill="currentColor" d="M240 128a15.7 15.7 0 0 1-7.6 13.5L88.3 229.7a16 16 0 0 1-24.3-13.5V39.8a16 16 0 0 1 24.3-13.5l144.1 88.2A15.7 15.7 0 0 1 240 128Z"/></svg>
+                        Start the demo
+                    </button>
+                    <p>The real app, in your browser. It's a sizeable download, so it starts when you ask.</p>
+                </div>
+            </div>
+            <div class="demo-notes">
+                <span>The files are made up and kept in your browser's memory. Change anything; a reload puts it all back.</span>
+                <a href="demo/" target="_blank" rel="noopener">Open in a tab of its own ↗</a>
+            </div>
+        </section>
+
+        <section class="features" id="features">
+            <h2>What it does</h2>
+            <div class="grid">
+                <div class="card">
+                    <h3>Tabs and split views</h3>
+                    <p>Open folders in tabs and drag them beside or below each other. Tabs can even move out into windows of their own.</p>
+                </div>
+                <div class="card">
+                    <h3>List, grid and columns</h3>
+                    <p>Sortable details, thumbnails of pictures and videos, or Miller columns to move through deep folders quickly.</p>
+                </div>
+                <div class="card">
+                    <h3>Previews</h3>
+                    <p>Pictures, video, and text and source code with syntax highlighting for many languages, in a pane beside the files.</p>
+                </div>
+                <div class="card">
+                    <h3>Archives</h3>
+                    <p>Look inside zip, 7z, tar, gzip, xz, zstd and RAR archives as if they were folders, extract them, and make new ones.</p>
+                </div>
+                <div class="card">
+                    <h3>A terminal that follows</h3>
+                    <p>A terminal pane whose shell keeps to the folder you're in, and takes the tab along when you <code>cd</code>.</p>
+                </div>
+                <div class="card">
+                    <h3>Disk usage</h3>
+                    <p>See what takes up the space on a drive or in a folder, and clean it up from there.</p>
+                </div>
+                <div class="card">
+                    <h3>Properties</h3>
+                    <p>Permissions, owners and dates to change, checksums, and what's inside pictures and media files.</p>
+                </div>
+                <div class="card">
+                    <h3>Themes</h3>
+                    <p>Light and dark themes, and an editor to make your own, colors and fonts included.</p>
+                </div>
+                <div class="card">
+                    <h3>On your phone</h3>
+                    <p>A layout made for touch, with long presses, pinch to zoom and drag selection, on Android.</p>
+                </div>
+            </div>
+        </section>
+
+        <section class="desktop">
+            <h2>In the browser, and beyond</h2>
+            <p>The demo is the same app, built for the web. A browser can't run a shell, play videos
+                through mpv or open files in your other apps, so the terminal, video playback and RAR
+                and zstd archives need the desktop app.</p>
+        </section>
+
+        <footer>
+            <p>egui-files is free software, under the MIT or Apache 2.0 license. Built with
+                <a href="https://github.com/emilk/egui">egui</a>.</p>
+        </footer>
+    </div>
+
+    <script>
+        // Loads the app only when asked, in a frame of its own so it doesn't
+        // take the page's keys, clipboard or scrolling.
+        document.getElementById("start").addEventListener("click", () => {
+            const frame = document.getElementById("frame");
+            const app = document.createElement("iframe");
+            app.src = "demo/";
+            app.title = "egui-files demo";
+            app.allow = "clipboard-read; clipboard-write; fullscreen";
+            app.addEventListener("load", () => app.focus());
+            frame.replaceChildren(app);
+        });
+    </script>
 </body>
 </html>
