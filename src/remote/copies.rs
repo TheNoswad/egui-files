@@ -143,6 +143,35 @@ pub fn open(remote: &Path) {
     });
 }
 
+/// The most a drag out of a server fetches, as it waits for it.
+pub const MAX_DRAG_OUT: u64 = 16 << 20;
+
+/// Copies of `paths`, with those on servers fetched now, waiting for them:
+/// for dragging out, where the other app needs files at once.
+pub fn fetch_now(paths: &[PathBuf]) -> io::Result<Vec<PathBuf>> {
+    let size: u64 = paths
+        .iter()
+        .filter(|p| super::is_remote(p))
+        .map(|p| disk::metadata(p).map(|m| if m.is_dir() { u64::MAX } else { m.len() }))
+        .sum::<io::Result<u64>>()?;
+    if size > MAX_DRAG_OUT {
+        return Err(io::Error::new(
+            io::ErrorKind::FileTooLarge,
+            "only files of up to 16 MB in all can be dragged out of a server; copy them here first",
+        ));
+    }
+    paths
+        .iter()
+        .map(|p| {
+            if super::is_remote(p) {
+                fetch(p)
+            } else {
+                Ok(p.clone())
+            }
+        })
+        .collect()
+}
+
 /// Fetches copies of `paths` that are on servers, then calls `then` with
 /// what to open in their place, from another thread.
 pub fn with_copies(paths: Vec<PathBuf>, then: impl FnOnce(Vec<PathBuf>) + Send + 'static) {

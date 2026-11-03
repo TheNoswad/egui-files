@@ -347,6 +347,7 @@ fn decode(
         image.apply_orientation(orientation);
     }
     let original_size = [image.width(), image.height()];
+    thumbnails::keep_remote(path, modified, &image);
     if image.width() > max_side || image.height() > max_side {
         image = image.thumbnail(max_side, max_side);
     }

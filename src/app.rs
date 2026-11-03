@@ -2942,7 +2942,22 @@ fn outgoing_drag(ctx: &egui::Context) -> Option<Vec<PathBuf>> {
         && !payload.link_only
         && ctx.input(|i| i.pointer.primary_down())
         && !ctx.content_rect().contains(pos);
-    outgoing.then(|| payload.paths.clone())
+    if !outgoing {
+        return None;
+    }
+    // Other apps can't reach a server's files: they get copies, fetched now.
+    #[cfg(not(target_arch = "wasm32"))]
+    if payload.paths.iter().any(|p| crate::remote::is_remote(p)) {
+        return match crate::remote::copies::fetch_now(&payload.paths) {
+            Ok(copies) => Some(copies),
+            Err(err) => {
+                egui::DragAndDrop::clear_payload(ctx);
+                crate::remote::notify(format!("Couldn't drag them out: {err}"));
+                None
+            }
+        };
+    }
+    Some(payload.paths.clone())
 }
 
 #[cfg(test)]
