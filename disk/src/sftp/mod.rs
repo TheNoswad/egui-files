@@ -383,8 +383,8 @@ fn start_session(
         Some(program) => program,
         None => std::env::current_exe()?,
     };
-    let _registration = askpass::set_up(&mut command, authority, &askpass)?;
-    Session::start(command)
+    let asking = askpass::set_up(&mut command, authority, &askpass)?;
+    Session::start(command, &asking)
 }
 
 /// Connects to the computer `path` is on, if it isn't already, trying again

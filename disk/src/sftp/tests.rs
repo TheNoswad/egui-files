@@ -1,10 +1,47 @@
 //! Against a real server: set `EGUI_FILES_SFTP_TEST_CONFIG` to an ssh config
-//! naming three hosts. `sftp-test` lets in with a key, `sftp-test-password`
-//! only with the password `secret`, and `sftp-test-new-key` is the first
-//! with a known-hosts file of its own that starts out empty. Without it,
-//! these tests pass without doing anything.
+//! naming these hosts, all one server with a user whose password is
+//! `secret` and who lets in `key`. Without it, these tests pass without
+//! doing anything.
 //!
-//! The askpass is the `askpass` example, which `cargo test` builds.
+//! ```text
+//! Host sftp-test sftp-test-not-yet
+//!   HostName 127.0.0.1
+//!   Port 2222
+//!   User tester
+//!   IdentityFile /path/to/key
+//!   IdentitiesOnly yes
+//!   UserKnownHostsFile /path/to/known_hosts
+//! # Only by password (cancelled, for the second).
+//! Host sftp-test-password sftp-test-cancel
+//!   HostName 127.0.0.1
+//!   Port 2222
+//!   User tester
+//!   PubkeyAuthentication no
+//!   UserKnownHostsFile /path/to/known_hosts
+//! # Its own known hosts, which start out empty.
+//! Host sftp-test-new-key
+//!   HostName 127.0.0.1
+//!   Port 2222
+//!   User tester
+//!   IdentityFile /path/to/key
+//!   IdentitiesOnly yes
+//!   UserKnownHostsFile /path/to/empty_known_hosts
+//!   StrictHostKeyChecking ask
+//! # Let in by nothing.
+//! Host sftp-test-nobody
+//!   HostName 127.0.0.1
+//!   Port 2222
+//!   User tester
+//!   IdentityFile /nonexistent
+//!   IdentitiesOnly yes
+//!   PasswordAuthentication no
+//!   KbdInteractiveAuthentication no
+//!   UserKnownHostsFile /path/to/known_hosts
+//! ```
+//!
+//! An OpenSSH server in a container does (Alpine's `openssh-server`, with
+//! `PasswordAuthentication yes`). The askpass is the `askpass` example,
+//! which `cargo test` builds.
 
 use std::{
     io::{Read, Seek, SeekFrom, Write},
@@ -31,6 +68,8 @@ fn server(host: &str) -> Option<PathBuf> {
         set_askpass_program(askpass);
         set_prompter(|prompt| {
             let answer = match prompt.kind {
+                // The user thinks better of it.
+                PromptKind::Secret if prompt.host == "sftp-test-cancel" => None,
                 PromptKind::Secret => Some("secret".to_owned()),
                 PromptKind::HostKey => Some("yes".to_owned()),
                 _ => None,
@@ -290,6 +329,23 @@ fn passwords_and_new_host_keys_are_asked_about() {
     drop(prompts);
     disconnect(&password);
     assert_eq!(status(&password), Status::Disconnected);
+}
+
+#[test]
+fn cancelling_a_password_stops_connecting() {
+    let Some(root) = server("sftp-test-cancel") else {
+        return;
+    };
+    let err = connect(&root).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::Interrupted, "{err}");
+    let asked = PROMPTS
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|p| p.host == "sftp-test-cancel")
+        .count();
+    // Not asked again with an empty answer.
+    assert_eq!(asked, 1);
 }
 
 #[test]

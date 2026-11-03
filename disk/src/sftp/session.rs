@@ -14,7 +14,7 @@ use std::{
 };
 
 use super::{
-    Target,
+    Target, askpass,
     wire::{self, Reader, Reply, Writer},
 };
 
@@ -86,7 +86,7 @@ fn lost(shared: &Shared) -> io::Error {
 pub struct Session {
     shared: Arc<Shared>,
     input: Mutex<ChildStdin>,
-    child: Mutex<Child>,
+    child: Arc<Mutex<Child>>,
     next_id: AtomicU32,
     extensions: HashMap<String, Vec<u8>>,
     /// The most a read or write may carry.
@@ -130,7 +130,7 @@ impl Session {
     /// Starts `command` (see [`ssh_command`]) and sets up SFTP with it. Any
     /// password or host key ssh asks about goes through its askpass, which
     /// `command` sets up.
-    pub fn start(mut command: Command) -> io::Result<Self> {
+    pub fn start(mut command: Command, asking: &askpass::Registration) -> io::Result<Self> {
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -156,6 +156,10 @@ impl Session {
             stderr: Mutex::default(),
         });
         let mut stderr = child.stderr.take().expect("piped");
+        let mut input = child.stdin.take().expect("piped");
+        let mut output = BufReader::new(child.stdout.take().expect("piped"));
+        let child = Arc::new(Mutex::new(child));
+        asking.watch(child.clone());
         let errors = shared.clone();
         std::thread::Builder::new()
             .name("ssh stderr".into())
@@ -175,8 +179,6 @@ impl Session {
                 }
             })?;
 
-        let mut input = child.stdin.take().expect("piped");
-        let mut output = BufReader::new(child.stdout.take().expect("piped"));
         let version = Writer::default().u8(wire::INIT).u32(3).0;
         let handshake = write_packet(&mut input, &version)
             .and_then(|()| read_packet(&mut output))
@@ -185,7 +187,10 @@ impl Session {
             Ok(extensions) => extensions,
             Err(err) => {
                 // ssh exits once it gives up; its reason is on stderr.
-                let _ = child.wait();
+                let _ = child.lock().unwrap_or_else(PoisonError::into_inner).wait();
+                if asking.cancelled() {
+                    return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+                }
                 let reason = failure_reason(&shared.stderr());
                 return Err(if reason.is_empty() {
                     err
@@ -202,7 +207,7 @@ impl Session {
         let mut session = Self {
             shared,
             input: Mutex::new(input),
-            child: Mutex::new(child),
+            child,
             next_id: AtomicU32::new(1),
             extensions,
             max_read: 32 * 1024,

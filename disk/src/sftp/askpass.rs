@@ -13,8 +13,8 @@ use std::{
     io::{self, BufRead, BufReader, Read, Write},
     net::{Shutdown, SocketAddr, TcpListener, TcpStream},
     path::Path,
-    process::Command,
-    sync::{Mutex, OnceLock, PoisonError},
+    process::{Child, Command},
+    sync::{Arc, Mutex, OnceLock, PoisonError},
 };
 
 use super::{Prompt, PromptKind};
@@ -24,8 +24,18 @@ const TOKEN_VAR: &str = "EGUI_FILES_ASKPASS_TOKEN";
 
 struct Server {
     addr: SocketAddr,
-    /// Each live connection's token, and the host it's for.
-    tokens: Mutex<HashMap<String, String>>,
+    /// Each live connection's token, and what's known of it.
+    tokens: Mutex<HashMap<String, Asking>>,
+}
+
+/// A connection being made, that ssh may ask about.
+struct Asking {
+    host: String,
+    /// Its ssh, to stop if the user cancels.
+    ssh: Option<Arc<Mutex<Child>>>,
+    /// The user cancelled: ssh's further questions get no answer, as it
+    /// would ask again with an empty one.
+    cancelled: bool,
 }
 
 static SERVER: OnceLock<io::Result<Server>> = OnceLock::new();
@@ -70,7 +80,14 @@ pub fn set_up(command: &mut Command, host: &str, program: &Path) -> io::Result<R
         .tokens
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
-        .insert(token.clone(), host.to_owned());
+        .insert(
+            token.clone(),
+            Asking {
+                host: host.to_owned(),
+                ssh: None,
+                cancelled: false,
+            },
+        );
     command
         .env("SSH_ASKPASS", program)
         .env("SSH_ASKPASS_REQUIRE", "force")
@@ -86,6 +103,33 @@ pub fn set_up(command: &mut Command, host: &str, program: &Path) -> io::Result<R
 
 /// Keeps a connection's token valid; see [`set_up`].
 pub struct Registration(String);
+
+impl Registration {
+    /// The ssh asking, stopped if the user cancels a question.
+    pub fn watch(&self, ssh: Arc<Mutex<Child>>) {
+        if let Ok(server) = server()
+            && let Some(asking) = server
+                .tokens
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get_mut(&self.0)
+        {
+            asking.ssh = Some(ssh);
+        }
+    }
+
+    /// Whether the user cancelled a question ssh asked.
+    pub fn cancelled(&self) -> bool {
+        server().is_ok_and(|server| {
+            server
+                .tokens
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(&self.0)
+                .is_some_and(|asking| asking.cancelled)
+        })
+    }
+}
 
 impl Drop for Registration {
     fn drop(&mut self) {
@@ -108,21 +152,36 @@ fn answer(stream: TcpStream) -> io::Result<()> {
     reader.read_line(&mut kind)?;
     let mut text = String::new();
     reader.take(64 * 1024).read_to_string(&mut text)?;
-    let host = server()?
-        .tokens
+    let token = token.trim();
+    let tokens = &server()?.tokens;
+    let asked = tokens
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
-        .get(token.trim())
-        .cloned();
-    let Some(host) = host else {
+        .get(token)
+        .map(|asking| (asking.host.clone(), asking.cancelled));
+    let Some((host, cancelled)) = asked else {
         return Ok(());
     };
     let kind = prompt_kind(kind.trim(), &text);
-    let reply = super::prompt(Prompt {
-        host,
-        text: text.trim().to_owned(),
-        kind,
-    });
+    let reply = if cancelled {
+        None
+    } else {
+        super::prompt(Prompt {
+            host,
+            text: text.trim().to_owned(),
+            kind,
+        })
+    };
+    // Cancelling a password ends the attempt: ssh would only ask again.
+    if reply.is_none() && matches!(kind, PromptKind::Secret | PromptKind::Confirm) {
+        let mut tokens = tokens.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(asking) = tokens.get_mut(token) {
+            asking.cancelled = true;
+            if let Some(ssh) = &asking.ssh {
+                let _ = ssh.lock().unwrap_or_else(PoisonError::into_inner).kill();
+            }
+        }
+    }
     let mut stream = stream;
     match reply {
         Some(answer) => {
