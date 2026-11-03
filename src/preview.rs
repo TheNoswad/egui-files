@@ -129,7 +129,9 @@ fn read_text(path: &Path) -> Option<(String, bool)> {
     if bytes.contains(&0) {
         return None;
     }
-    Some((String::from_utf8_lossy(&bytes).into_owned(), truncated))
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    crate::theme::fonts::want(&text);
+    Some((text, truncated))
 }
 
 /// The preview pane, showing the selection of the tab files were last browsed in.

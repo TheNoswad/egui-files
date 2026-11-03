@@ -99,6 +99,7 @@ impl MdView {
             ctx.request_repaint_after(LONG_DOCUMENT_PAUSE);
             return;
         }
+        crate::theme::fonts::want(text);
         self.document = Arc::new(parse::parse(text));
         self.parsed = Some(Arc::from(text));
         self.parsed_at = Some(Instant::now());

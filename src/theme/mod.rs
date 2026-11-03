@@ -7,10 +7,14 @@
 //! only list what it changes.
 
 mod editor;
+#[cfg(not(target_arch = "wasm32"))]
+mod fallback;
 pub mod file;
 pub mod fonts;
 pub mod presets;
 mod value;
+#[cfg(any(target_arch = "wasm32", test))]
+mod web_fonts;
 
 use std::{
     path::{Path, PathBuf},

@@ -13,5 +13,6 @@ mkdir -p "$out"
 CARGO_TARGET_DIR=target/wasm trunk build --release=true --cargo-profile web --public-url ./ \
     --dist "$out/demo" web/demo/index.html
 web/demo-files.sh "$out/demo/files"
+web/fonts.sh "$out/demo/fonts"
 cp web/index.html web/screenshot-light.png web/screenshot-dark.png "$out/"
 echo "Built $out. To try it: python3 -m http.server -d $out"

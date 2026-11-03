@@ -712,6 +712,11 @@ fn syntaxes_ui(ui: &mut Ui) {
         ui.hyperlink_to("Inter", "https://rsms.me/inter/");
         ui.label("by The Inter Project Authors, for rendered documents, under the SIL Open Font License 1.1.");
     });
+    #[cfg(target_arch = "wasm32")]
+    ui.horizontal_wrapped(|ui| {
+        ui.hyperlink_to("Noto", "https://notofonts.github.io/");
+        ui.label("by the Noto Project Authors, for other scripts in this demo, under the SIL Open Font License 1.1.");
+    });
     ui.add_space(8.0);
     ui.heading("Syntaxes & themes");
     ui.label(

@@ -142,6 +142,7 @@ pub fn read_dir(dir: &Path) -> io::Result<Vec<Entry>> {
         let Ok(dir_entry) = dir_entry else { continue };
         let path = dir_entry.path();
         let name = dir_entry.file_name().to_string_lossy().into_owned();
+        crate::theme::fonts::want(&name);
         let is_symlink = dir_entry.file_type().is_ok_and(|t| t.is_symlink());
         // Follow symlinks, but fall back to the link itself when it is broken.
         let link_meta = dir_entry.metadata().ok();

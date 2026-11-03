@@ -59,7 +59,12 @@
 - [ ] Phase 6: updating links in documents when files move in the app
 - [ ] Raw HTML: a subset (img, br, details/summary, kbd, sub/sup, center); shown as written, dimmed, until then
 - [ ] Export (HTML, rich text, PDF)
-- [ ] Scripts without a bundled font show as boxes (Chinese, Japanese, Korean, Hebrew, Arabic), and right-to-left text isn't ordered; the app's other text has the same gap. Emoji are monochrome, and flags don't work. See "Characters" in `samples/markdown/showcase.md`
+- [x] Scripts the bundled fonts lack, everywhere in the app: installed fonts on the desktop and Android, chosen by what they cover (`src/theme/fallback.rs`), and on the web Noto fonts beside the page, fetched when text needs them (`src/theme/web_fonts.rs`, `web/fonts.sh`)
+- [ ] Right-to-left text (Hebrew, Arabic) isn't ordered: letters are shaped, but lines read left to right. egui has no bidi. See "Characters" in `samples/markdown/showcase.md`
+- [ ] Emoji are monochrome, and flags don't work: egui has no color fonts
+- [ ] Chinese characters come in regional forms, and the first font found wins (Chinese ones first), so Japanese text can get Chinese forms on the desktop. Prefer by the system's language
+- [ ] Web: scripts with no font in `web/fonts.sh` stay boxes (Lao, Myanmar, Khmer, Tibetan, Ethiopic, and other Indian scripts), text in Japanese without kana gets the Chinese font, and these fonts have no bold
+- [ ] Check fallback fonts on Windows and Android: only run on Linux and in Firefox so far (Android loads `/system/fonts` itself, as fontdb doesn't)
 - [ ] Bare email addresses aren't linked (`<a@b.c>` is)
 - [ ] Text selection in rendered documents on touchscreens (dragging scrolls there)
 - [ ] Check on a real Android device: links opening through `android::open_url` (compiled, never run), and touch in rendered documents (checked with a mouse in the mobile layout)

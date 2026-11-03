@@ -447,6 +447,7 @@ impl FilesApp {
             &fontdb::Database::new(),
             None,
             None,
+            &[],
         ));
 
         #[cfg(not(target_arch = "wasm32"))]

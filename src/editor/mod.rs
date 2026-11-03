@@ -253,6 +253,7 @@ struct GalleyKey {
     width: f32,
     font_size: f32,
     color: Color32,
+    font_generation: u64,
 }
 
 impl View {
@@ -261,6 +262,7 @@ impl View {
         if *self.shown == *text {
             return;
         }
+        crate::theme::fonts::want(text);
         let diff = highlight::LineDiff::new(&self.shown, text);
         diff.splice(&mut self.lines, || None);
         for line in &mut self.lines[diff.changed()] {
@@ -301,12 +303,19 @@ impl View {
             width,
             font_size: font.size,
             color,
+            font_generation: crate::theme::fonts::generation(ctx),
         };
         if let Some((cached, galley)) = &self.galley {
             if *cached == key {
                 return galley.clone();
             }
-            if (cached.width, cached.font_size, cached.color) != (width, font.size, color) {
+            if (
+                cached.width,
+                cached.font_size,
+                cached.color,
+                cached.font_generation,
+            ) != (width, font.size, color, key.font_generation)
+            {
                 self.lines.iter_mut().for_each(|line| *line = None);
             }
         }
@@ -2145,6 +2154,29 @@ mod tests {
             Doc::Ready(buffer) => buffer.text.clone(),
             _ => panic!("not loaded"),
         }
+    }
+
+    /// New fonts mean a new glyph texture: text kept from before would draw
+    /// garbage from it, and fonts can arrive any time after startup.
+    #[test]
+    fn source_is_laid_out_again_when_fonts_change() {
+        let mut h = Harness::new("font-change", "fn main() {}\n");
+        h.frame(vec![]);
+        h.frame(vec![]);
+        let galley = |h: &Harness| match &h.tab.doc {
+            Doc::Ready(buffer) => buffer.view.galley.as_ref().unwrap().1.clone(),
+            _ => panic!("not loaded"),
+        };
+        let before = galley(&h);
+        h.frame(vec![]);
+        assert!(
+            Arc::ptr_eq(&before, &galley(&h)),
+            "kept while nothing changes"
+        );
+        crate::theme::fonts::set_fonts(&h.ctx, egui::FontDefinitions::default());
+        h.frame(vec![]);
+        h.frame(vec![]);
+        assert!(!Arc::ptr_eq(&before, &galley(&h)));
     }
 
     #[test]
