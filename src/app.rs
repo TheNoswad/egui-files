@@ -443,8 +443,11 @@ impl FilesApp {
         egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
         cc.egui_ctx.set_fonts(fonts);
 
+        // The web demo's files are made up afresh on each load, so it starts
+        // afresh too, in the home folder.
         let persisted: Option<Persisted> = cc
             .storage
+            .filter(|_| !cfg!(target_arch = "wasm32"))
             .and_then(|s| eframe::get_value(s, eframe::APP_KEY));
         let persisted = persisted
             .filter(|p| p.dock.iter_all_tabs().next().is_some())
@@ -479,7 +482,7 @@ impl FilesApp {
                 keymap: Default::default(),
                 titlebar: Default::default(),
                 pane_sizes: PaneSizes::default(),
-                mobile: false,
+                mobile: mobile::starts_enabled(),
             });
         let Persisted {
             dock,

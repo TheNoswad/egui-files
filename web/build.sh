@@ -12,5 +12,5 @@ mkdir -p "$out"
 # rebuild after it.
 CARGO_TARGET_DIR=target/wasm trunk build --release=true --public-url ./ \
     --dist "$out/demo" web/demo/index.html
-cp web/index.html web/screenshot.png "$out/"
+cp web/index.html web/screenshot-light.png web/screenshot-dark.png "$out/"
 echo "Built $out. To try it: python3 -m http.server -d $out"

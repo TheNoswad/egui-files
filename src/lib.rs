@@ -126,8 +126,16 @@ pub fn run_web() {
                 Box::new(|cc| Ok(Box::new(app::FilesApp::new(cc)))),
             )
             .await;
-        if let Err(err) = started {
-            log::error!("egui-files didn't start: {err:?}");
+        // For web/demo/loading.js, which waits to show the app.
+        let event = match started {
+            Ok(()) => "egui-files-started",
+            Err(err) => {
+                log::error!("egui-files didn't start: {err:?}");
+                "egui-files-failed"
+            }
+        };
+        if let (Some(window), Ok(event)) = (web_sys::window(), web_sys::Event::new(event)) {
+            let _ = window.dispatch_event(&event);
         }
     });
 }

@@ -301,6 +301,18 @@ impl FilesApp {
     }
 }
 
+/// Whether a fresh start shows the mobile layout: in the browser, when the
+/// page is phone-sized.
+pub fn starts_enabled() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    return web_sys::window()
+        .and_then(|w| w.inner_width().ok())
+        .and_then(|w| w.as_f64())
+        .is_some_and(|width| width < 700.0);
+    #[cfg(not(target_arch = "wasm32"))]
+    false
+}
+
 /// Whether the mobile layout is on in eframe's saved state, to open the
 /// window at the right size before the app starts.
 #[cfg(not(target_arch = "wasm32"))]
@@ -359,8 +371,10 @@ pub fn show(
     }
     // Clear of the screen's edges, which phones round off.
     let margin = egui::Margin::symmetric(EDGE_MARGIN, 0);
+    // Filled as the desktop layout's panels are: unfilled, eframe's clear
+    // color shows through, nearly black.
     CentralPanel::default()
-        .frame(egui::Frame::NONE.inner_margin(margin))
+        .frame(egui::Frame::central_panel(ui.style()).inner_margin(margin))
         .show(ui, |ui| match mobile.sheet {
             None => {
                 let tab = current.and_then(|id| {
