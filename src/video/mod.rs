@@ -554,7 +554,7 @@ mod tests {
     #[ignore]
     fn renders_frames_upright_at_requested_size() {
         let dir = std::env::temp_dir().join(format!("egui-files-video-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        disk::create_dir_all(&dir).unwrap();
         let path = dir.join("halves.mp4");
         let status = std::process::Command::new("ffmpeg")
             .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
@@ -611,7 +611,7 @@ mod tests {
                 .paused
         );
 
-        std::fs::remove_dir_all(dir).unwrap();
+        disk::remove_dir_all(dir).unwrap();
     }
 
     /// Switching between videos of the same height used to report a size of
@@ -621,7 +621,7 @@ mod tests {
     #[ignore]
     fn switching_videos_never_shows_partial_sizes_or_stale_frames() {
         let dir = std::env::temp_dir().join(format!("egui-files-switch-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        disk::create_dir_all(&dir).unwrap();
         let clip = |name: &str, size: &str, color: &str| {
             let path = dir.join(name);
             let status = std::process::Command::new("ffmpeg")
@@ -680,7 +680,7 @@ mod tests {
             }
         }
 
-        std::fs::remove_dir_all(dir).unwrap();
+        disk::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -725,7 +725,7 @@ mod tests {
     #[ignore]
     fn every_quality_level_plays() {
         let dir = std::env::temp_dir().join(format!("egui-files-quality-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        disk::create_dir_all(&dir).unwrap();
         let path = dir.join("clip.mp4");
         let status = std::process::Command::new("ffmpeg")
             .args([
@@ -768,6 +768,6 @@ mod tests {
                 std::thread::sleep(std::time::Duration::from_millis(5));
             }
         }
-        std::fs::remove_dir_all(dir).unwrap();
+        disk::remove_dir_all(dir).unwrap();
     }
 }

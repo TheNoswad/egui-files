@@ -395,7 +395,7 @@ mod tests {
     #[test]
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     fn gcc_cpu_detection_is_not_linked() {
-        let exe = std::fs::read(std::env::current_exe().unwrap()).unwrap();
+        let exe = disk::read(std::env::current_exe().unwrap()).unwrap();
         // `__cpu_indicator_init`, spelled backwards so this test doesn't put
         // the name in the binary itself.
         let needle: Vec<u8> = b"tini_rotacidni_upc__".iter().rev().copied().collect();

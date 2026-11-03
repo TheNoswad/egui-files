@@ -1,7 +1,6 @@
 //! What is known about one file or folder on disk.
 
 use std::{
-    fs,
     path::{Path, PathBuf},
     time::SystemTime,
 };
@@ -51,14 +50,14 @@ impl Item {
             name,
             ..Item::default()
         };
-        let Ok(link_meta) = fs::symlink_metadata(path) else {
+        let Ok(link_meta) = disk::symlink_metadata(path) else {
             return item;
         };
         item.exists = true;
         item.is_symlink = link_meta.file_type().is_symlink();
         let meta = if item.is_symlink {
-            item.link_target = fs::read_link(path).ok();
-            match fs::metadata(path) {
+            item.link_target = disk::read_link(path).ok();
+            match disk::metadata(path) {
                 Ok(meta) => meta,
                 Err(_) => {
                     item.broken = true;

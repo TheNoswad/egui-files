@@ -1,9 +1,9 @@
 //! A headless OpenGL context for mpv to render into, on its own GPU device
 //! rather than a window, so it's independent of the app's wgpu renderer.
 
+use disk::File;
 use std::{
     ffi::{CStr, CString, c_char, c_void},
-    fs::File,
     os::fd::AsRawFd,
 };
 
@@ -253,7 +253,7 @@ impl GlContext {
     /// The hardware decoding interop for this GPU's kernel driver, if known.
     pub fn hwdec_interop(&self) -> Option<&'static str> {
         let node = self.render_node.as_ref()?.path.file_name()?.to_owned();
-        let driver = std::fs::read_link(
+        let driver = disk::read_link(
             std::path::Path::new("/sys/class/drm")
                 .join(node)
                 .join("device/driver"),

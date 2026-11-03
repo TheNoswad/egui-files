@@ -914,17 +914,18 @@ dependencies = [
  "directories",
  "eframe",
  "egui",
+ "egui-files-disk",
  "egui-phosphor",
  "egui-winit",
  "egui_dock",
  "egui_extras",
- "filetime",
  "flate2",
  "fontdb",
  "freedesktop-icons",
  "glow",
  "image",
  "jni",
+ "js-sys",
  "kamadak-exif",
  "libc",
  "libloading",
@@ -974,6 +975,14 @@ dependencies = [
  "egui-files",
  "egui-winit",
  "log",
+]
+
+[[package]]
+name = "egui-files-disk"
+version = "0.1.0"
+dependencies = [
+ "filetime",
+ "web-time",
 ]
 
 [[package]]
@@ -3865,6 +3874,7 @@ name = "trash-android"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "egui-files-disk",
  "percent-encoding",
 ]
 

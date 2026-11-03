@@ -182,7 +182,7 @@ pub fn new_tab_target(ctx: &Context, rect: Rect) -> Option<Vec<PathBuf>> {
     if !over
         || claimed(ctx)
         || payload.archive.is_some()
-        || !unknown && !payload.paths.iter().any(|p| p.is_dir())
+        || !unknown && !payload.paths.iter().any(disk::is_dir)
     {
         return None;
     }
@@ -202,7 +202,7 @@ pub fn new_tab_target(ctx: &Context, rect: Rect) -> Option<Vec<PathBuf>> {
         payload
             .paths
             .iter()
-            .filter(|p| p.is_dir())
+            .filter(|p| disk::is_dir(p))
             .cloned()
             .collect(),
     )
@@ -265,7 +265,7 @@ fn should_copy(paths: &[PathBuf], dest: &Path, modifiers: Modifiers) -> bool {
 #[cfg(unix)]
 fn same_device(a: &Path, b: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
-    let dev = |p: &Path| std::fs::symlink_metadata(p).map(|m| m.dev()).ok();
+    let dev = |p: &Path| disk::symlink_metadata(p).map(|m| m.dev()).ok();
     dev(a).is_some() && dev(a) == dev(b)
 }
 
@@ -329,7 +329,7 @@ pub fn label(payload: &FileDrag) -> String {
         match payload.paths.as_slice() {
             [single] => format!(
                 "{} {}",
-                fs::icon_for(single, single.is_dir(), false),
+                fs::icon_for(single, disk::is_dir(single), false),
                 fs::display_name(single)
             ),
             paths => format!("{} {} items", egui_phosphor::regular::FILES, paths.len()),

@@ -37,6 +37,20 @@
     - [ ] Moto G20 (Unisoc T700, Mali-G52, Android 11): noise at the bottom while scrolling with Vulkan, gone with "Disable HW overlays", so its display hardware mishandles the Vulkan driver's buffers. Settings → Appearance → Renderer → OpenGL is the workaround (checked on the Pixel that OpenGL runs); confirm it fixes the G20, and if so consider OpenGL by default on such phones
     - [ ] Haptics on Windows: `InputHapticsManager` (`Windows.Devices.Haptics`, SDK 10.0.28000, for haptic touchpads, mice and pens) once the `windows` crate has it (0.62.2 doesn't). Linux has no API for it
 
+## Web demo
+
+`trunk build web/index.html` (wasm32-unknown-unknown). Files are in memory (`disk/`), made up by `src/demo.rs`; clippy.toml warns, in the wasm build only, of what fails or panics in a browser.
+
+- [x] Builds and starts in the browser; the terminal, video, libmpv, RAR and zstd say they need the desktop app
+- [x] Files in memory, with a demo home: browsing, thumbnails, previews with highlighting, archives, copy/move/trash/restore, extracting
+- [x] "Open" shows pictures, text, PDFs, audio and video in a browser tab, and saves anything else
+- [ ] A page around it, and publishing (GitHub Pages or Cloudflare Pages) from CI
+- [ ] Jobs run in one go on the UI thread: no progress or cancelling while they run, and a big one freezes the page. Conflicts keep both and password prompts cancel, since nothing can wait for an answer (`Progress::ask`)
+- [ ] Bring files in (drop them on the page, or a file picker) and save files out
+- [ ] Keep changes across reloads (IndexedDB), or say clearly that they're lost
+- [ ] Size: 16 MB of wasm (6.3 MB gzipped); the syntaxes and license texts are likely most of it
+- [ ] About's credits list the native build's crates (unrar, alacritty_terminal), not the web build's
+
 ## Proton Drive
 
 Using [proton-sdk-rs](https://github.com/narrrl/proton-sdk-rs) (`proton-sdk` + `proton-drive-rs`;

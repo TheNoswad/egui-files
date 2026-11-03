@@ -5,7 +5,6 @@
 use std::{
     collections::HashSet,
     ffi::{OsStr, OsString},
-    fs,
     path::{Path, PathBuf},
     sync::{
         Arc, Condvar, Mutex, RwLock,
@@ -499,19 +498,19 @@ fn seconds(time: std::io::Result<std::time::SystemTime>) -> i64 {
 }
 
 #[cfg(unix)]
-fn device(meta: &fs::Metadata) -> u64 {
+fn device(meta: &disk::Metadata) -> u64 {
     std::os::unix::fs::MetadataExt::dev(meta)
 }
 
 #[cfg(not(unix))]
-fn device(_meta: &fs::Metadata) -> u64 {
+fn device(_meta: &disk::Metadata) -> u64 {
     0
 }
 
 #[cfg(not(windows))]
 fn read(dir: &Path, root_device: u64) -> std::io::Result<Vec<Scanned>> {
     let mut entries = Vec::new();
-    for entry in fs::read_dir(dir)? {
+    for entry in disk::read_dir(dir)? {
         let Ok(entry) = entry else { continue };
         // Not followed: symlinks (junctions on Windows) only count themselves.
         let Ok(meta) = entry.metadata() else { continue };
@@ -731,7 +730,7 @@ pub struct Scan {
 
 impl Scan {
     pub fn start(ctx: &Context, root: PathBuf) -> Arc<Self> {
-        let meta = fs::metadata(&root);
+        let meta = disk::metadata(&root);
         let root_device = meta.as_ref().map(device).unwrap_or(0);
         let scan = Arc::new(Self {
             tree: RwLock::new(Tree::new(root.clone())),
@@ -1026,12 +1025,12 @@ mod tests {
             std::process::id(),
             std::thread::current().id()
         ));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(dir.join("a/b")).unwrap();
-        fs::create_dir_all(dir.join("c")).unwrap();
-        fs::write(dir.join("a/one.mp4"), vec![1; 10_000]).unwrap();
-        fs::write(dir.join("a/b/two.rs"), vec![1; 3_000]).unwrap();
-        fs::write(dir.join("c/three.txt"), vec![1; 500]).unwrap();
+        let _ = disk::remove_dir_all(&dir);
+        disk::create_dir_all(dir.join("a/b")).unwrap();
+        disk::create_dir_all(dir.join("c")).unwrap();
+        disk::write(dir.join("a/one.mp4"), vec![1; 10_000]).unwrap();
+        disk::write(dir.join("a/b/two.rs"), vec![1; 3_000]).unwrap();
+        disk::write(dir.join("c/three.txt"), vec![1; 500]).unwrap();
         dir
     }
 
@@ -1057,7 +1056,7 @@ mod tests {
         assert_eq!(tree.path(two), root.join("a/b/two.rs"));
         assert_eq!(tree.sorted_children(ROOT, Metric::Apparent)[0], a);
         drop(tree);
-        fs::remove_dir_all(root).unwrap();
+        disk::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1074,10 +1073,10 @@ mod tests {
         wait(&scan);
         assert_eq!(scan.tree().node(ROOT).totals.apparent, 13_500);
 
-        fs::write(root.join("a/b/new.png"), vec![1; 2_000]).unwrap();
-        fs::remove_file(root.join("a/b/two.rs")).unwrap();
-        fs::create_dir(root.join("a/b/sub")).unwrap();
-        fs::write(root.join("a/b/sub/deep.png"), vec![1; 100]).unwrap();
+        disk::write(root.join("a/b/new.png"), vec![1; 2_000]).unwrap();
+        disk::remove_file(root.join("a/b/two.rs")).unwrap();
+        disk::create_dir(root.join("a/b/sub")).unwrap();
+        disk::write(root.join("a/b/sub/deep.png"), vec![1; 100]).unwrap();
         let b = scan.tree().find(&root.join("a/b")).unwrap();
         scan.refresh(b);
         wait(&scan);
@@ -1086,7 +1085,7 @@ mod tests {
         assert_eq!(tree.node(b).totals.files, 2);
         assert!(tree.find(&root.join("a/b/sub/deep.png")).is_some());
         drop(tree);
-        fs::remove_dir_all(root).unwrap();
+        disk::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1132,11 +1131,11 @@ mod tests {
     #[test]
     fn counts_hard_links_once() {
         let root = dir();
-        fs::hard_link(root.join("a/one.mp4"), root.join("c/again.mp4")).unwrap();
+        disk::hard_link(root.join("a/one.mp4"), root.join("c/again.mp4")).unwrap();
         let scan = Scan::start(&Context::default(), root.clone());
         wait(&scan);
         assert_eq!(scan.tree().node(ROOT).totals.apparent, 13_500);
         assert_eq!(scan.tree().node(ROOT).totals.files, 4);
-        fs::remove_dir_all(root).unwrap();
+        disk::remove_dir_all(root).unwrap();
     }
 }

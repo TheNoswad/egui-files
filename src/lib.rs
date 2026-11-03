@@ -4,6 +4,12 @@
 // Files are dropped to close them before a rename or removal; on
 // wasm32-unknown-unknown `File` has no `Drop`, so clippy calls that pointless.
 #![cfg_attr(target_arch = "wasm32", allow(clippy::drop_non_drop))]
+// clippy.toml's disallowed items fail only in the browser, and natively the
+// replacements are the very same items.
+#![cfg_attr(
+    not(target_arch = "wasm32"),
+    allow(clippy::disallowed_methods, clippy::disallowed_types)
+)]
 
 mod about;
 #[cfg(target_os = "android")]
@@ -12,6 +18,8 @@ mod app;
 mod archive;
 mod background;
 mod dates;
+#[cfg(target_arch = "wasm32")]
+mod demo;
 mod devices;
 mod dnd;
 mod dock_tab;
@@ -101,6 +109,7 @@ pub fn run_web() {
     use wasm_bindgen::JsCast;
 
     eframe::WebLogger::init(log::LevelFilter::Info).ok();
+    demo::create();
     wasm_bindgen_futures::spawn_local(async {
         let document = web_sys::window().and_then(|w| w.document());
         let Some(canvas) = document

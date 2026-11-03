@@ -820,8 +820,8 @@ fn tool_version(program: &str) -> Option<String> {
 
 #[cfg(target_os = "linux")]
 fn os_name() -> String {
-    let release = std::fs::read_to_string("/etc/os-release")
-        .or_else(|_| std::fs::read_to_string("/usr/lib/os-release"))
+    let release = disk::read_to_string("/etc/os-release")
+        .or_else(|_| disk::read_to_string("/usr/lib/os-release"))
         .unwrap_or_default();
     let field = |name: &str| {
         release.lines().find_map(|l| {

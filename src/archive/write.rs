@@ -1,7 +1,7 @@
 //! Creating archives.
 
+use disk::{File, Metadata};
 use std::{
-    fs::{self, File, Metadata},
     io::{self, BufWriter, Read, Write},
     num::NonZeroU64,
     path::{Path, PathBuf},
@@ -75,7 +75,11 @@ pub fn compress(job: CompressJob, p: &Progress) {
                 let mut options = lzma_rust2::XzOptions::with_preset(level);
                 let block = 3 * u64::from(options.lzma_options.dict_size);
                 options.set_block_size(NonZeroU64::new(block.max(1 << 20)));
+                #[cfg(not(target_arch = "wasm32"))]
                 let xz = lzma_rust2::XzWriterMt::new(out, options, threads())?;
+                // The browser can't start the threads.
+                #[cfg(target_arch = "wasm32")]
+                let xz = lzma_rust2::XzWriter::new(out, options)?;
                 finish(write_tar(xz, &items, p)?.finish()?)
             }
             #[cfg(target_arch = "wasm32")]
@@ -105,11 +109,11 @@ pub fn compress(job: CompressJob, p: &Progress) {
     match result {
         Ok(()) if !p.cancelled() => p.set_outcome(Outcome::Reveal(dest)),
         Ok(()) => {
-            let _ = fs::remove_file(&dest);
+            let _ = disk::remove_file(&dest);
         }
         Err(err) => {
             if err.kind() != io::ErrorKind::AlreadyExists {
-                let _ = fs::remove_file(&dest);
+                let _ = disk::remove_file(&dest);
             }
             if !p.cancelled() {
                 p.error(&dest, err);
@@ -137,12 +141,12 @@ fn collect(path: &Path, name: String, dest: &Path, items: &mut Vec<Item>, p: &Pr
     if p.cancelled() || path == dest {
         return;
     }
-    let meta = match fs::symlink_metadata(path) {
+    let meta = match disk::symlink_metadata(path) {
         Ok(meta) => meta,
         Err(err) => return p.error(path, err),
     };
     let kind = if meta.is_symlink() {
-        match fs::read_link(path) {
+        match disk::read_link(path) {
             Ok(target) => Kind::Symlink(target),
             Err(err) => return p.error(path, err),
         }
@@ -159,7 +163,7 @@ fn collect(path: &Path, name: String, dest: &Path, items: &mut Vec<Item>, p: &Pr
         meta,
     });
     if is_dir {
-        let mut children: Vec<_> = match fs::read_dir(path) {
+        let mut children: Vec<_> = match disk::read_dir(path) {
             Ok(entries) => entries.flatten().collect(),
             Err(err) => return p.error(path, err),
         };
@@ -284,12 +288,44 @@ fn write_zip<W: Write + io::Seek>(
     finish(zip.finish()?)
 }
 
+/// The header's type, size, mode and time, from `meta`.
+#[cfg(not(target_arch = "wasm32"))]
+fn set_metadata(header: &mut tar::Header, meta: &Metadata) {
+    header.set_metadata_in_mode(meta, tar::HeaderMode::Complete);
+}
+
+/// tar takes only std's metadata, so this does what it does on Windows.
+#[cfg(target_arch = "wasm32")]
+fn set_metadata(header: &mut tar::Header, meta: &Metadata) {
+    let (entry_type, mode) = if meta.is_dir() {
+        (tar::EntryType::Directory, 0o755)
+    } else if meta.is_symlink() {
+        (tar::EntryType::Symlink, 0o777)
+    } else {
+        (tar::EntryType::Regular, 0o644)
+    };
+    header.set_entry_type(entry_type);
+    header.set_size(if meta.is_file() { meta.len() } else { 0 });
+    header.set_mode(if meta.permissions().readonly() {
+        mode & 0o555
+    } else {
+        mode
+    });
+    if let Some(since) = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+    {
+        header.set_mtime(since.as_secs());
+    }
+}
+
 fn write_tar<W: Write>(out: W, items: &[Item], p: &Progress) -> io::Result<W> {
     let mut tar = tar::Builder::new(out);
     tar.follow_symlinks(false);
     for item in items {
         let mut header = tar::Header::new_gnu();
-        header.set_metadata_in_mode(&item.meta, tar::HeaderMode::Complete);
+        set_metadata(&mut header, &item.meta);
         match &item.kind {
             Kind::Dir => {
                 header.set_size(0);

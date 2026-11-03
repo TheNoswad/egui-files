@@ -1,6 +1,10 @@
 //! Collects what the About window shows: the git commit and toolchain the app
 //! was built from, and every crate compiled into it with its license texts.
 
+// clippy.toml's disallowed items are for the browser; this runs on the build
+// machine.
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
+
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     env,

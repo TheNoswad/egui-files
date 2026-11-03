@@ -296,8 +296,8 @@ mod tests {
     #[test]
     fn syncs_to_current_folder() {
         let root = std::env::temp_dir().join(format!("egui-files-tree-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join("x/y/z")).unwrap();
+        let _ = disk::remove_dir_all(&root);
+        disk::create_dir_all(root.join("x/y/z")).unwrap();
         let place = Place {
             label: "Root".to_owned(),
             icon: icon::HARD_DRIVE,
@@ -322,6 +322,6 @@ mod tests {
         assert!(!tree.expanded.contains(&current));
         assert_eq!(tree.children[&root.join("x/y")].len(), 1);
 
-        std::fs::remove_dir_all(root).unwrap();
+        disk::remove_dir_all(root).unwrap();
     }
 }

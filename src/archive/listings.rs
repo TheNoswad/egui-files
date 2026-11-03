@@ -50,7 +50,7 @@ impl Listings {
     /// The listing of `path`, starting to read it if needed. Re-reads it if
     /// the file changed.
     pub fn get(&mut self, path: &Path) -> ListState {
-        let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+        let modified = disk::metadata(path).and_then(|m| m.modified()).ok();
         self.clock += 1;
         match self.slots.get_mut(path) {
             Some(slot) if slot.modified == modified => {
@@ -76,7 +76,7 @@ impl Listings {
 
     /// Reads the listing again with a password.
     pub fn unlock(&mut self, path: &Path, password: String) {
-        let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+        let modified = disk::metadata(path).and_then(|m| m.modified()).ok();
         self.load(path, modified, Some(password));
     }
 

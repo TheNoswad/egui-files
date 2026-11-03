@@ -7,10 +7,17 @@
 //! `.trashinfo` file for each in `info/` saying where it came from and when.
 //! Keeping it on the same volume makes trashing a rename, however big.
 
+// clippy.toml's disallowed items fail only in the browser, and natively the
+// replacements are the very same items.
+#![cfg_attr(
+    not(target_arch = "wasm32"),
+    allow(clippy::disallowed_methods, clippy::disallowed_types)
+)]
+
 use std::{
     borrow::Borrow,
     ffi::OsString,
-    fmt, fs, io,
+    fmt, io,
     path::{Path, PathBuf},
 };
 
@@ -95,7 +102,11 @@ pub struct TrashItemMetadata {
 }
 
 /// The internal shared storage.
+#[cfg(not(target_arch = "wasm32"))]
 const INTERNAL: &str = "/storage/emulated/0";
+/// The browser's files, in memory, are one volume.
+#[cfg(target_arch = "wasm32")]
+const INTERNAL: &str = "/";
 
 /// The trash folder at a volume's root.
 const TRASH: &str = ".Trash";
@@ -104,7 +115,7 @@ const TRASH: &str = ".Trash";
 /// cards and USB drives, mounted under /storage by their ids.
 fn volumes() -> Vec<PathBuf> {
     let mut roots = vec![PathBuf::from(INTERNAL)];
-    if let Ok(read) = fs::read_dir("/storage") {
+    if let Ok(read) = disk::read_dir("/storage") {
         roots.extend(read.flatten().map(|e| e.path()).filter(|p| {
             !matches!(
                 p.file_name().and_then(|n| n.to_str()),
@@ -150,23 +161,20 @@ pub fn delete<T: AsRef<Path>>(path: T) -> Result<(), Error> {
 
 fn delete_in(path: &Path, roots: &[PathBuf]) -> Result<(), Error> {
     // Through symlinks such as /sdcard, but not the item's own.
-    let parent = path
-        .parent()
-        .ok_or_else(|| error("can't trash the root"))?
-        .canonicalize()?;
+    let parent = disk::canonicalize(path.parent().ok_or_else(|| error("can't trash the root"))?)?;
     let name = path
         .file_name()
         .ok_or_else(|| error("can't trash the root"))?;
     let path = parent.join(name);
-    fs::symlink_metadata(&path)?;
+    disk::symlink_metadata(&path)?;
     let trash = trash_for(&path, roots)
         .ok_or_else(|| error("only files in shared storage or on SD cards can be trashed"))?;
     if path.starts_with(&trash) {
         return Err(error("it's already in the trash"));
     }
     let (files, info) = (trash.join("files"), trash.join("info"));
-    fs::create_dir_all(&files)?;
-    fs::create_dir_all(&info)?;
+    disk::create_dir_all(&files)?;
+    disk::create_dir_all(&info)?;
 
     let path_text = path
         .to_str()
@@ -185,7 +193,7 @@ fn delete_in(path: &Path, roots: &[PathBuf]) -> Result<(), Error> {
             format!("{name}.{n}")
         };
         let info_path = info.join(format!("{stored}.trashinfo"));
-        match fs::OpenOptions::new()
+        match disk::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&info_path)
@@ -194,9 +202,9 @@ fn delete_in(path: &Path, roots: &[PathBuf]) -> Result<(), Error> {
                 use io::Write;
                 let moved = file
                     .write_all(contents.as_bytes())
-                    .and_then(|()| fs::rename(&path, files.join(&stored)));
+                    .and_then(|()| disk::rename(&path, files.join(&stored)));
                 if let Err(err) = moved {
-                    let _ = fs::remove_file(&info_path);
+                    let _ = disk::remove_file(&info_path);
                     return Err(err.into());
                 }
                 return Ok(());
@@ -210,7 +218,7 @@ fn delete_in(path: &Path, roots: &[PathBuf]) -> Result<(), Error> {
 
 /// Reads one `.trashinfo` file.
 fn read_info(info_path: &Path) -> Option<TrashItem> {
-    let text = fs::read_to_string(info_path).ok()?;
+    let text = disk::read_to_string(info_path).ok()?;
     let mut original = None;
     let mut deleted = None;
     for line in text.lines() {
@@ -237,7 +245,7 @@ fn read_info(info_path: &Path) -> Option<TrashItem> {
 fn list_in(roots: &[PathBuf]) -> Vec<TrashItem> {
     let mut items = Vec::new();
     for root in roots {
-        let Ok(read) = fs::read_dir(root.join(TRASH).join("info")) else {
+        let Ok(read) = disk::read_dir(root.join(TRASH).join("info")) else {
             continue;
         };
         items.extend(
@@ -248,7 +256,7 @@ fn list_in(roots: &[PathBuf]) -> Vec<TrashItem> {
                 // Info without the item it describes is left over.
                 .filter(|item| {
                     item.stored()
-                        .is_some_and(|s| fs::symlink_metadata(s).is_ok())
+                        .is_some_and(|s| disk::symlink_metadata(s).is_ok())
                 }),
         );
     }
@@ -257,10 +265,10 @@ fn list_in(roots: &[PathBuf]) -> Vec<TrashItem> {
 
 /// Removes a file, or a folder and everything in it.
 fn remove(path: &Path) -> io::Result<()> {
-    if fs::symlink_metadata(path)?.is_dir() {
-        fs::remove_dir_all(path)
+    if disk::symlink_metadata(path)?.is_dir() {
+        disk::remove_dir_all(path)
     } else {
-        fs::remove_file(path)
+        disk::remove_file(path)
     }
 }
 
@@ -273,10 +281,10 @@ pub mod os_limited {
 
     pub fn metadata(item: &TrashItem) -> Result<TrashItemMetadata, Error> {
         let stored = item.stored().ok_or_else(|| error("not a trashed item"))?;
-        let size = if fs::symlink_metadata(&stored)?.is_dir() {
-            TrashItemSize::Entries(fs::read_dir(&stored)?.count())
+        let size = if disk::symlink_metadata(&stored)?.is_dir() {
+            TrashItemSize::Entries(disk::read_dir(&stored)?.count())
         } else {
-            TrashItemSize::Bytes(fs::symlink_metadata(&stored)?.len())
+            TrashItemSize::Bytes(disk::symlink_metadata(&stored)?.len())
         };
         Ok(TrashItemMetadata { size })
     }
@@ -294,7 +302,7 @@ pub mod os_limited {
                     _ => {}
                 }
             }
-            fs::remove_file(&item.id)?;
+            disk::remove_file(&item.id)?;
         }
         Ok(())
     }
@@ -307,7 +315,7 @@ pub mod os_limited {
         while !items.is_empty() {
             let item = items.remove(0);
             let original = item.original_path();
-            if fs::symlink_metadata(&original).is_ok() {
+            if disk::symlink_metadata(&original).is_ok() {
                 items.insert(0, item);
                 return Err(Error::RestoreCollision {
                     path: original,
@@ -315,9 +323,9 @@ pub mod os_limited {
                 });
             }
             let stored = item.stored().ok_or_else(|| error("not a trashed item"))?;
-            fs::create_dir_all(&item.original_parent)?;
-            fs::rename(&stored, &original)?;
-            fs::remove_file(&item.id)?;
+            disk::create_dir_all(&item.original_parent)?;
+            disk::rename(&stored, &original)?;
+            disk::remove_file(&item.id)?;
         }
         Ok(())
     }
@@ -329,8 +337,8 @@ mod tests {
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("trash-android-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        let _ = disk::remove_dir_all(&dir);
+        disk::create_dir_all(&dir).unwrap();
         dir.canonicalize().unwrap()
     }
 
@@ -339,14 +347,14 @@ mod tests {
         let root = scratch("cycle");
         let roots = [root.clone()];
         let docs = root.join("Documents");
-        fs::create_dir_all(&docs).unwrap();
+        disk::create_dir_all(&docs).unwrap();
         let file = docs.join("a b%.txt");
-        fs::write(&file, "hi").unwrap();
+        disk::write(&file, "hi").unwrap();
 
         delete_in(&file, &roots).unwrap();
         assert!(!file.exists());
         // Another with the same name gets a name of its own.
-        fs::write(&file, "again").unwrap();
+        disk::write(&file, "again").unwrap();
         delete_in(&file, &roots).unwrap();
 
         let mut items = list_in(&roots);
@@ -362,7 +370,7 @@ mod tests {
         );
 
         os_limited::restore_all([items[0].clone()]).unwrap();
-        assert_eq!(fs::read_to_string(&file).unwrap(), "hi");
+        assert_eq!(disk::read_to_string(&file).unwrap(), "hi");
         // The other can't go back over it.
         assert!(matches!(
             os_limited::restore_all([items[1].clone()]),
@@ -370,7 +378,7 @@ mod tests {
         ));
         os_limited::purge_all([&items[1]]).unwrap();
         assert!(list_in(&roots).is_empty());
-        fs::remove_dir_all(root).unwrap();
+        disk::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -378,8 +386,8 @@ mod tests {
         let root = scratch("folder");
         let roots = [root.clone()];
         let folder = root.join("photos");
-        fs::create_dir_all(folder.join("inner")).unwrap();
-        fs::write(folder.join("x.jpg"), "x").unwrap();
+        disk::create_dir_all(folder.join("inner")).unwrap();
+        disk::write(folder.join("x.jpg"), "x").unwrap();
         delete_in(&folder, &roots).unwrap();
         let items = list_in(&roots);
         assert_eq!(
@@ -388,7 +396,7 @@ mod tests {
         );
         os_limited::purge_all(&items).unwrap();
         assert!(!root.join(TRASH).join("files").join("photos").exists());
-        fs::remove_dir_all(root).unwrap();
+        disk::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -396,15 +404,15 @@ mod tests {
         let root = scratch("outside");
         let elsewhere = scratch("elsewhere");
         let file = elsewhere.join("f");
-        fs::write(&file, "").unwrap();
-        assert!(delete_in(&file, &[root.clone()]).is_err());
+        disk::write(&file, "").unwrap();
+        assert!(delete_in(&file, std::slice::from_ref(&root)).is_err());
         assert!(file.exists());
         // Nor the trash itself.
         let trash = root.join(TRASH).join("files");
-        fs::create_dir_all(&trash).unwrap();
-        fs::write(trash.join("g"), "").unwrap();
-        assert!(delete_in(&trash.join("g"), &[root.clone()]).is_err());
-        fs::remove_dir_all(root).unwrap();
-        fs::remove_dir_all(elsewhere).unwrap();
+        disk::create_dir_all(&trash).unwrap();
+        disk::write(trash.join("g"), "").unwrap();
+        assert!(delete_in(&trash.join("g"), std::slice::from_ref(&root)).is_err());
+        disk::remove_dir_all(root).unwrap();
+        disk::remove_dir_all(elsewhere).unwrap();
     }
 }

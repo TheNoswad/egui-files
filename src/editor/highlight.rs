@@ -270,6 +270,9 @@ pub struct Highlighted {
 pub struct Highlighter {
     requests: Sender<Request>,
     results: Receiver<Highlighted>,
+    /// The browser can't start the worker's thread, so `poll` runs it.
+    #[cfg(target_arch = "wasm32")]
+    inline: std::cell::RefCell<Inline>,
     pub syntax: &'static str,
     pub theme: &'static str,
 }
@@ -281,6 +284,7 @@ impl Highlighter {
         let syntax = self::syntax(syntax);
         let theme_ref = self::theme(theme);
         let ctx = ctx.clone();
+        #[cfg(not(target_arch = "wasm32"))]
         std::thread::Builder::new()
             .name("highlight".into())
             .spawn(move || {
@@ -290,6 +294,13 @@ impl Highlighter {
         Self {
             requests,
             results,
+            #[cfg(target_arch = "wasm32")]
+            inline: std::cell::RefCell::new(Inline {
+                worker: Worker::new(syntax, theme_ref),
+                requests: worker_requests,
+                results: worker_results,
+                ctx,
+            }),
             syntax: syntax.name.as_str(),
             theme: theme_name(theme),
         }
@@ -301,7 +312,32 @@ impl Highlighter {
 
     /// The newest results, if any arrived.
     pub fn poll(&self) -> Option<Highlighted> {
+        #[cfg(target_arch = "wasm32")]
+        self.inline.borrow_mut().serve();
         self.results.try_iter().last()
+    }
+}
+
+/// The worker's side of a [`Highlighter`], run on the UI thread.
+#[cfg(target_arch = "wasm32")]
+struct Inline {
+    worker: Worker,
+    requests: Receiver<Request>,
+    results: Sender<Highlighted>,
+    ctx: egui::Context,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Inline {
+    /// Highlights what was asked for since the last call, all of it.
+    fn serve(&mut self) {
+        let mut pending = self.requests.try_recv().ok();
+        while let Some(request) = pending.take() {
+            let served = self
+                .worker
+                .serve(request, &self.requests, &self.results, &self.ctx);
+            pending = served.ok().flatten();
+        }
     }
 }
 
@@ -370,6 +406,7 @@ impl Worker {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn run(
         mut self,
         requests: Receiver<Request>,
@@ -377,40 +414,51 @@ impl Worker {
         ctx: egui::Context,
     ) {
         let mut pending = requests.recv().ok();
-        while let Some(Request::Text { version, text }) = pending.take() {
-            // Only the newest text matters.
-            let (version, text) = match requests.try_iter().last() {
-                Some(Request::Text { version, text }) => (version, text),
-                None => (version, text),
-            };
-            let diff = LineDiff::new(&self.text, &text);
-            diff.splice(&mut self.lines, Line::empty);
-            // Their old colors stay until they're redone, but not their states.
-            for line in &mut self.lines[diff.changed()] {
-                line.start = None;
-            }
-            self.text = text;
-            let send = |lines: &[Line], done| {
-                let lines = lines.iter().map(|l| l.spans.clone()).collect();
-                let sent = results.send(Highlighted {
-                    version,
-                    lines,
-                    done,
-                });
-                ctx.request_repaint();
-                sent.is_ok()
-            };
-            match self.highlight(&requests, &send) {
+        while let Some(request) = pending.take() {
+            match self.serve(request, &requests, &results, &ctx) {
                 Ok(Some(next)) => pending = Some(next),
-                Ok(None) => {
-                    if !send(&self.lines, true) {
-                        return;
-                    }
-                    pending = requests.recv().ok();
-                }
+                Ok(None) => pending = requests.recv().ok(),
                 // The UI is gone.
                 Err(()) => return,
             }
+        }
+    }
+
+    /// Highlights the newest text asked for. Returns early with a newer
+    /// request if one arrives.
+    fn serve(
+        &mut self,
+        Request::Text { version, text }: Request,
+        requests: &Receiver<Request>,
+        results: &Sender<Highlighted>,
+        ctx: &egui::Context,
+    ) -> Result<Option<Request>, ()> {
+        // Only the newest text matters.
+        let (version, text) = match requests.try_iter().last() {
+            Some(Request::Text { version, text }) => (version, text),
+            None => (version, text),
+        };
+        let diff = LineDiff::new(&self.text, &text);
+        diff.splice(&mut self.lines, Line::empty);
+        // Their old colors stay until they're redone, but not their states.
+        for line in &mut self.lines[diff.changed()] {
+            line.start = None;
+        }
+        self.text = text;
+        let send = |lines: &[Line], done| {
+            let lines = lines.iter().map(|l| l.spans.clone()).collect();
+            let sent = results.send(Highlighted {
+                version,
+                lines,
+                done,
+            });
+            ctx.request_repaint();
+            sent.is_ok()
+        };
+        match self.highlight(requests, &send)? {
+            Some(next) => Ok(Some(next)),
+            None if send(&self.lines, true) => Ok(None),
+            None => Err(()),
         }
     }
 

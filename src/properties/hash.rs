@@ -1,7 +1,7 @@
 //! MD5 and SHA-256 of a file, on a background thread.
 
+use disk::File;
 use std::{
-    fs::File,
     io::Read,
     path::PathBuf,
     sync::{
@@ -116,7 +116,7 @@ mod tests {
     #[test]
     fn hashes_a_file() {
         let path = std::env::temp_dir().join(format!("egui-files-hash-{}", std::process::id()));
-        std::fs::write(&path, "abc").unwrap();
+        disk::write(&path, "abc").unwrap();
         let state = State::default();
         let sums = hash(&state, &path, &egui::Context::default()).unwrap();
         assert_eq!(sums.md5, "900150983cd24fb0d6963f7d28e17f72");
@@ -129,6 +129,6 @@ mod tests {
             Some("MD5")
         );
         assert_eq!(matches(&sums, "nope"), None);
-        std::fs::remove_file(path).unwrap();
+        disk::remove_file(path).unwrap();
     }
 }

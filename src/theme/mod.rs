@@ -359,7 +359,7 @@ impl Themes {
     /// Notices theme files changing on disk.
     fn watch(&mut self, ctx: &egui::Context) {
         use notify::Watcher;
-        let Some(dir) = self.dir.as_ref().filter(|d| d.is_dir()) else {
+        let Some(dir) = self.dir.as_ref().filter(|d| disk::is_dir(d)) else {
             return;
         };
         let changed = self.changed.clone();
@@ -394,7 +394,7 @@ impl Themes {
         let mut files: Vec<PathBuf> = self
             .dir
             .as_ref()
-            .and_then(|dir| std::fs::read_dir(dir).ok())
+            .and_then(|dir| disk::read_dir(dir).ok())
             .into_iter()
             .flatten()
             .filter_map(|e| e.ok().map(|e| e.path()))
@@ -508,7 +508,7 @@ impl Themes {
         if self.changed.swap(false, Ordering::Relaxed) {
             self.reload();
         }
-        if self.watcher.is_none() && self.dir.as_ref().is_some_and(|d| d.is_dir()) {
+        if self.watcher.is_none() && self.dir.as_ref().is_some_and(disk::is_dir) {
             self.watch(ctx);
         }
         self.preview = self.hovered.take();
@@ -595,11 +595,11 @@ impl Themes {
     fn save(&mut self, path: &Path, file: &ThemeFile) -> Result<(), String> {
         let text = toml::to_string_pretty(file).map_err(|e| e.to_string())?;
         if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+            disk::create_dir_all(dir).map_err(|e| e.to_string())?;
         }
         let temp = path.with_extension("toml.tmp");
-        std::fs::write(&temp, text)
-            .and_then(|()| std::fs::rename(&temp, path))
+        disk::write(&temp, text)
+            .and_then(|()| disk::rename(&temp, path))
             .map_err(|e| e.to_string())?;
         self.reload();
         Ok(())
@@ -623,7 +623,7 @@ impl Themes {
                     format!("{stem}-{n}.toml")
                 })
             })
-            .find(|p| !p.exists())
+            .find(|p| !disk::path_exists(p))
     }
 
     /// A theme name nobody uses yet.
@@ -643,7 +643,7 @@ fn read_entry(path: &Path) -> Entry {
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let parsed = std::fs::read_to_string(path)
+    let parsed = disk::read_to_string(path)
         .map_err(|e| e.to_string())
         .and_then(|text| toml::from_str::<toml::Table>(&text).map_err(|e| e.to_string()))
         .and_then(|table| {
@@ -661,7 +661,7 @@ fn read_entry(path: &Path) -> Entry {
         },
         Err(error) => {
             // Keep its base, if that much can be read, so it still looks close.
-            let base = std::fs::read_to_string(path)
+            let base = disk::read_to_string(path)
                 .ok()
                 .and_then(|text| toml::from_str::<toml::Table>(&text).ok())
                 .and_then(|t| t.get("base")?.as_str().map(str::to_owned));
@@ -832,8 +832,8 @@ mod tests {
     fn scratch(name: &str) -> PathBuf {
         let dir =
             std::env::temp_dir().join(format!("egui-files-themes-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let _ = disk::remove_dir_all(&dir);
+        disk::create_dir_all(&dir).unwrap();
         dir
     }
 
@@ -871,7 +871,7 @@ mod tests {
     #[test]
     fn files_inherit_from_their_base() {
         let dir = scratch("inherit");
-        std::fs::write(
+        disk::write(
             dir.join("red.toml"),
             r##"
             name = "Red Mocha"
@@ -897,12 +897,12 @@ mod tests {
     #[test]
     fn broken_files_fall_back_to_their_base_with_a_warning() {
         let dir = scratch("broken");
-        std::fs::write(
+        disk::write(
             dir.join("broken.toml"),
             "base = \"Nord\"\n[colors]\ntext = 12",
         )
         .unwrap();
-        std::fs::write(dir.join("loop.toml"), "base = \"loop\"").unwrap();
+        disk::write(dir.join("loop.toml"), "base = \"loop\"").unwrap();
         let themes = themes_in(&dir);
         let broken = themes.resolve("broken", None);
         assert!(!broken.warnings.is_empty());

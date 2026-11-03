@@ -7,7 +7,6 @@
 use trash_android as trash;
 
 use std::{
-    fs,
     io::{self, Read, Write},
     path::{Path, PathBuf},
     sync::{
@@ -180,7 +179,7 @@ impl Resolver {
 
 /// A folder, not following symlinks.
 fn is_dir(path: &Path) -> bool {
-    fs::symlink_metadata(path).is_ok_and(|m| m.is_dir())
+    disk::symlink_metadata(path).is_ok_and(|m| m.is_dir())
 }
 
 /// What to do with a job's result once it finishes.
@@ -235,6 +234,7 @@ impl Progress {
     }
 
     /// Asks the user and waits for the answer; `None` if the job was cancelled.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn ask(&self, prompt: Prompt) -> Option<Answer> {
         *self.prompt.lock().expect("prompt poisoned") = Some(prompt);
         let mut answer = self.answer.lock().expect("answer poisoned");
@@ -252,6 +252,19 @@ impl Progress {
                 .wait_timeout(answer, Duration::from_millis(100))
                 .expect("answer poisoned")
                 .0;
+        }
+    }
+
+    /// The browser runs jobs on the UI thread, which can't wait for the user
+    /// there: conflicts keep both, which loses nothing, and passwords cancel.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn ask(&self, prompt: Prompt) -> Option<Answer> {
+        match prompt {
+            Prompt::Conflict { .. } => Some(Answer::Conflict {
+                choice: ConflictChoice::KeepBoth,
+                all: false,
+            }),
+            Prompt::Password { .. } => None,
         }
     }
 
@@ -364,18 +377,29 @@ impl Jobs {
         let title = kind.title();
         let worker_progress = progress.clone();
         let ctx = self.ctx.clone();
-        let handle = std::thread::Builder::new()
-            .name("file-job".to_owned())
-            .spawn(move || {
-                run(kind, &worker_progress);
-                worker_progress.finished.store(true, Relaxed);
-                ctx.request_repaint();
-            })
-            .expect("failed to spawn file job thread");
+        let work = move || {
+            run(kind, &worker_progress);
+            worker_progress.finished.store(true, Relaxed);
+            ctx.request_repaint();
+        };
+        // Kept to wait for the job to clean up; the browser runs it after
+        // this frame instead.
+        #[cfg(not(target_arch = "wasm32"))]
+        let handle = Some(
+            std::thread::Builder::new()
+                .name("file-job".to_owned())
+                .spawn(work)
+                .expect("failed to spawn file job thread"),
+        );
+        #[cfg(target_arch = "wasm32")]
+        let handle = {
+            crate::background::spawn("file-job", work);
+            None
+        };
         self.jobs.push(Job {
             title,
             progress,
-            handle: Some(handle),
+            handle,
             finished_at: None,
             prompt_ui: PromptUi::default(),
         });
@@ -585,7 +609,7 @@ impl Jobs {
                         existing.parent().map(display_name).unwrap_or_default()
                     ));
                     ui.add_space(4.0);
-                    let describe = |path: &Path| match fs::symlink_metadata(path) {
+                    let describe = |path: &Path| match disk::symlink_metadata(path) {
                         Ok(meta) if meta.is_dir() => {
                             format!("folder, modified {}", format_time(meta.modified().ok()))
                         }
@@ -796,7 +820,7 @@ impl<'a> Paste<'a> {
         if self.p.cancelled() {
             return false;
         }
-        if fs::symlink_metadata(dst).is_err() {
+        if disk::symlink_metadata(dst).is_err() {
             self.put(src, dst, None);
             return true;
         }
@@ -822,7 +846,7 @@ impl<'a> Paste<'a> {
 
     /// Places what's in folder `src` into folder `dst`.
     fn merge(&mut self, src: &Path, dst: &Path) -> bool {
-        let entries = match fs::read_dir(src) {
+        let entries = match disk::read_dir(src) {
             Ok(entries) => entries,
             Err(err) => {
                 self.p.error(src, err);
@@ -850,7 +874,7 @@ impl<'a> Paste<'a> {
                     self.swap(dst, replace);
                 }
             }
-            Transfer::Move => match fs::rename(src, dst) {
+            Transfer::Move => match disk::rename(src, dst) {
                 Ok(()) => {
                     if let Some(replace) = replace {
                         self.swap(dst, replace);
@@ -870,7 +894,7 @@ impl<'a> Paste<'a> {
 
     /// Replaces `old` with `new`, which is beside it.
     fn swap(&self, new: &Path, old: &Path) {
-        if let Err(err) = remove_all(old).and_then(|()| fs::rename(new, old)) {
+        if let Err(err) = remove_all(old).and_then(|()| disk::rename(new, old)) {
             self.p.error(
                 old,
                 format!(
@@ -913,7 +937,7 @@ impl<'a> Paste<'a> {
         }
         // Innermost first; ones still holding skipped items stay.
         for dir in self.emptied.iter().rev() {
-            let _ = fs::remove_dir(dir);
+            let _ = disk::remove_dir(dir);
         }
     }
 }
@@ -930,7 +954,7 @@ fn restore_error(err: trash::Error) -> String {
 fn check_not_into_itself(sources: &[PathBuf], dest: &Path) -> Result<(), String> {
     match sources
         .iter()
-        .find(|src| src.is_dir() && dest.starts_with(src))
+        .find(|src| disk::is_dir(src) && dest.starts_with(src))
     {
         Some(src) => Err(format!("cannot paste {} into itself", src.display())),
         None => Ok(()),
@@ -948,11 +972,11 @@ fn measure(path: &Path, p: &Progress) -> (u64, u64) {
     if p.cancelled() {
         return (0, 0);
     }
-    let Ok(meta) = fs::symlink_metadata(path) else {
+    let Ok(meta) = disk::symlink_metadata(path) else {
         return (0, 0);
     };
     if meta.is_dir() {
-        fs::read_dir(path)
+        disk::read_dir(path)
             .into_iter()
             .flatten()
             .flatten()
@@ -968,7 +992,7 @@ pub(crate) fn copy_tree(src: &Path, dst: &Path, p: &Progress, buffer: &mut [u8])
     if p.cancelled() {
         return false;
     }
-    let meta = match fs::symlink_metadata(src) {
+    let meta = match disk::symlink_metadata(src) {
         Ok(meta) => meta,
         Err(err) => {
             p.error(src, err);
@@ -978,7 +1002,8 @@ pub(crate) fn copy_tree(src: &Path, dst: &Path, p: &Progress, buffer: &mut [u8])
 
     #[cfg(unix)]
     if meta.file_type().is_symlink() {
-        let result = fs::read_link(src).and_then(|target| std::os::unix::fs::symlink(target, dst));
+        let result =
+            disk::read_link(src).and_then(|target| std::os::unix::fs::symlink(target, dst));
         p.done_items.fetch_add(1, Relaxed);
         return match result {
             Ok(()) => true,
@@ -990,11 +1015,11 @@ pub(crate) fn copy_tree(src: &Path, dst: &Path, p: &Progress, buffer: &mut [u8])
     }
 
     if meta.is_dir() {
-        if let Err(err) = fs::create_dir(dst) {
+        if let Err(err) = disk::create_dir(dst) {
             p.error(dst, err);
             return false;
         }
-        let entries = match fs::read_dir(src) {
+        let entries = match disk::read_dir(src) {
             Ok(entries) => entries,
             Err(err) => {
                 p.error(src, err);
@@ -1013,18 +1038,24 @@ pub(crate) fn copy_tree(src: &Path, dst: &Path, p: &Progress, buffer: &mut [u8])
                 }
             }
         }
-        let _ = fs::set_permissions(dst, meta.permissions());
+        let _ = disk::set_permissions(dst, meta.permissions());
         ok
     } else {
         copy_file(src, dst, &meta, p, buffer)
     }
 }
 
-fn copy_file(src: &Path, dst: &Path, meta: &fs::Metadata, p: &Progress, buffer: &mut [u8]) -> bool {
+fn copy_file(
+    src: &Path,
+    dst: &Path,
+    meta: &disk::Metadata,
+    p: &Progress,
+    buffer: &mut [u8],
+) -> bool {
     p.set_current(src);
     let result = (|| -> io::Result<()> {
-        let mut from = fs::File::open(src)?;
-        let mut to = fs::File::create_new(dst)?;
+        let mut from = disk::File::open(src)?;
+        let mut to = disk::File::create_new(dst)?;
         loop {
             if p.cancelled() {
                 return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
@@ -1046,7 +1077,7 @@ fn copy_file(src: &Path, dst: &Path, meta: &fs::Metadata, p: &Progress, buffer: 
         Ok(()) => true,
         Err(err) => {
             // Don't leave a partial file behind.
-            let _ = fs::remove_file(dst);
+            let _ = disk::remove_file(dst);
             if !p.cancelled() {
                 p.error(src, err);
             }
@@ -1056,10 +1087,10 @@ fn copy_file(src: &Path, dst: &Path, meta: &fs::Metadata, p: &Progress, buffer: 
 }
 
 pub(crate) fn remove_all(path: &Path) -> io::Result<()> {
-    if fs::symlink_metadata(path)?.is_dir() {
-        fs::remove_dir_all(path)
+    if disk::symlink_metadata(path)?.is_dir() {
+        disk::remove_dir_all(path)
     } else {
-        fs::remove_file(path)
+        disk::remove_file(path)
     }
 }
 
@@ -1118,23 +1149,23 @@ mod tests {
     fn scratch(name: &str) -> PathBuf {
         let root =
             std::env::temp_dir().join(format!("egui-files-jobs-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
+        let _ = disk::remove_dir_all(&root);
+        disk::create_dir_all(&root).unwrap();
         root
     }
 
     fn read(path: PathBuf) -> String {
-        fs::read_to_string(path).unwrap()
+        disk::read_to_string(path).unwrap()
     }
 
     #[test]
     fn copy_and_move_trees() {
         let root = scratch("trees");
         let (src, dest) = (root.join("src"), root.join("dest"));
-        fs::create_dir_all(src.join("tree/sub")).unwrap();
-        fs::create_dir_all(&dest).unwrap();
-        fs::write(src.join("tree/a.txt"), "a").unwrap();
-        fs::write(src.join("tree/sub/b.bin"), vec![7u8; 3 * BUFFER_SIZE + 5]).unwrap();
+        disk::create_dir_all(src.join("tree/sub")).unwrap();
+        disk::create_dir_all(&dest).unwrap();
+        disk::write(src.join("tree/a.txt"), "a").unwrap();
+        disk::write(src.join("tree/sub/b.bin"), vec![7u8; 3 * BUFFER_SIZE + 5]).unwrap();
 
         let mut jobs = Jobs::new(&egui::Context::default());
         jobs.start(JobKind::Copy {
@@ -1144,7 +1175,7 @@ mod tests {
         wait(&mut jobs);
         assert_eq!(errors(&jobs), Vec::<String>::new());
         assert_eq!(
-            fs::read(dest.join("tree/sub/b.bin")).unwrap().len(),
+            disk::read(dest.join("tree/sub/b.bin")).unwrap().len(),
             3 * BUFFER_SIZE + 5
         );
         let p = &jobs.jobs[0].progress;
@@ -1166,7 +1197,7 @@ mod tests {
         wait(&mut jobs);
         assert!(errors(&jobs).iter().any(|e| e.contains("into itself")));
 
-        fs::remove_dir_all(root).unwrap();
+        disk::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1174,12 +1205,12 @@ mod tests {
         let root = scratch("conflicts");
         let (src, dest) = (root.join("src"), root.join("dest"));
         for dir in [&src, &dest] {
-            fs::create_dir_all(dir.join("tree")).unwrap();
-            fs::write(dir.join("single.txt"), format!("{}", dir.display())).unwrap();
-            fs::write(dir.join("tree/both.txt"), format!("{}", dir.display())).unwrap();
+            disk::create_dir_all(dir.join("tree")).unwrap();
+            disk::write(dir.join("single.txt"), format!("{}", dir.display())).unwrap();
+            disk::write(dir.join("tree/both.txt"), format!("{}", dir.display())).unwrap();
         }
-        fs::write(src.join("tree/new.txt"), "new").unwrap();
-        fs::write(dest.join("tree/mine.txt"), "mine").unwrap();
+        disk::write(src.join("tree/new.txt"), "new").unwrap();
+        disk::write(dest.join("tree/mine.txt"), "mine").unwrap();
         let src_text = src.display().to_string();
         let dest_text = dest.display().to_string();
         let copy = || JobKind::Copy {
@@ -1199,8 +1230,8 @@ mod tests {
         assert!(errors.is_empty(), "{errors:?}");
         assert_eq!(read(dest.join("single (1).txt")), src_text);
         assert_eq!(read(dest.join("tree (1)/both.txt")), src_text);
-        fs::remove_dir_all(dest.join("tree (1)")).unwrap();
-        fs::remove_file(dest.join("single (1).txt")).unwrap();
+        disk::remove_dir_all(dest.join("tree (1)")).unwrap();
+        disk::remove_file(dest.join("single (1).txt")).unwrap();
 
         // Overwrite the file and merge the folder, asking about the file in
         // both, which is kept.
@@ -1227,7 +1258,7 @@ mod tests {
         );
 
         // Moving, merged and overwritten for all: the sources go.
-        fs::write(dest.join("tree/both.txt"), "old").unwrap();
+        disk::write(dest.join("tree/both.txt"), "old").unwrap();
         let (asked, errors) = run_answering(
             JobKind::Move {
                 sources: vec![src.join("single.txt"), src.join("tree")],
@@ -1247,14 +1278,14 @@ mod tests {
         assert!(!src.join("tree").exists());
         assert!(!src.join("single.txt").exists());
 
-        fs::remove_dir_all(root).unwrap();
+        disk::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn overwriting_a_folder_with_something_inside_it_fails() {
         let root = scratch("inside");
-        fs::create_dir_all(root.join("x/x")).unwrap();
-        fs::write(root.join("x/x/keep.txt"), "keep").unwrap();
+        disk::create_dir_all(root.join("x/x")).unwrap();
+        disk::write(root.join("x/x/keep.txt"), "keep").unwrap();
         let (_, errors) = run_answering(
             JobKind::Move {
                 sources: vec![root.join("x/x")],
@@ -1269,8 +1300,8 @@ mod tests {
         );
         assert_eq!(read(root.join("x/x/keep.txt")), "keep");
 
-        fs::create_dir_all(root.join("y")).unwrap();
-        fs::write(root.join("y/y"), "file").unwrap();
+        disk::create_dir_all(root.join("y")).unwrap();
+        disk::write(root.join("y/y"), "file").unwrap();
         let (_, errors) = run_answering(
             JobKind::Copy {
                 sources: vec![root.join("y/y")],
@@ -1285,7 +1316,7 @@ mod tests {
         );
         assert_eq!(read(root.join("y/y")), "file");
 
-        fs::remove_dir_all(root).unwrap();
+        disk::remove_dir_all(root).unwrap();
     }
 
     /// Moves between two filesystems. Opt-in, since it needs two writable folders
@@ -1304,20 +1335,20 @@ mod tests {
             dir("EGUI_FILES_DIR_A").join(&name),
             dir("EGUI_FILES_DIR_B").join(&name),
         );
-        let _ = (fs::remove_dir_all(&src), fs::remove_dir_all(&dest));
-        fs::create_dir_all(src.join("tree/sub")).unwrap();
-        fs::create_dir_all(&dest).unwrap();
+        let _ = (disk::remove_dir_all(&src), disk::remove_dir_all(&dest));
+        disk::create_dir_all(src.join("tree/sub")).unwrap();
+        disk::create_dir_all(&dest).unwrap();
         assert_ne!(
-            fs::metadata(&src).unwrap().dev(),
-            fs::metadata(&dest).unwrap().dev(),
+            disk::metadata(&src).unwrap().dev(),
+            disk::metadata(&dest).unwrap().dev(),
             "folders must be on different filesystems"
         );
 
         let small = src.join("tree/a.txt");
-        fs::write(&small, "hello").unwrap();
-        fs::set_permissions(&small, fs::Permissions::from_mode(0o640)).unwrap();
+        disk::write(&small, "hello").unwrap();
+        disk::set_permissions(&small, disk::Permissions::from_mode(0o640)).unwrap();
         let mtime = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_600_000_000);
-        fs::File::options()
+        disk::File::options()
             .write(true)
             .open(&small)
             .unwrap()
@@ -1326,7 +1357,7 @@ mod tests {
         let big: Vec<u8> = (0..5 * BUFFER_SIZE + 123)
             .map(|i| (i % 251) as u8)
             .collect();
-        fs::write(src.join("tree/sub/big.bin"), &big).unwrap();
+        disk::write(src.join("tree/sub/big.bin"), &big).unwrap();
         std::os::unix::fs::symlink("a.txt", src.join("tree/link")).unwrap();
 
         let mut jobs = Jobs::new(&egui::Context::default());
@@ -1338,12 +1369,12 @@ mod tests {
         assert_eq!(errors(&jobs), Vec::<String>::new());
         assert!(!src.join("tree").exists(), "source removed after move");
         let moved = dest.join("tree");
-        assert_eq!(fs::read(moved.join("sub/big.bin")).unwrap(), big);
-        let meta = fs::metadata(moved.join("a.txt")).unwrap();
+        assert_eq!(disk::read(moved.join("sub/big.bin")).unwrap(), big);
+        let meta = disk::metadata(moved.join("a.txt")).unwrap();
         assert_eq!(meta.permissions().mode() & 0o777, 0o640);
         assert_eq!(meta.modified().unwrap(), mtime);
         assert_eq!(
-            fs::read_link(moved.join("link")).unwrap(),
+            disk::read_link(moved.join("link")).unwrap(),
             Path::new("a.txt")
         );
         let p = &jobs.jobs[0].progress;
@@ -1353,7 +1384,7 @@ mod tests {
         // Cancelling right away must never lose data: exactly one complete copy remains.
         let huge = src.join("huge.bin");
         let size = 64 * BUFFER_SIZE as u64;
-        fs::File::create(&huge).unwrap().set_len(size).unwrap();
+        disk::File::create(&huge).unwrap().set_len(size).unwrap();
         jobs.start(JobKind::Move {
             sources: vec![huge.clone()],
             dest: dest.clone(),
@@ -1365,13 +1396,13 @@ mod tests {
             .cancel
             .store(true, Relaxed);
         wait(&mut jobs);
-        let len = |path: &Path| fs::metadata(path).map(|m| m.len()).ok();
+        let len = |path: &Path| disk::metadata(path).map(|m| m.len()).ok();
         match (len(&huge), len(&dest.join("huge.bin"))) {
             (Some(n), None) | (None, Some(n)) => assert_eq!(n, size),
             other => panic!("expected exactly one complete copy, got {other:?}"),
         }
 
-        fs::remove_dir_all(src).unwrap();
-        fs::remove_dir_all(dest).unwrap();
+        disk::remove_dir_all(src).unwrap();
+        disk::remove_dir_all(dest).unwrap();
     }
 }

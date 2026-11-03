@@ -654,7 +654,7 @@ impl Terminal {
         }
         let cwd = session.shell_cwd()?;
         // The shell reports its folder with symlinks resolved.
-        let real = std::fs::canonicalize(folder).unwrap_or_else(|_| folder.to_path_buf());
+        let real = disk::canonicalize(folder).unwrap_or_else(|_| folder.to_path_buf());
         if let Some((target, since)) = &self.pending_cd {
             if cwd != *target && now - since < CD_TIMEOUT {
                 return None;
@@ -750,7 +750,7 @@ struct Session {
     /// The shell's process id and a handle on the PTY, to tell whether the
     /// shell is at a prompt and which folder it's in.
     #[cfg(target_os = "linux")]
-    shell: (u32, std::fs::File),
+    shell: (u32, disk::File),
 }
 
 impl Session {
@@ -848,7 +848,7 @@ impl Session {
 
     #[cfg(target_os = "linux")]
     fn shell_cwd(&self) -> Option<PathBuf> {
-        std::fs::read_link(format!("/proc/{}/cwd", self.shell.0)).ok()
+        disk::read_link(format!("/proc/{}/cwd", self.shell.0)).ok()
     }
 }
 
@@ -1409,7 +1409,7 @@ mod tests {
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
         };
-        let real = std::fs::canonicalize(&dir).unwrap();
+        let real = disk::canonicalize(&dir).unwrap();
         let cwd = |s: &Session| s.shell_cwd();
         // Wait for the prompt.
         let prompt = |s: &Session| s.term.lock().grid().cursor.point != Point::default();

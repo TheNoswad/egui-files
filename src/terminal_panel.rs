@@ -530,9 +530,6 @@ mod tests {
         output.textures_delta.clear();
         restored.remember_dirs();
         assert_eq!(dir(&restored, 2), Some("/".into()));
-        assert_eq!(
-            dir(&restored, 1),
-            Some(std::fs::canonicalize(&tmp).unwrap())
-        );
+        assert_eq!(dir(&restored, 1), Some(disk::canonicalize(&tmp).unwrap()));
     }
 }

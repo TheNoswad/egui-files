@@ -1900,7 +1900,7 @@ fn date_field(
                 .on_hover_text("The current time")
                 .clicked()
             {
-                *pending = Some(SystemTime::now());
+                *pending = Some(disk::now());
                 *draft = None;
                 return true;
             }

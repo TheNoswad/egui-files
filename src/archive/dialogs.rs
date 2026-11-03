@@ -53,7 +53,7 @@ impl FolderPicker {
             let edit = ui.add(TextEdit::singleline(&mut self.text).desired_width(width));
             if edit.lost_focus() {
                 let typed = PathBuf::from(self.text.trim());
-                if typed.is_dir() {
+                if disk::is_dir(&typed) {
                     self.current = typed;
                 } else {
                     self.text = self.current.display().to_string();
@@ -123,7 +123,7 @@ impl CompressDialog {
             .and_then(|p| p.parent())
             .map_or_else(places::home_dir, Path::to_path_buf);
         let name = match sources.as_slice() {
-            [single] if single.is_dir() => display_name(single),
+            [single] if disk::is_dir(single) => display_name(single),
             [single] => single.file_stem().map_or_else(
                 || display_name(single),
                 |s| s.to_string_lossy().into_owned(),
@@ -290,7 +290,7 @@ impl CompressDialog {
             let target = self.picker.current.join(self.file_name());
             if passwords_differ && !self.confirm.is_empty() {
                 ui.colored_label(ui.visuals().error_fg_color, "The passwords don't match.");
-            } else if !name_invalid && std::fs::symlink_metadata(&target).is_ok() {
+            } else if !name_invalid && disk::symlink_metadata(&target).is_ok() {
                 let free = unique_path(&self.picker.current, self.file_name().as_ref());
                 ui.colored_label(
                     ui.visuals().warn_fg_color,

@@ -2,7 +2,6 @@
 //! endings, byte order mark, permissions and owner, replaced atomically.
 
 use std::{
-    fs,
     io::{self, Write},
     path::{Path, PathBuf},
     time::SystemTime,
@@ -51,7 +50,7 @@ pub struct Stamp {
 
 /// The file's current stamp, or `None` if it's gone.
 pub fn stamp(path: &Path) -> Option<Stamp> {
-    let meta = fs::metadata(path).ok()?;
+    let meta = disk::metadata(path).ok()?;
     Some(Stamp {
         modified: meta.modified().ok(),
         len: meta.len(),
@@ -91,14 +90,14 @@ impl std::fmt::Display for LoadError {
 pub fn load(path: &Path) -> Result<Loaded, LoadError> {
     let io = |err: io::Error| LoadError::Io(err.to_string());
     let stamp = stamp(path);
-    let meta = fs::metadata(path).map_err(io)?;
+    let meta = disk::metadata(path).map_err(io)?;
     if meta.is_dir() {
         return Err(LoadError::Io("it is a folder".into()));
     }
     if meta.len() > MAX_EDIT_BYTES {
         return Err(LoadError::TooLarge(meta.len()));
     }
-    let bytes = fs::read(path).map_err(io)?;
+    let bytes = disk::read(path).map_err(io)?;
     if bytes.contains(&0) {
         return Err(LoadError::Binary);
     }
@@ -121,7 +120,7 @@ pub fn load(path: &Path) -> Result<Loaded, LoadError> {
     };
     let read_only = if !utf8 {
         Some(ReadOnly::NotUtf8)
-    } else if fs::OpenOptions::new().write(true).open(path).is_err() {
+    } else if disk::OpenOptions::new().write(true).open(path).is_err() {
         Some(ReadOnly::Permissions)
     } else {
         None
@@ -161,8 +160,8 @@ pub fn encode(text: &str, line_ending: LineEnding, bom: bool) -> Vec<u8> {
 /// links, and folders we can't create files in, are overwritten in place.
 pub fn save(path: &Path, text: &str, line_ending: LineEnding, bom: bool) -> io::Result<Stamp> {
     let bytes = encode(text, line_ending, bom);
-    let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let meta = fs::metadata(&target).ok();
+    let target = disk::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let meta = disk::metadata(&target).ok();
     #[cfg(unix)]
     let hard_linked = meta.as_ref().is_some_and(|m| {
         use std::os::unix::fs::MetadataExt;
@@ -176,7 +175,7 @@ pub fn save(path: &Path, text: &str, line_ending: LineEnding, bom: bool) -> io::
         _ => Err(io::ErrorKind::Unsupported.into()),
     };
     if replaced.is_err() {
-        let mut file = fs::OpenOptions::new()
+        let mut file = disk::OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)
@@ -189,16 +188,16 @@ pub fn save(path: &Path, text: &str, line_ending: LineEnding, bom: bool) -> io::
 
 fn temp_path(target: &Path) -> Option<PathBuf> {
     let name = target.file_name()?.to_string_lossy();
-    let nanos = SystemTime::now()
+    let nanos = disk::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_or(0, |d| d.subsec_nanos());
     Some(target.with_file_name(format!(".{name}.{}-{nanos}.tmp", std::process::id())))
 }
 
-fn replace(target: &Path, bytes: &[u8], meta: &fs::Metadata) -> io::Result<()> {
+fn replace(target: &Path, bytes: &[u8], meta: &disk::Metadata) -> io::Result<()> {
     let temp = temp_path(target).ok_or(io::ErrorKind::InvalidInput)?;
     let result = (|| {
-        let mut file = fs::OpenOptions::new()
+        let mut file = disk::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&temp)?;
@@ -207,7 +206,7 @@ fn replace(target: &Path, bytes: &[u8], meta: &fs::Metadata) -> io::Result<()> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
-            let mine = fs::metadata(&temp)?;
+            let mine = disk::metadata(&temp)?;
             if (mine.uid(), mine.gid()) != (meta.uid(), meta.gid()) {
                 // Only works as root (or for our own groups); otherwise the
                 // file would change owner, so don't replace it.
@@ -216,10 +215,10 @@ fn replace(target: &Path, bytes: &[u8], meta: &fs::Metadata) -> io::Result<()> {
         }
         file.sync_all()?;
         drop(file);
-        fs::rename(&temp, target)
+        disk::rename(&temp, target)
     })();
     if result.is_err() {
-        let _ = fs::remove_file(&temp);
+        let _ = disk::remove_file(&temp);
     }
     result
 }
@@ -231,8 +230,8 @@ mod tests {
     fn dir(name: &str) -> PathBuf {
         let dir =
             std::env::temp_dir().join(format!("egui-files-doc-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        let _ = disk::remove_dir_all(&dir);
+        disk::create_dir_all(&dir).unwrap();
         dir
     }
 
@@ -247,30 +246,30 @@ mod tests {
             ("empty.txt", b""),
         ] {
             let path = dir.join(name);
-            fs::write(&path, bytes).unwrap();
+            disk::write(&path, bytes).unwrap();
             let loaded = load(&path).unwrap();
             assert!(!loaded.text.contains("\r\n") || loaded.line_ending == LineEnding::Mixed);
             save(&path, &loaded.text, loaded.line_ending, loaded.bom).unwrap();
-            assert_eq!(fs::read(&path).unwrap(), bytes, "{name}");
+            assert_eq!(disk::read(&path).unwrap(), bytes, "{name}");
         }
         let loaded = load(&dir.join("crlf.txt")).unwrap();
         assert_eq!(
             (loaded.text.as_str(), loaded.line_ending),
             ("a\nb\n", LineEnding::Crlf)
         );
-        fs::remove_dir_all(dir).unwrap();
+        disk::remove_dir_all(dir).unwrap();
     }
 
     #[test]
     fn refuses_binary_and_flags_non_utf8() {
         let dir = dir("kinds");
-        fs::write(dir.join("bin"), b"ab\0cd").unwrap();
+        disk::write(dir.join("bin"), b"ab\0cd").unwrap();
         assert!(matches!(load(&dir.join("bin")), Err(LoadError::Binary)));
-        fs::write(dir.join("latin1"), b"caf\xe9\n").unwrap();
+        disk::write(dir.join("latin1"), b"caf\xe9\n").unwrap();
         let loaded = load(&dir.join("latin1")).unwrap();
         assert_eq!(loaded.read_only, Some(ReadOnly::NotUtf8));
         assert_eq!(loaded.text, "caf\u{fffd}\n");
-        fs::remove_dir_all(dir).unwrap();
+        disk::remove_dir_all(dir).unwrap();
     }
 
     #[cfg(unix)]
@@ -279,48 +278,48 @@ mod tests {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
         let dir = dir("links");
         let real = dir.join("real.sh");
-        fs::write(&real, "old").unwrap();
-        fs::set_permissions(&real, fs::Permissions::from_mode(0o750)).unwrap();
+        disk::write(&real, "old").unwrap();
+        disk::set_permissions(&real, disk::Permissions::from_mode(0o750)).unwrap();
         let link = dir.join("link.sh");
         std::os::unix::fs::symlink(&real, &link).unwrap();
 
         save(&link, "new", LineEnding::Lf, false).unwrap();
         assert!(
-            fs::symlink_metadata(&link)
+            disk::symlink_metadata(&link)
                 .unwrap()
                 .file_type()
                 .is_symlink()
         );
-        assert_eq!(fs::read_to_string(&real).unwrap(), "new");
+        assert_eq!(disk::read_to_string(&real).unwrap(), "new");
         assert_eq!(
-            fs::metadata(&real).unwrap().permissions().mode() & 0o777,
+            disk::metadata(&real).unwrap().permissions().mode() & 0o777,
             0o750
         );
         // No temporary files left behind.
-        assert_eq!(fs::read_dir(&dir).unwrap().count(), 2);
+        assert_eq!(disk::read_dir(&dir).unwrap().count(), 2);
 
         let hard = dir.join("hard.sh");
-        fs::hard_link(&real, &hard).unwrap();
+        disk::hard_link(&real, &hard).unwrap();
         save(&hard, "newer", LineEnding::Lf, false).unwrap();
-        assert_eq!(fs::read_to_string(&real).unwrap(), "newer");
+        assert_eq!(disk::read_to_string(&real).unwrap(), "newer");
         assert_eq!(
-            fs::metadata(&real).unwrap().ino(),
-            fs::metadata(&hard).unwrap().ino()
+            disk::metadata(&real).unwrap().ino(),
+            disk::metadata(&hard).unwrap().ino()
         );
-        fs::remove_dir_all(dir).unwrap();
+        disk::remove_dir_all(dir).unwrap();
     }
 
     #[test]
     fn stamps_notice_changes() {
         let dir = dir("stamps");
         let path = dir.join("f");
-        fs::write(&path, "a").unwrap();
+        disk::write(&path, "a").unwrap();
         let first = stamp(&path);
         let saved = save(&path, "abc", LineEnding::Lf, false).unwrap();
         assert_ne!(first, Some(saved));
         assert_eq!(stamp(&path), Some(saved));
-        fs::remove_file(&path).unwrap();
+        disk::remove_file(&path).unwrap();
         assert_eq!(stamp(&path), None);
-        fs::remove_dir_all(dir).unwrap();
+        disk::remove_dir_all(dir).unwrap();
     }
 }

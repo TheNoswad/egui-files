@@ -257,7 +257,9 @@ fn launch_command(target: &Target, paths: &[PathBuf]) -> std::io::Result<Vec<Lau
         command.current_dir(dir);
     }
     let mut child = command.spawn()?;
-    std::thread::spawn(move || child.wait());
+    crate::background::spawn("wait for child", move || {
+        let _ = child.wait();
+    });
     Ok(Vec::new())
 }
 

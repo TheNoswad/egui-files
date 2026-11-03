@@ -1,8 +1,8 @@
 //! Image size, camera details and audio/video streams, read in the
 //! background.
 
+use disk::File;
 use std::{
-    fs::File,
     io::BufReader,
     path::{Path, PathBuf},
     sync::{Arc, OnceLock},

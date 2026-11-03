@@ -34,7 +34,7 @@ impl Renderer {
 
     /// The renderer saved for the next start.
     pub fn saved() -> Self {
-        match path().and_then(|p| std::fs::read_to_string(p).ok()) {
+        match path().and_then(|p| disk::read_to_string(p).ok()) {
             Some(text) if text.trim() == "opengl" => Self::OpenGl,
             _ => Self::Vulkan,
         }
@@ -44,15 +44,15 @@ impl Renderer {
     pub fn save(self) -> std::io::Result<()> {
         let path = path().ok_or_else(|| std::io::Error::other("no config folder"))?;
         match self {
-            Self::Vulkan => match std::fs::remove_file(&path) {
+            Self::Vulkan => match disk::remove_file(&path) {
                 Err(err) if err.kind() != std::io::ErrorKind::NotFound => Err(err),
                 _ => Ok(()),
             },
             Self::OpenGl => {
                 if let Some(dir) = path.parent() {
-                    std::fs::create_dir_all(dir)?;
+                    disk::create_dir_all(dir)?;
                 }
-                std::fs::write(&path, "opengl\n")
+                disk::write(&path, "opengl\n")
             }
         }
     }

@@ -1085,10 +1085,10 @@ mod tests {
     fn browses_unlocks_and_extracts() {
         let root =
             std::env::temp_dir().join(format!("egui-files-archive-tab-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join("music/album")).unwrap();
-        std::fs::write(root.join("music/album/song.flac"), "la".repeat(1000)).unwrap();
-        std::fs::write(root.join("music/notes.txt"), "notes").unwrap();
+        let _ = disk::remove_dir_all(&root);
+        disk::create_dir_all(root.join("music/album")).unwrap();
+        disk::write(root.join("music/album/song.flac"), "la".repeat(1000)).unwrap();
+        disk::write(root.join("music/notes.txt"), "notes").unwrap();
         let archive = root.join("music.7z");
         let p = Progress::default();
         compress(
@@ -1167,11 +1167,11 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         assert_eq!(
-            std::fs::read_to_string(root.join("album/song.flac"))
+            disk::read_to_string(root.join("album/song.flac"))
                 .unwrap()
                 .len(),
             2000
         );
-        std::fs::remove_dir_all(root).unwrap();
+        disk::remove_dir_all(root).unwrap();
     }
 }

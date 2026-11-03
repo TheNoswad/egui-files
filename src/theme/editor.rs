@@ -258,7 +258,7 @@ impl Themes {
             .clicked()
             && let Some(dir) = self.dir.clone()
         {
-            let opened = std::fs::create_dir_all(&dir)
+            let opened = disk::create_dir_all(&dir)
                 .map_err(|e| e.to_string())
                 .and_then(|()| crate::fs::open_detached(&dir).map_err(|e| e.to_string()));
             if let Err(err) = opened {
@@ -831,7 +831,7 @@ mod tests {
     fn duplicate_edit_and_save_a_theme() {
         let dir =
             std::env::temp_dir().join(format!("egui-files-theme-editor-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = disk::remove_dir_all(&dir);
         let mut themes = Themes::with_dir(Some(dir.clone()), Default::default());
         let ctx = Context::default();
         let time = std::cell::Cell::new(0.0);
@@ -877,7 +877,7 @@ mod tests {
         let name = "Catppuccin Mocha (custom)";
         assert_eq!(themes.editor.selected.as_deref(), Some(name));
         let path = dir.join("catppuccin-mocha-custom.toml");
-        let written = std::fs::read_to_string(&path).unwrap();
+        let written = disk::read_to_string(&path).unwrap();
         assert!(written.contains("base = \"Catppuccin Mocha\""), "{written}");
 
         // Every section opens, Advanced included; from the bottom, so opening
@@ -907,7 +907,7 @@ mod tests {
         for _ in 0..10 {
             frame(&mut themes, vec![]);
         }
-        let written = std::fs::read_to_string(&path).unwrap();
+        let written = disk::read_to_string(&path).unwrap();
         assert!(written.contains("background = \"#c80000\""), "{written}");
         // Just showing egui's style settings doesn't change any.
         assert!(!written.contains("[style"), "{written}");

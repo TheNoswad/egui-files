@@ -3,7 +3,7 @@
 use std::{
     cmp::Ordering,
     ffi::OsStr,
-    fs, io,
+    io,
     path::{Path, PathBuf},
     time::SystemTime,
 };
@@ -123,7 +123,7 @@ pub fn icon_for(path: &Path, is_dir: bool, is_symlink: bool) -> &'static str {
 }
 
 /// Whether a file can be run: any execute bit set, on Unix.
-fn is_executable(meta: Option<&fs::Metadata>) -> bool {
+fn is_executable(meta: Option<&disk::Metadata>) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -138,15 +138,15 @@ fn is_executable(meta: Option<&fs::Metadata>) -> bool {
 
 pub fn read_dir(dir: &Path) -> io::Result<Vec<Entry>> {
     let mut entries = Vec::new();
-    for dir_entry in fs::read_dir(dir)? {
+    for dir_entry in disk::read_dir(dir)? {
         let Ok(dir_entry) = dir_entry else { continue };
         let path = dir_entry.path();
         let name = dir_entry.file_name().to_string_lossy().into_owned();
         let is_symlink = dir_entry.file_type().is_ok_and(|t| t.is_symlink());
         // Follow symlinks, but fall back to the link itself when it is broken.
         let link_meta = dir_entry.metadata().ok();
-        let meta = fs::metadata(&path).ok().or_else(|| link_meta.clone());
-        let is_dir = meta.as_ref().is_some_and(fs::Metadata::is_dir);
+        let meta = disk::metadata(&path).ok().or_else(|| link_meta.clone());
+        let is_dir = meta.as_ref().is_some_and(disk::Metadata::is_dir);
         entries.push(Entry {
             // Whether the link itself is hidden, not its target: Windows
             // hides junctions like Documents\My Music (to Music).
@@ -155,7 +155,7 @@ pub fn read_dir(dir: &Path) -> io::Result<Vec<Entry>> {
             size: meta
                 .as_ref()
                 .filter(|m| m.is_file())
-                .map_or(0, fs::Metadata::len),
+                .map_or(0, disk::Metadata::len),
             folder_size: None,
             modified: meta.as_ref().and_then(|m| m.modified().ok()),
             created: meta.as_ref().and_then(|m| m.created().ok()),
@@ -169,14 +169,14 @@ pub fn read_dir(dir: &Path) -> io::Result<Vec<Entry>> {
 }
 
 #[cfg(windows)]
-fn is_hidden(_name: &str, meta: Option<&fs::Metadata>) -> bool {
+fn is_hidden(_name: &str, meta: Option<&disk::Metadata>) -> bool {
     use std::os::windows::fs::MetadataExt;
     const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
     meta.is_some_and(|m| m.file_attributes() & FILE_ATTRIBUTE_HIDDEN != 0)
 }
 
 #[cfg(not(windows))]
-fn is_hidden(name: &str, _meta: Option<&fs::Metadata>) -> bool {
+fn is_hidden(name: &str, _meta: Option<&disk::Metadata>) -> bool {
     name.starts_with('.')
 }
 
@@ -296,8 +296,86 @@ pub fn display_name(path: &Path) -> String {
 pub fn open(path: &Path) -> io::Result<()> {
     #[cfg(target_os = "android")]
     return crate::android::open(path, false);
-    #[cfg(not(target_os = "android"))]
+    #[cfg(target_arch = "wasm32")]
+    return web::open(path);
+    #[cfg(not(any(target_os = "android", target_arch = "wasm32")))]
     open_detached(path)
+}
+
+/// Opening files in the browser, which has no other apps but itself.
+#[cfg(target_arch = "wasm32")]
+mod web {
+    use std::{io, path::Path};
+
+    use wasm_bindgen::JsCast;
+
+    /// Shows the file in a tab of its own if the browser can (pictures,
+    /// text, PDFs, audio and video), and otherwise saves it.
+    pub fn open(path: &Path) -> io::Result<()> {
+        let bytes = disk::read(path)?;
+        let extension = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase)
+            .unwrap_or_default();
+        let shown = shown_type(&extension);
+        let blob = blob(&bytes, shown.unwrap_or("application/octet-stream"))?;
+        let url = web_sys::Url::create_object_url_with_blob(&blob).map_err(js_error)?;
+        let window = web_sys::window().ok_or_else(|| io::Error::other("no window"))?;
+        // The URL stays valid while the page is open, for the tab to reload.
+        if shown.is_some() {
+            return window
+                .open_with_url_and_target(&url, "_blank")
+                .map_err(js_error)?
+                .map(drop)
+                .ok_or_else(|| io::Error::other("the browser blocked the new tab"));
+        }
+        let link: web_sys::HtmlAnchorElement = window
+            .document()
+            .and_then(|d| d.create_element("a").ok())
+            .and_then(|e| e.dyn_into().ok())
+            .ok_or_else(|| io::Error::other("no document"))?;
+        link.set_href(&url);
+        link.set_download(&crate::fs::display_name(path));
+        link.click();
+        Ok(())
+    }
+
+    /// The type to show a file as, for the ones browsers show. Web pages
+    /// and SVGs would run their scripts as the app: pages are shown as text,
+    /// and SVGs saved.
+    fn shown_type(extension: &str) -> Option<&'static str> {
+        Some(match extension {
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            "gif" => "image/gif",
+            "webp" => "image/webp",
+            "bmp" => "image/bmp",
+            "ico" => "image/x-icon",
+            "pdf" => "application/pdf",
+            "mp3" => "audio/mpeg",
+            "ogg" | "oga" => "audio/ogg",
+            "wav" => "audio/wav",
+            "flac" => "audio/flac",
+            "mp4" | "m4v" => "video/mp4",
+            "webm" => "video/webm",
+            "txt" | "md" | "rs" | "toml" | "csv" | "json" | "log" | "ini" | "yaml" | "yml"
+            | "sh" | "py" | "js" | "css" | "html" | "htm" | "c" | "h" | "cpp" | "xml"
+            | "gitignore" | "lock" => "text/plain; charset=utf-8",
+            _ => return None,
+        })
+    }
+
+    fn blob(bytes: &[u8], kind: &str) -> io::Result<web_sys::Blob> {
+        let parts = js_sys::Array::of1(&js_sys::Uint8Array::from(bytes));
+        let options = web_sys::BlobPropertyBag::new();
+        options.set_type(kind);
+        web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &options).map_err(js_error)
+    }
+
+    fn js_error(err: wasm_bindgen::JsValue) -> io::Error {
+        io::Error::other(format!("{err:?}"))
+    }
 }
 
 /// Opens a file, folder or link in the system's app for it. The browser opens
@@ -336,7 +414,7 @@ pub fn rename(from: &Path, new_name: &str) -> io::Result<PathBuf> {
             format!("{new_name} already exists"),
         ));
     }
-    fs::rename(from, &to)?;
+    disk::rename(from, &to)?;
     Ok(to)
 }
 
@@ -347,20 +425,20 @@ pub fn create_file(parent: &Path, template: Option<&Path>) -> io::Result<PathBuf
         .unwrap_or(OsStr::new("New File"));
     let path = unique_path(parent, name);
     match template {
-        Some(template) => fs::copy(template, &path).map(drop)?,
-        None => fs::File::create_new(&path).map(drop)?,
+        Some(template) => disk::copy(template, &path).map(drop)?,
+        None => disk::File::create_new(&path).map(drop)?,
     }
     Ok(path)
 }
 
 pub fn create_dir(parent: &Path) -> io::Result<PathBuf> {
     let path = unique_path(parent, OsStr::new("New Folder"));
-    fs::create_dir(&path)?;
+    disk::create_dir(&path)?;
     Ok(path)
 }
 
 fn exists(path: &Path) -> bool {
-    fs::symlink_metadata(path).is_ok()
+    disk::symlink_metadata(path).is_ok()
 }
 
 /// `dir/name`, or `dir/name (n).ext` if that is taken.

@@ -106,7 +106,7 @@ pub fn from_cache(path: &Path, modified: Option<SystemTime>, max_side: u32) -> O
 }
 
 fn read_cached(file: &Path, mtime: u64, max_side: u32) -> Option<Thumbnail> {
-    let bytes = std::fs::read(file).ok()?;
+    let bytes = disk::read(file).ok()?;
     let reader = png::Decoder::new(Cursor::new(&bytes)).read_info().ok()?;
     let text = |key: &str| {
         reader
@@ -238,9 +238,9 @@ fn save_to_cache(path: &Path, mtime: u64, image: &RgbaImage) -> Option<()> {
         std::process::id()
     ));
     write_private(&temp, &bytes)?;
-    std::fs::rename(&temp, &file)
+    disk::rename(&temp, &file)
         .inspect_err(|_| {
-            let _ = std::fs::remove_file(&temp);
+            let _ = disk::remove_file(&temp);
         })
         .ok()
 }
@@ -257,14 +257,14 @@ fn create_private_dir(dir: &Path) -> Option<()> {
 
 #[cfg(not(unix))]
 fn create_private_dir(dir: &Path) -> Option<()> {
-    std::fs::create_dir_all(dir).ok()
+    disk::create_dir_all(dir).ok()
 }
 
 /// Thumbnails reveal file contents, so the spec asks for owner-only access.
 #[cfg(unix)]
 fn write_private(path: &Path, bytes: &[u8]) -> Option<()> {
     use std::{io::Write, os::unix::fs::OpenOptionsExt};
-    std::fs::OpenOptions::new()
+    disk::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
@@ -276,7 +276,7 @@ fn write_private(path: &Path, bytes: &[u8]) -> Option<()> {
 
 #[cfg(not(unix))]
 fn write_private(path: &Path, bytes: &[u8]) -> Option<()> {
-    std::fs::write(path, bytes).ok()
+    disk::write(path, bytes).ok()
 }
 
 #[cfg(test)]
@@ -303,7 +303,7 @@ mod tests {
     #[test]
     fn reads_back_saved_thumbnails_and_rejects_stale_ones() {
         let dir = std::env::temp_dir().join(format!("egui-files-thumbs-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        disk::create_dir_all(&dir).unwrap();
         let file = dir.join("a.png");
         let mut bytes = Vec::new();
         let mut encoder = png::Encoder::new(&mut bytes, 300, 150);
@@ -322,13 +322,13 @@ mod tests {
             .unwrap()
             .write_image_data(&vec![255; 300 * 150 * 4])
             .unwrap();
-        std::fs::write(&file, bytes).unwrap();
+        disk::write(&file, bytes).unwrap();
 
         let thumbnail = read_cached(&file, 42, 256).unwrap();
         assert_eq!(thumbnail.image.dimensions(), (256, 128));
         assert_eq!(thumbnail.original_size, Some([4000, 2000]));
         assert!(read_cached(&file, 43, 256).is_none());
 
-        std::fs::remove_dir_all(dir).unwrap();
+        disk::remove_dir_all(dir).unwrap();
     }
 }

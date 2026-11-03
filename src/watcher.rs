@@ -95,6 +95,7 @@ impl DirWatcher {
     /// Folders whose contents changed since the last call, once events have settled.
     pub fn poll(&mut self) -> HashSet<PathBuf> {
         let now = Instant::now();
+        let mut changed: Vec<PathBuf> = Vec::new();
         for event in self.events.try_iter().flatten() {
             // Our own reads (listings, thumbnails, previews) cause access and
             // atime events; reacting to them would refresh in a loop.
@@ -104,7 +105,13 @@ impl DirWatcher {
             ) {
                 continue;
             }
-            for path in event.paths {
+            changed.extend(event.paths);
+        }
+        // The browser's files are in memory, which notes its own changes.
+        #[cfg(target_arch = "wasm32")]
+        changed.extend(disk::take_changes());
+        if !changed.is_empty() {
+            for path in changed {
                 if let Some(parent) = path.parent() {
                     self.dirty.insert(parent.to_path_buf());
                 }
@@ -135,9 +142,9 @@ mod tests {
     #[test]
     fn reports_changed_dirs_and_ignores_reads() {
         let dir = std::env::temp_dir().join(format!("egui-files-watch-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("existing.txt"), "x").unwrap();
+        let _ = disk::remove_dir_all(&dir);
+        disk::create_dir_all(&dir).unwrap();
+        disk::write(dir.join("existing.txt"), "x").unwrap();
 
         let mut watcher = DirWatcher::new(&egui::Context::default());
         assert!(watcher.watcher.is_some(), "platform watcher available");
@@ -154,15 +161,15 @@ mod tests {
         };
 
         // Reading the folder and a file must not count as a change.
-        let _ = std::fs::read_dir(&dir).unwrap().count();
-        let _ = std::fs::read(dir.join("existing.txt")).unwrap();
+        let _ = disk::read_dir(&dir).unwrap().count();
+        let _ = disk::read(dir.join("existing.txt")).unwrap();
         assert!(poll_for(&mut watcher, Duration::from_millis(600)).is_empty());
 
-        std::fs::write(dir.join("new.txt"), "y").unwrap();
+        disk::write(dir.join("new.txt"), "y").unwrap();
         assert!(poll_for(&mut watcher, Duration::from_secs(5)).contains(&dir));
 
         watcher.set_watched(HashSet::new());
-        std::fs::remove_dir_all(dir).unwrap();
+        disk::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -170,8 +177,8 @@ mod tests {
         let root = std::env::temp_dir().join(format!("egui-files-forget-{}", std::process::id()));
         let (a, b) = (root.join("a"), root.join("b"));
         let other = std::env::temp_dir();
-        std::fs::create_dir_all(&a).unwrap();
-        std::fs::create_dir_all(&b).unwrap();
+        disk::create_dir_all(&a).unwrap();
+        disk::create_dir_all(&b).unwrap();
         let mut watcher = DirWatcher::new(&egui::Context::default());
         let dirs = HashSet::from([a.clone(), b.clone(), other.clone()]);
         watcher.set_watched(dirs.clone());
@@ -181,6 +188,6 @@ mod tests {
         watcher.set_watched(dirs.clone());
         assert_eq!(watcher.watched, dirs);
         watcher.set_watched(HashSet::new());
-        std::fs::remove_dir_all(root).unwrap();
+        disk::remove_dir_all(root).unwrap();
     }
 }

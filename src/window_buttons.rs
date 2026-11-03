@@ -255,7 +255,7 @@ fn kde_layout() -> Layout {
         .filter(|p| p.is_absolute())
         .or_else(|| std::env::home_dir().map(|h| h.join(".config")));
     let text = config
-        .and_then(|dir| std::fs::read_to_string(dir.join("kwinrc")).ok())
+        .and_then(|dir| disk::read_to_string(dir.join("kwinrc")).ok())
         .unwrap_or_default();
     parse_kwinrc(&text)
 }

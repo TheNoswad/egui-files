@@ -431,7 +431,7 @@ impl UsageTab {
             self.trashed
                 .iter()
                 .copied()
-                .filter(|&id| tree.is_attached(id) && !tree.path(id).exists())
+                .filter(|&id| tree.is_attached(id) && !disk::path_exists(tree.path(id)))
                 .collect()
         };
         if !gone.is_empty() {
@@ -1435,15 +1435,15 @@ mod tests {
     fn fixture(name: &str) -> PathBuf {
         let root =
             std::env::temp_dir().join(format!("egui-files-usage-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join("big/inner")).unwrap();
-        std::fs::create_dir_all(root.join("small")).unwrap();
+        let _ = disk::remove_dir_all(&root);
+        disk::create_dir_all(root.join("big/inner")).unwrap();
+        disk::create_dir_all(root.join("small")).unwrap();
         for i in 0..6 {
-            std::fs::write(root.join(format!("big/movie{i}.mkv")), vec![0; 200_000]).unwrap();
+            disk::write(root.join(format!("big/movie{i}.mkv")), vec![0; 200_000]).unwrap();
         }
-        std::fs::write(root.join("big/inner/photo.jpg"), vec![0; 300_000]).unwrap();
+        disk::write(root.join("big/inner/photo.jpg"), vec![0; 300_000]).unwrap();
         for i in 0..20 {
-            std::fs::write(root.join(format!("small/note{i}.txt")), vec![0; 5_000]).unwrap();
+            disk::write(root.join(format!("small/note{i}.txt")), vec![0; 5_000]).unwrap();
         }
         root
     }
@@ -1680,7 +1680,7 @@ mod tests {
         let parent = tree.node(selected).parent;
         assert!(h.tab.expanded.contains(&parent));
         drop(tree);
-        std::fs::remove_dir_all(root).unwrap();
+        disk::remove_dir_all(root).unwrap();
     }
 
     /// `EGUI_FILES_USAGE_DIR=/usr cargo test --release usage_timing -- --ignored --nocapture`

@@ -111,7 +111,7 @@ pub fn age_labels() -> impl Iterator<Item = &'static str> {
 }
 
 pub fn now() -> i64 {
-    std::time::SystemTime::now()
+    disk::now()
         .duration_since(std::time::SystemTime::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64)
 }

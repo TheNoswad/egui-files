@@ -1,6 +1,7 @@
 #!/bin/sh
-# Refuses a commit with formatting differences, errors or warnings (on Linux
-# and Windows), or failing tests. Turn on once per clone with:
+# Refuses a commit with formatting differences, errors or warnings (on Linux,
+# Windows and the web demo's wasm32), or failing tests. Turn on once per
+# clone with:
 #   git config core.hooksPath .githooks
 set -e
 cd "$(git rev-parse --show-toplevel)"
@@ -12,20 +13,34 @@ if ! git diff --quiet; then
     exit 1
 fi
 
+# The app and the crates it has of its own (not the Android launcher, which
+# builds only for Android).
+PACKAGES="-p egui-files -p egui-files-disk -p trash-android"
+
 echo "pre-commit: rustfmt" >&2
 cargo fmt --check
 
 echo "pre-commit: clippy (host)" >&2
-cargo clippy --quiet --all-targets -- -D warnings
+cargo clippy --quiet --all-targets $PACKAGES -- -D warnings
 
 if rustup target list --installed 2>/dev/null | grep -qx x86_64-pc-windows-gnu; then
     echo "pre-commit: clippy (Windows)" >&2
-    cargo clippy --quiet --all-targets --target x86_64-pc-windows-gnu -- -D warnings
+    cargo clippy --quiet --all-targets --target x86_64-pc-windows-gnu $PACKAGES -- -D warnings
 else
     echo "pre-commit: x86_64-pc-windows-gnu isn't installed; can't check Windows" >&2
     echo "            (rustup target add x86_64-pc-windows-gnu)" >&2
     exit 1
 fi
 
+# Where clippy.toml's lints apply: what fails or panics in the browser.
+if rustup target list --installed 2>/dev/null | grep -qx wasm32-unknown-unknown; then
+    echo "pre-commit: clippy (web)" >&2
+    cargo clippy --quiet --lib --bins --target wasm32-unknown-unknown $PACKAGES -- -D warnings
+else
+    echo "pre-commit: wasm32-unknown-unknown isn't installed; can't check the web demo" >&2
+    echo "            (rustup target add wasm32-unknown-unknown)" >&2
+    exit 1
+fi
+
 echo "pre-commit: tests" >&2
-cargo test --quiet
+cargo test --quiet $PACKAGES

@@ -211,7 +211,7 @@ fn stored_path(item: &TrashItem) -> Option<PathBuf> {
         let name = id.file_stem()?;
         id.parent()?.parent()?.join("files").join(name)
     };
-    std::fs::symlink_metadata(&path).is_ok().then_some(path)
+    disk::symlink_metadata(&path).is_ok().then_some(path)
 }
 
 /// The folder whose changes mean the trash changed, for the file watcher.
@@ -877,14 +877,14 @@ mod tests {
             .unwrap()
             .join("target")
             .join("trash-test");
-        std::fs::create_dir_all(&dir).unwrap();
+        disk::create_dir_all(&dir).unwrap();
         let tag = format!("egui-files-trash-test-{}", std::process::id());
         let paths: Vec<PathBuf> = ["a", "b"]
             .iter()
             .map(|n| dir.join(format!("{tag}-{n}.txt")))
             .collect();
         for path in &paths {
-            std::fs::write(path, "trash me").unwrap();
+            disk::write(path, "trash me").unwrap();
         }
 
         let ctx = Context::default();
@@ -978,6 +978,6 @@ mod tests {
         assert!(tab.visible().is_empty(), "purged from trash");
         assert!(paths.iter().all(|p| !p.exists()));
 
-        std::fs::remove_dir(&dir).unwrap();
+        disk::remove_dir(&dir).unwrap();
     }
 }

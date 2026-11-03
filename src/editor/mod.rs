@@ -1462,10 +1462,10 @@ mod tests {
         fn new(name: &str, contents: &str) -> Self {
             let dir = std::env::temp_dir()
                 .join(format!("egui-files-editor-{name}-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).unwrap();
+            let _ = disk::remove_dir_all(&dir);
+            disk::create_dir_all(&dir).unwrap();
             let path = dir.join("main.rs");
-            std::fs::write(&path, contents).unwrap();
+            disk::write(&path, contents).unwrap();
             let ctx = Context::default();
             let shared = Shared {
                 show_hidden: false,
@@ -1559,7 +1559,7 @@ mod tests {
 
     impl Drop for Harness {
         fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.dir);
+            let _ = disk::remove_dir_all(&self.dir);
         }
     }
 
@@ -1579,7 +1579,7 @@ mod tests {
 
         h.key(Modifiers::COMMAND, Key::S);
         assert!(!h.tab.is_dirty());
-        assert_eq!(std::fs::read_to_string(&h.path).unwrap(), h.text());
+        assert_eq!(disk::read_to_string(&h.path).unwrap(), h.text());
     }
 
     #[test]
@@ -1657,7 +1657,7 @@ mod tests {
     fn reloads_external_changes_unless_edited() {
         let mut h = Harness::new("reload", CODE);
         std::thread::sleep(Duration::from_millis(20));
-        std::fs::write(&h.path, "changed\n").unwrap();
+        disk::write(&h.path, "changed\n").unwrap();
         h.tab.mark_stale();
         h.until(|h| h.text() == "changed\n");
         assert!(!h.tab.is_dirty());
@@ -1666,18 +1666,18 @@ mod tests {
         h.type_text("my ");
         assert!(h.tab.is_dirty());
         std::thread::sleep(Duration::from_millis(20));
-        std::fs::write(&h.path, "changed again\n").unwrap();
+        disk::write(&h.path, "changed again\n").unwrap();
         h.tab.mark_stale();
         h.frame(Vec::new());
         assert!(h.buffer().disk == Disk::Changed);
         assert_eq!(h.text(), "my changed\n");
 
-        std::fs::remove_file(&h.path).unwrap();
+        disk::remove_file(&h.path).unwrap();
         h.tab.mark_stale();
         h.frame(Vec::new());
         assert!(h.buffer().disk == Disk::Deleted);
         h.key(Modifiers::COMMAND, Key::S);
-        assert_eq!(std::fs::read_to_string(&h.path).unwrap(), "my changed\n");
+        assert_eq!(disk::read_to_string(&h.path).unwrap(), "my changed\n");
         assert!(h.buffer().disk == Disk::InSync);
     }
 

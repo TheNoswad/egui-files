@@ -7,5 +7,7 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
+# The browser's files, in memory (std's on Android).
+disk = { package = "egui-files-disk", path = "../../disk" }
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 percent-encoding = "2"

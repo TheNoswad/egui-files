@@ -78,12 +78,45 @@ pub fn space(_path: &Path) -> Option<Space> {
     None
 }
 
+#[cfg(target_arch = "wasm32")]
+pub fn home_dir() -> PathBuf {
+    PathBuf::from(crate::demo::HOME)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub fn home_dir() -> PathBuf {
     directories::UserDirs::new()
         .map(|d| d.home_dir().to_path_buf())
         .unwrap_or_else(|| PathBuf::from(if cfg!(windows) { "C:\\" } else { "/" }))
 }
 
+/// The demo's home and the folders in it that the desktop's have too.
+#[cfg(target_arch = "wasm32")]
+pub fn standard_places() -> Vec<Place> {
+    let home = home_dir();
+    let place = |label: &str, icon, path: PathBuf| Place {
+        label: label.to_owned(),
+        icon,
+        path,
+        ejectable: false,
+        media: Some(0),
+        space: None,
+    };
+    let mut places = vec![place("Home", icon::HOUSE, home.clone())];
+    for (label, icon) in [
+        ("Documents", icon::FILE_TEXT),
+        ("Downloads", icon::DOWNLOAD_SIMPLE),
+        ("Pictures", icon::IMAGE),
+    ] {
+        let path = home.join(label);
+        if disk::is_dir(&path) {
+            places.push(place(label, icon, path));
+        }
+    }
+    places
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub fn standard_places() -> Vec<Place> {
     let Some(dirs) = directories::UserDirs::new() else {
         return Vec::new();
@@ -147,7 +180,7 @@ pub fn standard_places() -> Vec<Place> {
         ]
     };
     places.extend(optional.into_iter().filter_map(|(label, icon, path)| {
-        path.filter(|p| p.is_dir()).map(|p| Place {
+        path.filter(|p| disk::is_dir(p)).map(|p| Place {
             label: label.to_owned(),
             icon,
             path: p,
@@ -165,12 +198,12 @@ pub fn templates() -> Vec<PathBuf> {
     else {
         return Vec::new();
     };
-    let mut templates: Vec<PathBuf> = std::fs::read_dir(dir)
+    let mut templates: Vec<PathBuf> = disk::read_dir(dir)
         .into_iter()
         .flatten()
         .flatten()
         .map(|e| e.path())
-        .filter(|p| p.is_file())
+        .filter(|p| disk::is_file(p))
         .collect();
     templates.sort();
     templates
@@ -324,7 +357,7 @@ pub fn drives() -> Vec<Place> {
         ejectable: false,
         media: Some(0),
     }];
-    let Ok(read) = std::fs::read_dir("/storage") else {
+    let Ok(read) = disk::read_dir("/storage") else {
         return drives;
     };
     let mut found: Vec<_> = read
@@ -367,13 +400,13 @@ pub fn drives() -> Vec<Place> {
     // UDisks mounts removable drives under /run/media/$USER (or /media).
     for (i, root) in roots.into_iter().enumerate() {
         let ejectable = i < 2;
-        let Ok(read) = std::fs::read_dir(&root) else {
+        let Ok(read) = disk::read_dir(&root) else {
             continue;
         };
         let mut found: Vec<_> = read
             .flatten()
             .map(|e| e.path())
-            .filter(|p| p.is_dir())
+            .filter(|p| disk::is_dir(p))
             .map(|path| Place {
                 label: crate::fs::display_name(&path),
                 icon: if ejectable {

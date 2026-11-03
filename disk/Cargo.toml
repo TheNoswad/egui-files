@@ -1,0 +1,17 @@
+[package]
+name = "egui-files-disk"
+version = "0.1.0"
+edition = "2024"
+description = "The filesystem as egui-files sees it: std's, or in the browser one kept in memory"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+name = "disk"
+
+[dependencies]
+# A clock that works in the browser, for file times there.
+web-time = "1.1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+filetime = "0.2"

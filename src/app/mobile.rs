@@ -306,7 +306,7 @@ impl FilesApp {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn saved_enabled(app_id: &str) -> bool {
     eframe::storage_dir(app_id)
-        .and_then(|dir| std::fs::read_to_string(dir.join("app.ron")).ok())
+        .and_then(|dir| disk::read_to_string(dir.join("app.ron")).ok())
         .is_some_and(|text| enabled_in(&text))
 }
 

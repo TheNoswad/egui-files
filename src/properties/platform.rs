@@ -1,8 +1,8 @@
 //! What differs between systems: owners, permission bits, attributes,
 //! volumes, and changing them.
 
+use disk::Metadata;
 use std::{
-    fs::Metadata,
     io,
     path::{Path, PathBuf},
 };
@@ -24,7 +24,6 @@ pub use imp::*;
 mod imp {
     use std::{
         ffi::CStr,
-        fs,
         os::unix::fs::{MetadataExt, PermissionsExt},
         sync::OnceLock,
         time::{Duration, SystemTime},
@@ -48,7 +47,7 @@ mod imp {
     }
 
     fn parse_ids(path: &str) -> Vec<(u32, String)> {
-        let text = fs::read_to_string(path).unwrap_or_default();
+        let text = disk::read_to_string(path).unwrap_or_default();
         let mut ids: Vec<(u32, String)> = text
             .lines()
             .filter(|l| !l.starts_with('#'))
@@ -137,8 +136,8 @@ mod imp {
     }
 
     pub fn volume(path: &Path) -> Option<Volume> {
-        let path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-        let text = fs::read_to_string("/proc/self/mountinfo").ok()?;
+        let path = disk::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let text = disk::read_to_string("/proc/self/mountinfo").ok()?;
         text.lines()
             .filter_map(|line| {
                 // id parent major:minor root mount options [optional…] - type source super
@@ -186,7 +185,7 @@ mod imp {
     }
 
     pub fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
-        fs::set_permissions(path, fs::Permissions::from_mode(mode))
+        disk::set_permissions(path, disk::Permissions::from_mode(mode))
     }
 
     pub fn set_owner(

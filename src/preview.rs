@@ -115,7 +115,7 @@ impl TextCache {
 /// Reads the start of a file as text, or `None` if it looks binary.
 fn read_text(path: &Path) -> Option<(String, bool)> {
     let mut bytes = Vec::new();
-    std::fs::File::open(path)
+    disk::File::open(path)
         .ok()?
         .take(TEXT_BYTES + 1)
         .read_to_end(&mut bytes)
@@ -581,7 +581,7 @@ mod tests {
     #[ignore]
     fn video_controls_stay_centered_under_the_video() {
         let dir = std::env::temp_dir().join(format!("egui-files-scrubber-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        disk::create_dir_all(&dir).unwrap();
         let status = std::process::Command::new("ffmpeg")
             .args([
                 "-v",
@@ -657,6 +657,6 @@ mod tests {
             (scrubber.center().x - video.center().x).abs() < 1.0,
             "scrubber {scrubber:?} not under video {video:?}"
         );
-        std::fs::remove_dir_all(dir).unwrap();
+        disk::remove_dir_all(dir).unwrap();
     }
 }

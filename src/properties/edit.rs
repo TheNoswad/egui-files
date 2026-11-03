@@ -2,7 +2,7 @@
 //! "permission denied", by an elevated copy of the app (see `elevate`).
 
 use std::{
-    fs, io,
+    io,
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -142,19 +142,19 @@ impl Op {
     fn apply_one(&self, path: &Path, top: bool) -> io::Result<()> {
         match self {
             Op::Rename { from, to } => {
-                if to.symlink_metadata().is_ok() && !same_file_differing_case(from, to) {
+                if disk::symlink_metadata(to).is_ok() && !same_file_differing_case(from, to) {
                     return Err(io::Error::new(
                         io::ErrorKind::AlreadyExists,
                         format!("“{}” already exists", crate::fs::display_name(to)),
                     ));
                 }
-                fs::rename(from, to)
+                disk::rename(from, to)
             }
             Op::Mode { files, dirs, .. } => {
                 let meta = if top {
-                    fs::metadata(path)?
+                    disk::metadata(path)?
                 } else {
-                    fs::symlink_metadata(path)?
+                    disk::symlink_metadata(path)?
                 };
                 // chmod follows links; the link itself has no bits of its own.
                 if meta.file_type().is_symlink() {
@@ -172,7 +172,7 @@ impl Op {
                 platform::set_mode(path, new)
             }
             Op::Attributes { files, dirs, .. } => {
-                let meta = fs::symlink_metadata(path)?;
+                let meta = disk::symlink_metadata(path)?;
                 let bits = if meta.is_dir() { dirs } else { files };
                 let current = attributes_of(&meta);
                 let new = bits.apply(current);
@@ -187,15 +187,11 @@ impl Op {
             Op::Times {
                 modified, accessed, ..
             } => {
-                let meta = fs::metadata(path)?;
+                let meta = disk::metadata(path)?;
                 let modified = modified.or(meta.modified().ok());
                 let accessed = accessed.or(meta.accessed().ok()).or(modified);
                 match (accessed, modified) {
-                    (Some(a), Some(m)) => filetime::set_file_times(
-                        path,
-                        filetime::FileTime::from_system_time(a),
-                        filetime::FileTime::from_system_time(m),
-                    ),
+                    (Some(a), Some(m)) => disk::set_file_times(path, a, m),
                     _ => Err(io::Error::other("the file's times can't be read")),
                 }
             }
@@ -205,24 +201,24 @@ impl Op {
 }
 
 #[cfg(unix)]
-fn mode_of(meta: &fs::Metadata) -> u32 {
+fn mode_of(meta: &disk::Metadata) -> u32 {
     use std::os::unix::fs::PermissionsExt;
     meta.permissions().mode() & 0o7777
 }
 
 #[cfg(not(unix))]
-fn mode_of(_meta: &fs::Metadata) -> u32 {
+fn mode_of(_meta: &disk::Metadata) -> u32 {
     0
 }
 
 #[cfg(windows)]
-fn attributes_of(meta: &fs::Metadata) -> u32 {
+fn attributes_of(meta: &disk::Metadata) -> u32 {
     use std::os::windows::fs::MetadataExt;
     meta.file_attributes()
 }
 
 #[cfg(not(windows))]
-fn attributes_of(_meta: &fs::Metadata) -> u32 {
+fn attributes_of(_meta: &disk::Metadata) -> u32 {
     0
 }
 
@@ -242,8 +238,8 @@ fn retarget(path: &Path, target: &Path) -> io::Result<()> {
     let name = path.file_name().unwrap_or_default().to_string_lossy();
     let temp = path.with_file_name(format!(".{name}.relink-{}", std::process::id()));
     std::os::unix::fs::symlink(target, &temp)?;
-    fs::rename(&temp, path).inspect_err(|_| {
-        let _ = fs::remove_file(&temp);
+    disk::rename(&temp, path).inspect_err(|_| {
+        let _ = disk::remove_file(&temp);
     })
 }
 
@@ -252,7 +248,7 @@ fn retarget(path: &Path, target: &Path) -> io::Result<()> {
     let resolved = path
         .parent()
         .map_or(target.to_path_buf(), |p| p.join(target));
-    let was_dir = fs::metadata(path).is_ok_and(|m| m.is_dir()) || resolved.is_dir();
+    let was_dir = disk::metadata(path).is_ok_and(|m| m.is_dir()) || resolved.is_dir();
     // Make the new link first: creating links needs a privilege that
     // removing doesn't, and failing then must leave the old one in place.
     let name = path.file_name().unwrap_or_default().to_string_lossy();
@@ -263,17 +259,17 @@ fn retarget(path: &Path, target: &Path) -> io::Result<()> {
         std::os::windows::fs::symlink_file(target, &temp)?;
     }
     let removed = if was_dir {
-        fs::remove_dir(path)
+        disk::remove_dir(path)
     } else {
-        fs::remove_file(path)
+        disk::remove_file(path)
     };
     removed
-        .and_then(|()| fs::rename(&temp, path))
+        .and_then(|()| disk::rename(&temp, path))
         .inspect_err(|_| {
             let _ = if was_dir {
-                fs::remove_dir(&temp)
+                disk::remove_dir(&temp)
             } else {
-                fs::remove_file(&temp)
+                disk::remove_file(&temp)
             };
         })
 }
@@ -335,13 +331,13 @@ pub fn apply(plan: &Plan, progress: &Progress) -> Vec<Failure> {
             fail(op, &path, error);
         }
         progress.done.fetch_add(1, Relaxed);
-        if op.recursive() && fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir()) {
+        if op.recursive() && disk::symlink_metadata(&path).is_ok_and(|m| m.is_dir()) {
             let mut stack = vec![path];
             while let Some(dir) = stack.pop() {
                 if progress.cancel.load(Relaxed) {
                     break;
                 }
-                let entries = match fs::read_dir(&dir) {
+                let entries = match disk::read_dir(&dir) {
                     Ok(entries) => entries,
                     Err(error) => {
                         fail(op, &dir, error);
@@ -397,8 +393,8 @@ mod tests {
     fn temp(name: &str) -> PathBuf {
         let dir =
             std::env::temp_dir().join(format!("egui-files-props-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        let _ = disk::remove_dir_all(&dir);
+        disk::create_dir_all(&dir).unwrap();
         dir
     }
 
@@ -418,8 +414,8 @@ mod tests {
     #[test]
     fn renames_and_refuses_to_overwrite() {
         let dir = temp("rename");
-        fs::write(dir.join("a"), "a").unwrap();
-        fs::write(dir.join("b"), "b").unwrap();
+        disk::write(dir.join("a"), "a").unwrap();
+        disk::write(dir.join("b"), "b").unwrap();
         let plan = Plan {
             ops: vec![Op::Rename {
                 from: dir.join("a"),
@@ -428,7 +424,7 @@ mod tests {
         };
         let failures = apply(&plan, &Progress::default());
         assert_eq!(failures.len(), 1);
-        assert_eq!(fs::read_to_string(dir.join("b")).unwrap(), "b");
+        assert_eq!(disk::read_to_string(dir.join("b")).unwrap(), "b");
         let plan = Plan {
             ops: vec![Op::Rename {
                 from: dir.join("a"),
@@ -437,7 +433,7 @@ mod tests {
         };
         assert!(apply(&plan, &Progress::default()).is_empty());
         assert!(dir.join("c").exists());
-        fs::remove_dir_all(dir).unwrap();
+        disk::remove_dir_all(dir).unwrap();
     }
 
     #[cfg(unix)]
@@ -445,10 +441,10 @@ mod tests {
     fn recursive_modes_treat_files_and_folders_apart() {
         use std::os::unix::fs::PermissionsExt;
         let dir = temp("mode");
-        fs::create_dir(dir.join("sub")).unwrap();
-        fs::write(dir.join("sub/file"), "x").unwrap();
-        fs::set_permissions(dir.join("sub/file"), fs::Permissions::from_mode(0o600)).unwrap();
-        let mode = |p: &str| fs::metadata(dir.join(p)).unwrap().permissions().mode() & 0o777;
+        disk::create_dir(dir.join("sub")).unwrap();
+        disk::write(dir.join("sub/file"), "x").unwrap();
+        disk::set_permissions(dir.join("sub/file"), disk::Permissions::from_mode(0o600)).unwrap();
+        let mode = |p: &str| disk::metadata(dir.join(p)).unwrap().permissions().mode() & 0o777;
         let plan = Plan {
             ops: vec![Op::Mode {
                 path: dir.join("sub"),
@@ -466,14 +462,14 @@ mod tests {
         assert!(apply(&plan, &Progress::default()).is_empty());
         assert_eq!(mode("sub/file"), 0o644);
         assert_eq!(mode("sub") & 0o055, 0o055);
-        fs::remove_dir_all(dir).unwrap();
+        disk::remove_dir_all(dir).unwrap();
     }
 
     #[test]
     fn sets_times() {
         let dir = temp("times");
         let file = dir.join("f");
-        fs::write(&file, "x").unwrap();
+        disk::write(&file, "x").unwrap();
         let when = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
         let plan = Plan {
             ops: vec![Op::Times {
@@ -483,8 +479,8 @@ mod tests {
             }],
         };
         assert!(apply(&plan, &Progress::default()).is_empty());
-        assert_eq!(fs::metadata(&file).unwrap().modified().unwrap(), when);
-        fs::remove_dir_all(dir).unwrap();
+        assert_eq!(disk::metadata(&file).unwrap().modified().unwrap(), when);
+        disk::remove_dir_all(dir).unwrap();
     }
 
     #[cfg(unix)]
@@ -499,8 +495,11 @@ mod tests {
             }],
         };
         assert!(apply(&plan, &Progress::default()).is_empty());
-        assert_eq!(fs::read_link(dir.join("l")).unwrap(), PathBuf::from("new"));
-        fs::remove_dir_all(dir).unwrap();
+        assert_eq!(
+            disk::read_link(dir.join("l")).unwrap(),
+            PathBuf::from("new")
+        );
+        disk::remove_dir_all(dir).unwrap();
     }
 
     #[test]

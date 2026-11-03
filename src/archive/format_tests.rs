@@ -1,6 +1,5 @@
 use std::{
     collections::BTreeMap,
-    fs,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -11,24 +10,24 @@ use crate::jobs::{Answer, ConflictChoice, Outcome, Progress, Prompt};
 fn scratch(name: &str) -> PathBuf {
     let root =
         std::env::temp_dir().join(format!("egui-files-archive-{name}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&root);
-    fs::create_dir_all(&root).unwrap();
+    let _ = disk::remove_dir_all(&root);
+    disk::create_dir_all(&root).unwrap();
     root
 }
 
 /// `src/project/{readme.md, run.sh (executable), empty, docs/guide.txt, link -> readme.md}`
 fn project(root: &Path) -> PathBuf {
     let dir = root.join("src/project");
-    fs::create_dir_all(dir.join("docs")).unwrap();
-    fs::create_dir_all(dir.join("empty-dir")).unwrap();
-    fs::write(dir.join("readme.md"), "# hello\n".repeat(100)).unwrap();
-    fs::write(dir.join("run.sh"), "#!/bin/sh\necho hi\n").unwrap();
-    fs::write(dir.join("empty"), "").unwrap();
-    fs::write(dir.join("docs/guide.txt"), "x".repeat(300_000)).unwrap();
+    disk::create_dir_all(dir.join("docs")).unwrap();
+    disk::create_dir_all(dir.join("empty-dir")).unwrap();
+    disk::write(dir.join("readme.md"), "# hello\n".repeat(100)).unwrap();
+    disk::write(dir.join("run.sh"), "#!/bin/sh\necho hi\n").unwrap();
+    disk::write(dir.join("empty"), "").unwrap();
+    disk::write(dir.join("docs/guide.txt"), "x".repeat(300_000)).unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(dir.join("run.sh"), fs::Permissions::from_mode(0o755)).unwrap();
+        disk::set_permissions(dir.join("run.sh"), disk::Permissions::from_mode(0o755)).unwrap();
         std::os::unix::fs::symlink("readme.md", dir.join("link")).unwrap();
     }
     dir
@@ -38,18 +37,18 @@ fn project(root: &Path) -> PathBuf {
 fn snapshot(dir: &Path) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
     fn walk(base: &Path, dir: &Path, out: &mut BTreeMap<String, String>) {
-        for entry in fs::read_dir(dir).unwrap().flatten() {
+        for entry in disk::read_dir(dir).unwrap().flatten() {
             let path = entry.path();
             let name = path
                 .strip_prefix(base)
                 .unwrap()
                 .to_string_lossy()
                 .into_owned();
-            let meta = fs::symlink_metadata(&path).unwrap();
+            let meta = disk::symlink_metadata(&path).unwrap();
             if meta.is_symlink() {
                 out.insert(
                     name,
-                    format!("-> {}", fs::read_link(&path).unwrap().display()),
+                    format!("-> {}", disk::read_link(&path).unwrap().display()),
                 );
             } else if meta.is_dir() {
                 out.insert(name, "<dir>".into());
@@ -60,7 +59,7 @@ fn snapshot(dir: &Path) -> BTreeMap<String, String> {
                     std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o100 != 0;
                 #[cfg(not(unix))]
                 let exec = false;
-                let text = fs::read_to_string(&path).unwrap();
+                let text = disk::read_to_string(&path).unwrap();
                 out.insert(
                     name,
                     format!("{}{}", if exec { "x " } else { "" }, text.len()),
@@ -127,7 +126,7 @@ fn every_format_round_trips() {
     let expected = snapshot(&project);
     for format in Format::CREATE {
         let out = root.join(format!("out-{format:?}"));
-        fs::create_dir_all(&out).unwrap();
+        disk::create_dir_all(&out).unwrap();
         let archive = compress_to(
             vec![project.clone()],
             out.join(format!("project{}", format.extension())),
@@ -168,7 +167,7 @@ fn every_format_round_trips() {
         );
         assert_eq!(snapshot(&out.join("project")), expected, "{format:?}");
         // Nothing left behind but the archive and the folder.
-        let mut names: Vec<_> = fs::read_dir(&out)
+        let mut names: Vec<_> = disk::read_dir(&out)
             .unwrap()
             .flatten()
             .map(|e| e.file_name())
@@ -176,7 +175,7 @@ fn every_format_round_trips() {
         names.sort();
         assert_eq!(names.len(), 2, "{format:?}: {names:?}");
     }
-    fs::remove_dir_all(root).unwrap();
+    disk::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -214,7 +213,7 @@ fn several_items_get_a_folder_and_selections_extract_alone() {
         Some(Outcome::Reveal(dest.join("guide.txt")))
     );
     assert_eq!(
-        fs::read_to_string(dest.join("guide.txt")).unwrap().len(),
+        disk::read_to_string(dest.join("guide.txt")).unwrap().len(),
         300_000
     );
 
@@ -225,9 +224,9 @@ fn several_items_get_a_folder_and_selections_extract_alone() {
         panic!("expected a file to open");
     };
     assert!(opened.starts_with(open_dir()));
-    assert_eq!(fs::read_to_string(&opened).unwrap().len(), 800);
-    fs::remove_dir_all(opened.parent().unwrap()).unwrap();
-    fs::remove_dir_all(root).unwrap();
+    assert_eq!(disk::read_to_string(&opened).unwrap().len(), 800);
+    disk::remove_dir_all(opened.parent().unwrap()).unwrap();
+    disk::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -241,10 +240,10 @@ fn conflicts_ask_and_remember_the_answer() {
         None,
     );
     let dest = root.join("dest");
-    fs::create_dir_all(dest.join("docs")).unwrap();
-    fs::write(dest.join("docs/guide.txt"), "old").unwrap();
-    fs::write(dest.join("docs/mine.txt"), "mine").unwrap();
-    fs::write(dest.join("readme.md"), "old").unwrap();
+    disk::create_dir_all(dest.join("docs")).unwrap();
+    disk::write(dest.join("docs/guide.txt"), "old").unwrap();
+    disk::write(dest.join("docs/mine.txt"), "mine").unwrap();
+    disk::write(dest.join("readme.md"), "old").unwrap();
 
     // Skip, for all: nothing existing is touched, folders merge.
     let job = ExtractJob::new(archive.clone(), dest.clone(), ExtractMode::Into, false);
@@ -261,10 +260,10 @@ fn conflicts_ask_and_remember_the_answer() {
     );
     assert!(errors.is_empty());
     assert_eq!(
-        fs::read_to_string(dest.join("docs/guide.txt")).unwrap(),
+        disk::read_to_string(dest.join("docs/guide.txt")).unwrap(),
         "old"
     );
-    assert_eq!(fs::read_to_string(dest.join("readme.md")).unwrap(), "old");
+    assert_eq!(disk::read_to_string(dest.join("readme.md")).unwrap(), "old");
     assert!(dest.join("docs/mine.txt").exists());
 
     // Keep both, then overwrite.
@@ -286,23 +285,23 @@ fn conflicts_ask_and_remember_the_answer() {
     );
     assert!(errors.is_empty());
     assert_eq!(
-        fs::read_to_string(dest.join("docs/guide (1).txt"))
+        disk::read_to_string(dest.join("docs/guide (1).txt"))
             .unwrap()
             .len(),
         300_000
     );
     assert_eq!(
-        fs::read_to_string(dest.join("readme.md")).unwrap().len(),
+        disk::read_to_string(dest.join("readme.md")).unwrap().len(),
         800
     );
     // No staging folders left.
     assert!(
-        fs::read_dir(&dest)
+        disk::read_dir(&dest)
             .unwrap()
             .flatten()
             .all(|e| !e.file_name().to_string_lossy().contains("extracting"))
     );
-    fs::remove_dir_all(root).unwrap();
+    disk::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -350,7 +349,7 @@ fn passwords_are_asked_for_and_checked() {
             "{format:?}"
         );
     }
-    fs::remove_dir_all(root).unwrap();
+    disk::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -367,7 +366,7 @@ fn trash_after_extract_only_on_success() {
     );
     assert!(archive.exists());
     assert!(!root.join("d/project").exists());
-    fs::remove_dir_all(root).unwrap();
+    disk::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -375,7 +374,7 @@ fn entries_cannot_escape_the_destination() {
     let root = scratch("escape");
     let archive = root.join("evil.tar");
     {
-        let mut tar = tar::Builder::new(fs::File::create(&archive).unwrap());
+        let mut tar = tar::Builder::new(disk::File::create(&archive).unwrap());
         let mut add = |name: &[u8], kind: tar::EntryType, link: Option<&str>, data: &[u8]| {
             let mut header = tar::Header::new_gnu();
             // Bypass the tar crate's own checks, like a hostile archive would.
@@ -415,12 +414,12 @@ fn entries_cannot_escape_the_destination() {
     assert!(!root.join("escaped.txt").exists());
     assert!(!root.join("through-link.txt").exists());
     assert_eq!(
-        fs::read_to_string(dest.join("ok/inside.txt")).unwrap(),
+        disk::read_to_string(dest.join("ok/inside.txt")).unwrap(),
         "fine"
     );
     // The escaping name and the link that collides with a folder were reported.
     assert_eq!(errors.len(), 2, "{errors:?}");
-    fs::remove_dir_all(root).unwrap();
+    disk::remove_dir_all(root).unwrap();
 }
 
 /// Our archives open in other tools, and theirs open here.
@@ -431,7 +430,7 @@ fn compatible_with_system_tools() {
     let project = project(&root);
     let expected = snapshot(&project);
     let check = |tool: &str, args: &[&str], dest: &Path| {
-        fs::create_dir_all(dest).unwrap();
+        disk::create_dir_all(dest).unwrap();
         let output = Command::new(tool)
             .args(args)
             .current_dir(dest)
@@ -517,7 +516,7 @@ fn compatible_with_system_tools() {
         assert!(errors.is_empty(), "{errors:?}");
         assert_eq!(snapshot(&root.join("from-zip/project")), expected);
     }
-    fs::remove_dir_all(root).unwrap();
+    disk::remove_dir_all(root).unwrap();
 }
 
 /// The rar samples that ship with the unrar crate, if it's in the cargo registry.
@@ -525,10 +524,10 @@ fn rar_samples() -> Option<PathBuf> {
     let home = std::env::var_os("CARGO_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cargo")))?;
-    fs::read_dir(home.join("registry/src"))
+    disk::read_dir(home.join("registry/src"))
         .ok()?
         .flatten()
-        .flat_map(|index| fs::read_dir(index.path()).into_iter().flatten().flatten())
+        .flat_map(|index| disk::read_dir(index.path()).into_iter().flatten().flatten())
         .map(|krate| krate.path())
         .find(|path| {
             path.file_name()
@@ -556,7 +555,7 @@ fn extracts_rar() {
     let (outcome, errors) = extract_with(job, |_| Answer::Password("unrar".into()), 1);
     assert!(errors.is_empty(), "{errors:?}");
     assert_eq!(outcome, Some(Outcome::Reveal(root.join(".gitignore"))));
-    assert_eq!(fs::read(root.join(".gitignore")).unwrap().len(), 18);
+    assert_eq!(disk::read(root.join(".gitignore")).unwrap().len(), 18);
 
     // Encrypted headers: no listing without the password.
     let hidden = samples.join("comment-hpw-password.rar");
@@ -565,5 +564,5 @@ fn extracts_rar() {
         Err(Error::NeedsPassword)
     ));
     assert!(read::list(&hidden, Some("password")).is_ok());
-    fs::remove_dir_all(root).unwrap();
+    disk::remove_dir_all(root).unwrap();
 }

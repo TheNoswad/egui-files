@@ -336,8 +336,8 @@ impl BrowserTab {
         self.column_cache.clear();
         // If the folder was deleted or renamed away, fall back to the nearest parent.
         let mut gone = None;
-        if !self.path.is_dir()
-            && let Some(existing) = self.path.ancestors().skip(1).find(|p| p.is_dir())
+        if !disk::is_dir(&self.path)
+            && let Some(existing) = self.path.ancestors().skip(1).find(|p| disk::is_dir(p))
         {
             gone = Some(self.path.clone());
             self.navigate(existing.to_path_buf());
@@ -439,7 +439,7 @@ impl BrowserTab {
         if path == self.path {
             return;
         }
-        if !path.is_dir() {
+        if !disk::is_dir(&path) {
             self.error = Some(format!("Not a folder: {}", path.display()));
             return;
         }
@@ -1255,7 +1255,7 @@ impl BrowserTab {
                 output.response.request_focus();
                 // Pre-select the stem so typing replaces the name but keeps the extension.
                 let stem_len = match rename.name.rfind('.') {
-                    Some(dot) if dot > 0 && !rename.path.is_dir() => {
+                    Some(dot) if dot > 0 && !disk::is_dir(&rename.path) => {
                         rename.name[..dot].chars().count()
                     }
                     _ => rename.name.chars().count(),
@@ -1316,7 +1316,7 @@ impl BrowserTab {
     fn selected_archives(&self) -> Vec<PathBuf> {
         self.selected_paths()
             .into_iter()
-            .filter(|p| !p.is_dir() && archive::is_archive(p))
+            .filter(|p| !disk::is_dir(p) && archive::is_archive(p))
             .collect()
     }
 
@@ -1370,7 +1370,7 @@ impl BrowserTab {
             Action::Edit(path) => shared.app_actions.push(AppAction::Edit(path)),
             Action::EditSelected => {
                 for path in self.selected_paths() {
-                    if crate::editor::can_edit(&path, path.is_dir()) {
+                    if crate::editor::can_edit(&path, disk::is_dir(&path)) {
                         shared.app_actions.push(AppAction::Edit(path));
                     }
                 }
@@ -1627,7 +1627,7 @@ impl BrowserTab {
 
     /// Opens folders here, archives in an archive tab, and files in their app.
     pub fn activate(&mut self, path: PathBuf, app_actions: &mut Vec<AppAction>) {
-        if path.is_dir() {
+        if disk::is_dir(&path) {
             self.navigate(path);
         } else if archive::is_archive(&path) {
             app_actions.push(AppAction::OpenArchive(path));
@@ -1667,11 +1667,11 @@ mod tests {
     /// `root/a/b/file.txt`, `root/a/c/`, `root/a/.hidden/`
     fn fixture(name: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!("egui-files-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join("a/b")).unwrap();
-        std::fs::create_dir_all(root.join("a/c")).unwrap();
-        std::fs::create_dir_all(root.join("a/.hidden")).unwrap();
-        std::fs::write(root.join("a/b/file.txt"), "hi").unwrap();
+        let _ = disk::remove_dir_all(&root);
+        disk::create_dir_all(root.join("a/b")).unwrap();
+        disk::create_dir_all(root.join("a/c")).unwrap();
+        disk::create_dir_all(root.join("a/.hidden")).unwrap();
+        disk::write(root.join("a/b/file.txt"), "hi").unwrap();
         root
     }
 
@@ -1825,7 +1825,7 @@ mod tests {
             ),
             "the whole path is selected"
         );
-        std::fs::remove_dir_all(root).ok();
+        disk::remove_dir_all(root).ok();
     }
 
     #[test]
@@ -1883,7 +1883,7 @@ mod tests {
                 "{view:?}: clicking empty space clears selection"
             );
         }
-        std::fs::remove_dir_all(root).unwrap();
+        disk::remove_dir_all(root).unwrap();
     }
 
     /// The Details view measures the folders it shows, and sorting by size
@@ -1892,7 +1892,7 @@ mod tests {
     fn details_view_shows_and_sorts_by_folder_sizes() {
         let root = fixture("folder-sizes");
         let a = root.join("a");
-        std::fs::write(a.join("c/big.bin"), vec![0; 50_000]).unwrap();
+        disk::write(a.join("c/big.bin"), vec![0; 50_000]).unwrap();
         let ctx = Context::default();
         let mut tab = BrowserTab::new(1, a.clone());
         let mut shared = shared(&ctx, &tab);
@@ -1929,7 +1929,7 @@ mod tests {
         let mut other = BrowserTab::new(2, root.clone());
         run_frame(&ctx, &mut other, &mut shared, &[]);
         assert!(shared.usage.folder_sizes(&ctx, &root).is_none());
-        std::fs::remove_dir_all(root).unwrap();
+        disk::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1966,7 +1966,7 @@ mod tests {
         );
         run_frame(&ctx, &mut tab, &mut shared, &[]);
 
-        std::fs::remove_dir_all(root).unwrap();
+        disk::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1982,7 +1982,7 @@ mod tests {
         assert_eq!(tab.cursor, Some(1));
 
         // A new folder sorting before c shifts it down; the cursor follows c.
-        std::fs::create_dir(a.join("bb")).unwrap();
+        disk::create_dir(a.join("bb")).unwrap();
         tab.dirs_changed(&HashSet::from([a.clone()]));
         run_frame(&ctx, &mut tab, &mut shared, &[]);
         assert_eq!(tab.visible(false).len(), 3);
@@ -1990,13 +1990,13 @@ mod tests {
         assert!(tab.selection.contains(&a.join("c")));
 
         // Deleting the open folder falls back to its parent.
-        std::fs::remove_dir_all(&a).unwrap();
+        disk::remove_dir_all(&a).unwrap();
         tab.dirs_changed(&HashSet::from([a.clone()]));
         run_frame(&ctx, &mut tab, &mut shared, &[]);
         assert_eq!(tab.path, root);
         assert!(tab.error.as_deref().unwrap().contains("no longer exists"));
 
-        std::fs::remove_dir_all(root).unwrap();
+        disk::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2021,11 +2021,11 @@ mod tests {
 
         // Template: copied with its name, and a second one gets a unique name.
         let template = root.join("Report.md");
-        std::fs::write(&template, "# Title").unwrap();
+        disk::write(&template, "# Title").unwrap();
         tab.apply(Action::NewFile(Some(template.clone())), &ctx, &mut shared);
         tab.apply(Action::NewFile(Some(template.clone())), &ctx, &mut shared);
         assert_eq!(
-            std::fs::read_to_string(a.join("Report.md")).unwrap(),
+            disk::read_to_string(a.join("Report.md")).unwrap(),
             "# Title"
         );
         assert!(a.join("Report (1).md").is_file());
@@ -2045,7 +2045,7 @@ mod tests {
         assert!(a.join("c/New File").is_file());
         assert!(created.is_file(), "copy keeps the original");
 
-        std::fs::remove_dir_all(root).unwrap();
+        disk::remove_dir_all(root).unwrap();
     }
 
     /// Drags with the primary button from `from` to `to`, holding `modifiers` on release.
@@ -2166,7 +2166,7 @@ mod tests {
         );
 
         // Ctrl+E: one top-level folder, so it comes out as `b/` again.
-        std::fs::remove_dir_all(a.join("b")).unwrap();
+        disk::remove_dir_all(a.join("b")).unwrap();
         let ctrl_e = egui::Event::Key {
             key: Key::E,
             physical_key: None,
@@ -2182,7 +2182,7 @@ mod tests {
             Modifiers::COMMAND,
         );
         finish_jobs(&ctx, &mut tab, &mut shared);
-        assert_eq!(std::fs::read_to_string(a.join("b/file.txt")).unwrap(), "hi");
+        assert_eq!(disk::read_to_string(a.join("b/file.txt")).unwrap(), "hi");
         assert_eq!(
             tab.selection,
             HashSet::from([a.join("b")]),
@@ -2194,14 +2194,14 @@ mod tests {
         assert!(
             matches!(shared.app_actions.as_slice(), [AppAction::OpenArchive(p)] if *p == archive)
         );
-        std::fs::remove_dir_all(root).unwrap();
+        disk::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn drag_and_drop_moves_or_copies_into_folders() {
         let root = fixture("dnd");
         let a = root.join("a");
-        std::fs::write(a.join("x.txt"), "x").unwrap();
+        disk::write(a.join("x.txt"), "x").unwrap();
         let ctx = Context::default();
         let mut tab = BrowserTab::new(1, a.clone());
         tab.view = ViewMode::Grid;
@@ -2254,7 +2254,7 @@ mod tests {
             "drag ended"
         );
 
-        std::fs::remove_dir_all(root).unwrap();
+        disk::remove_dir_all(root).unwrap();
     }
 
     fn external(
@@ -2282,7 +2282,7 @@ mod tests {
         let root = fixture("external");
         let a = root.join("a");
         let elsewhere = root.join("elsewhere.txt");
-        std::fs::write(&elsewhere, "from another app").unwrap();
+        disk::write(&elsewhere, "from another app").unwrap();
         let ctx = Context::default();
         let mut tab = BrowserTab::new(1, a.clone());
         tab.view = ViewMode::Grid;
@@ -2349,7 +2349,7 @@ mod tests {
         assert!(a.join("c/elsewhere.txt").is_file());
         assert!(!moved.exists(), "returning in-app drags move");
 
-        std::fs::remove_dir_all(root).unwrap();
+        disk::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2389,7 +2389,7 @@ mod tests {
         );
         assert!(shared.images.is_ready(&pic, modified, images::PREVIEW_SIZE));
 
-        std::fs::remove_dir_all(root).unwrap();
+        disk::remove_dir_all(root).unwrap();
     }
 
     /// Needs libmpv, ffmpeg and a GPU.
@@ -2475,7 +2475,7 @@ mod tests {
                 .any(|(id, _)| id == Id::new("hover-video"))
         );
 
-        std::fs::remove_dir_all(root).unwrap();
+        disk::remove_dir_all(root).unwrap();
     }
 
     /// Where `needle` was drawn, from the text shapes of a frame.
@@ -2496,7 +2496,7 @@ mod tests {
     fn toolbar_fits_narrow_widths() {
         let root = fixture("toolbar-widths");
         let deep = root.join("a/b/some folder with a long name/and another one");
-        std::fs::create_dir_all(&deep).unwrap();
+        disk::create_dir_all(&deep).unwrap();
         let ctx = Context::default();
         let mut tab = BrowserTab::new(1, deep);
         let mut shared = shared(&ctx, &tab);
@@ -2590,7 +2590,7 @@ mod tests {
         frame(&mut tab, 200.0, vec![]);
         frame(&mut tab, 200.0, vec![]);
         assert!(rows(&ctx).0.is_none(), "Escape closes the filter row");
-        std::fs::remove_dir_all(root).ok();
+        disk::remove_dir_all(root).ok();
     }
 
     #[test]
@@ -2702,6 +2702,6 @@ mod tests {
         frame(&mut tab, &mut shared, vec![key(Key::Escape)]);
         frame(&mut tab, &mut shared, vec![]);
         assert!(!shared.open_with.is_asking(), "Escape closes the dialog");
-        std::fs::remove_dir_all(root).unwrap();
+        disk::remove_dir_all(root).unwrap();
     }
 }

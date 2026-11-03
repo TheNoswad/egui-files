@@ -2,8 +2,8 @@
 //! linked, and for Windows ones the version details they carry. Read in the
 //! background, for any file that starts like an executable whatever its name.
 
+use disk::File;
 use std::{
-    fs::File,
     io::Read,
     path::{Path, PathBuf},
     sync::{Arc, OnceLock},
@@ -612,20 +612,20 @@ mod tests {
     #[test]
     fn other_files_are_not_programs() {
         let dir = std::env::temp_dir().join(format!("egui-files-program-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        disk::create_dir_all(&dir).unwrap();
         let text = dir.join("note.txt");
-        std::fs::write(&text, "MZ is not enough? it is: but this fails to parse").unwrap();
+        disk::write(&text, "MZ is not enough? it is: but this fails to parse").unwrap();
         // Starts with "MZ" but isn't PE: shown as an MS-DOS program.
         let dos = read(&text).unwrap().unwrap();
         assert_eq!(dos.rows[0].1, "MS-DOS program");
         let plain = dir.join("plain.txt");
-        std::fs::write(&plain, "hello").unwrap();
+        disk::write(&plain, "hello").unwrap();
         assert_eq!(read(&plain).unwrap(), None);
         // A Java class: same magic as a universal binary.
         let class = dir.join("A.class");
-        std::fs::write(&class, [0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 61, 0, 0]).unwrap();
+        disk::write(&class, [0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 61, 0, 0]).unwrap();
         assert_eq!(read(&class).unwrap(), None);
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = disk::remove_dir_all(&dir);
     }
 
     /// A hand-built version resource, as Windows' resource compiler lays it out.

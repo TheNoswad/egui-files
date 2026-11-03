@@ -1,7 +1,7 @@
 //! Listing and unpacking each archive format.
 
+use disk::File;
 use std::{
-    fs::{self, File},
     io::{self, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -67,7 +67,7 @@ fn threads() -> u32 {
 
 pub fn list(path: &Path, password: Option<&str>) -> Result<Listing, Error> {
     let format = Format::detect(path).ok_or_else(|| Error::Other("not an archive".into()))?;
-    let archive_size = fs::metadata(path).map_or(0, |m| m.len());
+    let archive_size = disk::metadata(path).map_or(0, |m| m.len());
     let entries = match format {
         Format::Zip => list_zip(path)?,
         Format::SevenZ => list_7z(path, password)?,
@@ -77,7 +77,7 @@ pub fn list(path: &Path, password: Option<&str>) -> Result<Listing, Error> {
             is_dir: false,
             size: single_file_size(path, format).unwrap_or(0),
             packed: Some(archive_size),
-            modified: fs::metadata(path).and_then(|m| m.modified()).ok(),
+            modified: disk::metadata(path).and_then(|m| m.modified()).ok(),
             encrypted: false,
         }],
         Format::Tar | Format::TarGz | Format::TarXz | Format::TarZst | Format::TarBz2 => {
@@ -204,7 +204,7 @@ pub fn unpack(
     p: &Progress,
 ) -> Result<(), Error> {
     let format = Format::detect(archive).ok_or_else(|| Error::Other("not an archive".into()))?;
-    let size = fs::metadata(archive).map_or(0, |m| m.len());
+    let size = disk::metadata(archive).map_or(0, |m| m.len());
     let mut out = Unpacker {
         root,
         selection,
@@ -225,7 +225,7 @@ pub fn unpack(
         Format::Rar => unpack_rar(archive, password, &mut out),
         Format::Gz | Format::Xz | Format::Zst | Format::Bz2 => {
             p.add_totals(size, 1);
-            let modified = fs::metadata(archive).and_then(|m| m.modified()).ok();
+            let modified = disk::metadata(archive).and_then(|m| m.modified()).ok();
             let mut data = decoder(format, open(archive, Some(p))?)?;
             out.file(
                 &super::stem(archive),
@@ -289,7 +289,7 @@ impl Unpacker<'_> {
 
     fn make_parent(&self, path: &Path) -> io::Result<()> {
         match path.parent() {
-            Some(parent) => fs::create_dir_all(parent),
+            Some(parent) => disk::create_dir_all(parent),
             None => Ok(()),
         }
     }
@@ -298,7 +298,7 @@ impl Unpacker<'_> {
         let Some(path) = self.target(name) else {
             return;
         };
-        match fs::create_dir_all(&path) {
+        match disk::create_dir_all(&path) {
             Ok(()) => self.dirs.push((path, meta)),
             Err(err) => self.p.error(&path, err),
         }
@@ -313,7 +313,7 @@ impl Unpacker<'_> {
         self.p.set_current(&path);
         let mut out = match self.make_parent(&path).and_then(|()| {
             // Later entries with the same name replace earlier ones, like tar does.
-            let _ = fs::remove_file(&path);
+            let _ = disk::remove_file(&path);
             File::create_new(&path)
         }) {
             Ok(out) => Some(out),
@@ -328,7 +328,7 @@ impl Unpacker<'_> {
                 Ok(n) => n,
                 Err(err) => {
                     drop(out);
-                    let _ = fs::remove_file(&path);
+                    let _ = disk::remove_file(&path);
                     return Err(err.into());
                 }
             };
@@ -337,7 +337,7 @@ impl Unpacker<'_> {
             {
                 self.p.error(&path, err);
                 out = None;
-                let _ = fs::remove_file(&path);
+                let _ = disk::remove_file(&path);
             }
         }
         if let Some(file) = out {
@@ -367,8 +367,8 @@ impl Unpacker<'_> {
                 .error(&path, "skipped: links to an item that wasn't extracted");
         };
         let result = self.make_parent(&path).and_then(|()| {
-            let _ = fs::remove_file(&path);
-            fs::hard_link(&existing, &path).or_else(|_| fs::copy(&existing, &path).map(drop))
+            let _ = disk::remove_file(&path);
+            disk::hard_link(&existing, &path).or_else(|_| disk::copy(&existing, &path).map(drop))
         });
         if let Err(err) = result {
             self.p.error(&path, err);
@@ -387,7 +387,7 @@ impl Unpacker<'_> {
         // Deepest first, so setting a parent's time comes after its children change it.
         for (path, meta) in self.dirs.drain(..).rev() {
             if let Some(modified) = meta.modified {
-                let _ = filetime::set_file_mtime(&path, modified.into());
+                let _ = disk::set_file_mtime(&path, modified);
             }
             set_mode(&path, meta.mode);
         }
@@ -400,7 +400,7 @@ fn set_mode(path: &Path, mode: Option<u32>) {
     use std::os::unix::fs::PermissionsExt;
     // Owner rwx at least, so nothing extracted ends up unreadable or stuck.
     if let Some(mode) = mode.map(|m| m & 0o777).filter(|&m| m != 0) {
-        let _ = fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o600));
+        let _ = disk::set_permissions(path, disk::Permissions::from_mode(mode | 0o600));
     }
 }
 

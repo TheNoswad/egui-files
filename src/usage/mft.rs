@@ -116,7 +116,7 @@ pub fn run_helper() -> Option<i32> {
     };
     let letter = letter.to_string_lossy().chars().next().unwrap_or('C');
     let result = platform::read_volume(letter).and_then(|entries| {
-        let mut file = io::BufWriter::new(std::fs::File::create(out)?);
+        let mut file = io::BufWriter::new(disk::File::create(out)?);
         write_entries(&mut file, &entries)?;
         file.flush()
     });
@@ -557,7 +557,8 @@ pub fn read_entries(input: &mut impl Read) -> io::Result<Vec<Entry>> {
 
 #[cfg(windows)]
 mod platform {
-    use std::{fs::File, io, os::windows::fs::FileExt};
+    use disk::File;
+    use std::{io, os::windows::fs::FileExt};
 
     use super::{Entry, Parser, geometry, mft_extents};
 
@@ -575,7 +576,7 @@ mod platform {
         use std::os::windows::fs::OpenOptionsExt;
         // FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE: the
         // volume stays in use while it's read.
-        std::fs::OpenOptions::new()
+        disk::OpenOptions::new()
             .read(true)
             .share_mode(7)
             .open(format!(r"\\.\{letter}:"))

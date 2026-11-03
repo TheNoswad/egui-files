@@ -40,7 +40,7 @@ fn helper(args: Vec<std::ffi::OsString>) -> io::Result<()> {
     // into an elevated process, so they go through files named on the
     // command line.
     let text = match args.first() {
-        Some(plan) => std::fs::read_to_string(plan)?,
+        Some(plan) => disk::read_to_string(plan)?,
         None => {
             let mut text = String::new();
             io::stdin().read_to_string(&mut text)?;
@@ -51,7 +51,7 @@ fn helper(args: Vec<std::ffi::OsString>) -> io::Result<()> {
     let failures = edit::apply(&plan, &edit::Progress::default());
     let report = toml::to_string(&Report { failures }).map_err(io::Error::other)?;
     match args.get(1) {
-        Some(out) => std::fs::write(out, report),
+        Some(out) => disk::write(out, report),
         None => io::stdout().write_all(report.as_bytes()),
     }
 }
@@ -149,14 +149,14 @@ fn run(plan: &Plan) -> io::Result<Vec<Failure>> {
     let stem = temp_stem("properties");
     let plan_file = std::env::temp_dir().join(format!("{stem}.toml"));
     let report_file = std::env::temp_dir().join(format!("{stem}-report.toml"));
-    std::fs::write(&plan_file, text)?;
+    disk::write(&plan_file, text)?;
     let _cleanup = Cleanup(vec![plan_file.clone(), report_file.clone()]);
     run_as_admin(&format!(
         "{FLAG} \"{}\" \"{}\"",
         plan_file.display(),
         report_file.display()
     ))?;
-    parse_report(&std::fs::read_to_string(&report_file)?)
+    parse_report(&disk::read_to_string(&report_file)?)
 }
 
 /// A file name stem in the temp folder that no other helper run uses.
@@ -226,7 +226,7 @@ pub struct Cleanup(pub Vec<std::path::PathBuf>);
 impl Drop for Cleanup {
     fn drop(&mut self) {
         for file in &self.0 {
-            let _ = std::fs::remove_file(file);
+            let _ = disk::remove_file(file);
         }
     }
 }

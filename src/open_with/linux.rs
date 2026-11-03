@@ -8,7 +8,7 @@ use std::{
     collections::{HashMap, HashSet},
     env,
     ffi::OsString,
-    fs, io,
+    io,
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -93,7 +93,7 @@ fn mimeapps_files() -> Vec<PathBuf> {
 }
 
 fn modified(path: &Path) -> Option<SystemTime> {
-    fs::metadata(path).and_then(|m| m.modified()).ok()
+    disk::metadata(path).and_then(|m| m.modified()).ok()
 }
 
 /// The groups of an ini-style file, keeping the order of keys.
@@ -177,7 +177,7 @@ fn locales() -> Vec<String> {
 fn looks_like_text(path: &Path) -> bool {
     use std::io::Read;
     let mut buf = [0; 4096];
-    let Ok(n) = fs::File::open(path).and_then(|mut f| f.read(&mut buf)) else {
+    let Ok(n) = disk::File::open(path).and_then(|mut f| f.read(&mut buf)) else {
         return false;
     };
     let text = match std::str::from_utf8(&buf[..n]) {
@@ -204,7 +204,7 @@ fn find_program(program: &str) -> bool {
 }
 
 fn parse_entry(id: String, file: &Path, locales: &[String], desktops: &[String]) -> Option<Entry> {
-    let text = fs::read_to_string(file).ok()?;
+    let text = disk::read_to_string(file).ok()?;
     let groups = parse_ini(&text);
     let (_, keys) = groups.iter().find(|(name, _)| *name == "Desktop Entry")?;
     let get = |key: &str| keys.iter().find(|(k, _)| *k == key).map(|(_, v)| *v);
@@ -258,7 +258,7 @@ fn parse_entry(id: String, file: &Path, locales: &[String], desktops: &[String])
 /// Desktop files under `dir`, with their ids: the path relative to
 /// `applications`, with `/` turned into `-`.
 fn desktop_files(dir: &Path, prefix: &str, out: &mut Vec<(String, PathBuf)>) {
-    let Ok(entries) = fs::read_dir(dir) else {
+    let Ok(entries) = disk::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
@@ -318,7 +318,7 @@ impl Catalog {
         let mut removed: HashSet<(String, String)> = HashSet::new();
         for file in mimeapps_files() {
             stamps.push((file.clone(), modified(&file)));
-            let Ok(text) = fs::read_to_string(&file) else {
+            let Ok(text) = disk::read_to_string(&file) else {
                 continue;
             };
             let mut removed_here = Vec::new();
@@ -567,7 +567,7 @@ impl Entry {
 /// The icon theme the desktop uses: KDE's, else GTK's.
 fn icon_theme() -> String {
     let kde = config_dirs().into_iter().find_map(|dir| {
-        let text = fs::read_to_string(dir.join("kdeglobals")).ok()?;
+        let text = disk::read_to_string(dir.join("kdeglobals")).ok()?;
         let groups = parse_ini(&text);
         let (_, keys) = groups.into_iter().find(|(name, _)| *name == "Icons")?;
         keys.into_iter()
@@ -576,7 +576,7 @@ fn icon_theme() -> String {
     });
     let gtk = || {
         config_dirs().into_iter().find_map(|dir| {
-            let text = fs::read_to_string(dir.join("gtk-3.0/settings.ini")).ok()?;
+            let text = disk::read_to_string(dir.join("gtk-3.0/settings.ini")).ok()?;
             text.lines()
                 .find_map(|l| l.trim().strip_prefix("gtk-icon-theme-name"))
                 .and_then(|v| v.trim_start().strip_prefix('='))
@@ -602,7 +602,7 @@ pub fn icon_image(icon: &str, size: u32) -> Option<egui::ColorImage> {
             .with_cache()
             .find()?
     };
-    let data = fs::read(&path).ok()?;
+    let data = disk::read(&path).ok()?;
     if path
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("svg") || e.eq_ignore_ascii_case("svgz"))
@@ -840,9 +840,9 @@ mod tests {
     fn unescapes_and_localizes() {
         assert_eq!(unescape(r"a\sb\\c"), r"a b\c");
         let dir = std::env::temp_dir().join(format!("egui-files-desktop-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
+        disk::create_dir_all(&dir).unwrap();
         let file = dir.join("t.desktop");
-        fs::write(
+        disk::write(
             &file,
             "[Desktop Entry]\nType=Application\nName=Viewer\nName[de]=Betrachter\n\
              Exec=view %f\nMimeType=image/png;text/plain;\nNoDisplay=true\n\
@@ -859,7 +859,7 @@ mod tests {
         assert_eq!(entry.app.name, "Betrachter");
         assert_eq!(entry.app.mime_types, ["image/png", "text/plain"]);
         assert!(entry.no_display);
-        fs::remove_dir_all(&dir).unwrap();
+        disk::remove_dir_all(&dir).unwrap();
     }
 
     /// Uses the system's MIME database and apps.
@@ -896,10 +896,10 @@ pub fn set_default(app: &App, mime_type: &str) -> io::Result<()> {
         .map(|d| home.join(format!("{}-mimeapps.list", d.to_lowercase())))
         .find(|f| f.is_file())
         .unwrap_or_else(|| home.join("mimeapps.list"));
-    let text = fs::read_to_string(&file).unwrap_or_default();
+    let text = disk::read_to_string(&file).unwrap_or_default();
     let updated = with_default(&text, mime_type, &app.id);
-    fs::create_dir_all(&home)?;
-    fs::write(&file, updated)
+    disk::create_dir_all(&home)?;
+    disk::write(&file, updated)
 }
 
 /// `text` (a `mimeapps.list`) with `id` as the default for `mime_type`,

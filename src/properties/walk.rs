@@ -1,7 +1,6 @@
 //! Counting what's inside folders, on a background thread.
 
 use std::{
-    fs,
     path::PathBuf,
     sync::{
         Arc,
@@ -73,22 +72,22 @@ impl Drop for Walk {
 }
 
 #[cfg(unix)]
-fn device(meta: &fs::Metadata) -> u64 {
+fn device(meta: &disk::Metadata) -> u64 {
     std::os::unix::fs::MetadataExt::dev(meta)
 }
 
 #[cfg(not(unix))]
-fn device(_meta: &fs::Metadata) -> u64 {
+fn device(_meta: &disk::Metadata) -> u64 {
     0
 }
 
 #[cfg(unix)]
-fn allocated(meta: &fs::Metadata) -> u64 {
+fn allocated(meta: &disk::Metadata) -> u64 {
     std::os::unix::fs::MetadataExt::blocks(meta) * 512
 }
 
 #[cfg(not(unix))]
-fn allocated(_meta: &fs::Metadata) -> u64 {
+fn allocated(_meta: &disk::Metadata) -> u64 {
     0
 }
 
@@ -97,7 +96,7 @@ fn walk(state: &State, roots: Vec<PathBuf>, ctx: &egui::Context) {
     for root in roots {
         // Stay on the root's filesystem, like `du -x`: no wandering into
         // /proc or a network share mounted inside.
-        let Ok(root_meta) = fs::metadata(&root) else {
+        let Ok(root_meta) = disk::metadata(&root) else {
             continue;
         };
         let dev = device(&root_meta);
@@ -106,7 +105,7 @@ fn walk(state: &State, roots: Vec<PathBuf>, ctx: &egui::Context) {
             if state.cancel.load(Relaxed) {
                 return;
             }
-            let Ok(entries) = fs::read_dir(&dir) else {
+            let Ok(entries) = disk::read_dir(&dir) else {
                 state.unreadable.fetch_add(1, Relaxed);
                 continue;
             };

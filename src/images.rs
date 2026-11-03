@@ -330,8 +330,8 @@ fn decode(
         ));
     }
 
-    let mut decoder = image::ImageReader::open(path)
-        .map_err(|e| e.to_string())?
+    let file = disk::File::open(path).map_err(|e| e.to_string())?;
+    let mut decoder = image::ImageReader::new(std::io::BufReader::new(file))
         .with_guessed_format()
         .map_err(|e| e.to_string())?
         .into_decoder()
@@ -360,13 +360,13 @@ mod tests {
     #[test]
     fn decodes_and_downscales_in_background() {
         let dir = std::env::temp_dir().join(format!("egui-files-images-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        disk::create_dir_all(&dir).unwrap();
         let path = dir.join("wide.png");
         image::RgbaImage::from_pixel(600, 300, image::Rgba([255, 0, 0, 255]))
             .save(&path)
             .unwrap();
         let broken = dir.join("broken.jpg");
-        std::fs::write(&broken, b"not a jpeg").unwrap();
+        disk::write(&broken, b"not a jpeg").unwrap();
 
         let ctx = Context::default();
         let mut cache = ImageCache::new(&ctx);
@@ -389,7 +389,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
 
-        std::fs::remove_dir_all(dir).unwrap();
+        disk::remove_dir_all(dir).unwrap();
     }
 
     #[test]
