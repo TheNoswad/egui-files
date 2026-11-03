@@ -86,7 +86,10 @@ pub fn ui(ctx: &Context) {
                 "Trust and connect",
             ),
             PromptKind::Confirm => (format!("{} {}", icon::KEY, prompt.host), "Allow"),
-            _ => (format!("{} Connecting to {}", icon::LOCK, prompt.host), "Connect"),
+            _ => (
+                format!("{} Connecting to {}", icon::LOCK, prompt.host),
+                "Connect",
+            ),
         };
         ui.heading(heading);
         ui.add_space(4.0);
@@ -97,7 +100,7 @@ pub fn ui(ctx: &Context) {
                  the one its owner gives.",
             );
             ui.add_space(4.0);
-            ui.label(RichText::new(&prompt.text).monospace().small());
+            ui.label(RichText::new(&prompt.text).monospace());
         } else {
             ui.label(&prompt.text);
         }

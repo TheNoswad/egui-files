@@ -1549,6 +1549,13 @@ impl FilesApp {
                         self.open_trash();
                     }
                     if ui
+                        .button(format!("{} Connect to server…", icon::HARD_DRIVES))
+                        .on_hover_text("Browse a computer's files over SFTP")
+                        .clicked()
+                    {
+                        crate::remote::open_connect_dialog(None);
+                    }
+                    if ui
                         .add(
                             Button::new(format!("{} Disk usage", icon::CHART_PIE_SLICE))
                                 .shortcut_text(keys(C::DiskUsage)),
@@ -2765,6 +2772,9 @@ impl FilesApp {
         }
         self.confirm_close_ui(&ctx);
         crate::remote::prompts_ui(&ctx);
+        if let Some(path) = crate::remote::connect_dialog_ui(&ctx) {
+            self.go_to(path, false);
+        }
         if let Some((request, target)) = self.shared.open_with.ui(&ctx) {
             self.open_with(&ctx, request, target);
         }
@@ -2887,6 +2897,7 @@ impl FilesApp {
     #[cfg(not(target_arch = "wasm32"))]
     fn save_state(&mut self, storage: &mut dyn eframe::Storage) {
         self.terminal.remember_dirs();
+        self.sidebar.layout.servers = crate::remote::recent();
         let keymap = crate::keymap::get(&self.ctx);
         let state = PersistedRef {
             dock: &self.dock,

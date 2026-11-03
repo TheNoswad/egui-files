@@ -1170,10 +1170,34 @@ impl BrowserTab {
 
     fn path_bar(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
         if let Some(text) = &mut self.path_edit {
+            let suggestions = server_suggestions(text);
+            // Tab completes the first server, rather than leaving the field.
+            let complete = !suggestions.is_empty()
+                && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Tab));
+            if complete {
+                *text = format!("sftp://{}", suggestions[0]);
+            }
             let mut output = TextEdit::singleline(text)
                 .desired_width(f32::INFINITY)
+                // Tab completes; it doesn't move on.
+                .lock_focus(!suggestions.is_empty())
                 .show(ui);
             let response = output.response;
+            if complete {
+                let end = egui::text::CCursor::new(text.chars().count());
+                output
+                    .state
+                    .cursor
+                    .set_char_range(Some(egui::text::CCursorRange::one(end)));
+                output.state.clone().store(ui.ctx(), response.id);
+                response.request_focus();
+            }
+            if let Some(name) = suggestions_popup(ui, &response, &suggestions) {
+                let path = remote::typed(PathBuf::from(format!("sftp://{name}")));
+                actions.push(Action::Navigate(path));
+                self.path_edit = None;
+                return;
+            }
             if std::mem::take(&mut self.focus_path_edit) {
                 response.request_focus();
                 // Select it all, so typing replaces the path.
@@ -1708,6 +1732,57 @@ fn paste(shared: &mut Shared, dest: PathBuf) {
     } else {
         shared.jobs.start(JobKind::Copy { sources, dest });
     }
+}
+
+/// Servers to suggest for a path being typed, while it's `sftp://` and
+/// the start of one.
+fn server_suggestions(text: &str) -> Vec<String> {
+    let Some(partial) = text.trim_start().strip_prefix("sftp://") else {
+        return Vec::new();
+    };
+    if partial.contains(['/', '\\']) || remote::available().is_err() {
+        return Vec::new();
+    }
+    let mut names = remote::hosts::hosts().matching(partial, &remote::recent());
+    // Typed in full, there's nothing left to suggest.
+    if names.len() == 1 && names[0] == partial {
+        names.clear();
+    }
+    names.truncate(8);
+    names
+}
+
+/// The suggestions under the path field; returns one when it's picked.
+fn suggestions_popup(ui: &Ui, field: &egui::Response, names: &[String]) -> Option<String> {
+    if names.is_empty() {
+        return None;
+    }
+    let mut picked = None;
+    egui::Area::new(field.id.with("servers"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(field.rect.left_bottom() + egui::vec2(0.0, 2.0))
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_min_width(field.rect.width().min(320.0));
+                ui.with_layout(egui::Layout::top_down_justified(Align::Min), |ui| {
+                    for (i, name) in names.iter().enumerate() {
+                        let label = format!("{}  {name}", icon::HARD_DRIVES);
+                        let button =
+                            ui.add(Button::selectable(i == 0, label).frame_when_inactive(false));
+                        let button = if i == 0 {
+                            button.on_hover_text("Tab to fill in")
+                        } else {
+                            button
+                        };
+                        // On the press: the field loses focus before a click ends.
+                        if button.is_pointer_button_down_on() || button.clicked() {
+                            picked = Some(name.clone());
+                        }
+                    }
+                });
+            });
+        });
+    picked
 }
 
 pub fn join_paths(paths: &[PathBuf]) -> String {

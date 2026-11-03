@@ -7,10 +7,117 @@
 //! `~` (`sftp://host/~/notes`) means the user's home folder there, which is
 //! only known once connected.
 
+mod connect;
+pub mod hosts;
 #[cfg(not(target_arch = "wasm32"))]
 mod prompts;
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::{Mutex, PoisonError},
+};
+
+pub use connect::open as open_connect_dialog;
+
+/// The most servers remembered as recently used.
+const MAX_RECENT: usize = 8;
+
+/// Why servers can't be connected to here, if they can't.
+pub fn available() -> Result<(), &'static str> {
+    if cfg!(target_arch = "wasm32") {
+        Err("Connecting to servers needs the desktop app: a web page can't reach them.")
+    } else if cfg!(target_os = "android") {
+        Err("Connecting to servers isn't available on Android yet.")
+    } else {
+        Ok(())
+    }
+}
+
+static RECENT: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Servers connected to lately, as `user@host:port`, latest first.
+pub fn recent() -> Vec<String> {
+    RECENT
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
+}
+
+/// Puts back the servers remembered from last time.
+pub fn set_recent(servers: Vec<String>) {
+    *RECENT.lock().unwrap_or_else(PoisonError::into_inner) = servers;
+}
+
+/// Forgets a server was used, for the places pane's "Forget".
+pub fn forget_recent(authority: &str) {
+    RECENT
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .retain(|s| s != authority);
+}
+
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+fn remember(authority: &str) {
+    let mut recent = RECENT.lock().unwrap_or_else(PoisonError::into_inner);
+    recent.retain(|s| s != authority);
+    recent.insert(0, authority.to_owned());
+    recent.truncate(MAX_RECENT);
+}
+
+/// The computer `path` is on, as its path names it (`user@host:port`).
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+pub fn authority(path: &Path) -> Option<String> {
+    #[cfg(not(target_arch = "wasm32"))]
+    return disk::sftp::parse(path).map(|location| location.authority);
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = path;
+        None
+    }
+}
+
+/// Shows "Connect to server" if it's open; returns where to go once the
+/// user says.
+pub fn connect_dialog_ui(ctx: &egui::Context) -> Option<PathBuf> {
+    connect::ui(ctx)
+}
+
+/// How the connection to a server is, for the places pane.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Status {
+    Disconnected,
+    Connecting,
+    Connected,
+    Failed(String),
+}
+
+/// Each server connected to, or tried, this session, by `user@host:port`.
+pub fn connections() -> Vec<(String, Status)> {
+    #[cfg(not(target_arch = "wasm32"))]
+    return disk::sftp::connections()
+        .into_iter()
+        .filter_map(|(root, status)| {
+            let status = match status {
+                disk::sftp::Status::Disconnected => Status::Disconnected,
+                disk::sftp::Status::Connecting => Status::Connecting,
+                disk::sftp::Status::Connected => Status::Connected,
+                disk::sftp::Status::Failed(why) => Status::Failed(why),
+            };
+            Some((authority(&root)?, status))
+        })
+        .collect();
+    #[cfg(target_arch = "wasm32")]
+    Vec::new()
+}
+
+/// Closes the connection to a server.
+pub fn disconnect(authority: &str) {
+    #[cfg(not(target_arch = "wasm32"))]
+    disk::sftp::disconnect(&home_of(authority));
+    #[cfg(target_arch = "wasm32")]
+    let _ = authority;
+}
 
 /// Whether `path` is on a server.
 pub fn is_remote(path: &Path) -> bool {
@@ -76,6 +183,7 @@ pub fn parent(path: &Path) -> Option<&Path> {
 }
 
 /// Whether a folder can be read without waiting.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Listing {
     /// Read it: it's local, or listed a moment ago.
@@ -210,6 +318,7 @@ mod fetch {
     fn fetch(dir: &Path) -> Result<Option<PathBuf>, String> {
         disk::sftp::connect(dir).map_err(|err| err.to_string())?;
         let location = disk::sftp::parse(dir).ok_or("not a server's path")?;
+        super::remember(&location.authority);
         let in_home = location
             .path
             .strip_prefix("/~")

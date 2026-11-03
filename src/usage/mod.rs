@@ -1335,7 +1335,8 @@ impl Scans {
         if self.remote.len() >= 256 {
             self.remote.clear();
         }
-        let remote = crate::properties::platform::is_remote(dir);
+        // Over SFTP, or a network or FUSE mount.
+        let remote = crate::remote::is_remote(dir) || crate::properties::platform::is_remote(dir);
         self.remote.insert(dir.to_path_buf(), remote);
         remote
     }
