@@ -939,6 +939,7 @@ dependencies = [
  "open",
  "percent-encoding",
  "png",
+ "polling",
  "raw-window-handle",
  "resvg",
  "ron",

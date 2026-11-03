@@ -16,7 +16,8 @@
     - [ ] Windows: not built here (the C dependencies need MinGW). Check Windows' OpenSSH runs the app as `SSH_ASKPASS` (it's a GUI-subsystem program printing to the pipe ssh gives it), that no console flashes up, and that `File::set_permissions`/read-only map sensibly
     - [ ] Drag out of a server (copies, up to 16 MB) into another app, by hand: only built
     - [x] Others' changes on a server: the folders on screen are listed again every 10 s while connected
-    - [ ] Terminal: once ssh'd onto a server it doesn't follow the tab about the server, nor the tab it (there's no telling whether the shell over there is at a prompt). A prompt hook sent along (OSC 7, or a title) could tell
+    - [x] Terminal: follows onto a server with ssh, and about it while the shell there says when it's at a prompt (OSC 133) and where (OSC 7). bash and fish get hooks with the ssh command; nothing's written on the server
+    - [ ] zsh on a server is followed only if it marks its prompts itself (no way to hand it hooks without files there); tried with bash only by hand, fish in tests
     - [x] Copies within one server are done there (`copy-data`, OpenSSH 9.0+), 64 MB at a time for progress and cancelling
     - [ ] FTP, WebDAV, SMB ("etc")
 - [ ] google drive

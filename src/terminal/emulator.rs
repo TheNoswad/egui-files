@@ -78,6 +78,10 @@ pub struct Terminal {
     #[cfg(target_os = "linux")]
     #[serde(skip)]
     prompted: bool,
+    /// In ssh on a server, gone there following the tab.
+    #[cfg(target_os = "linux")]
+    #[serde(skip)]
+    in_server: Option<InServer>,
     /// A key already sent with Alt; drop the text event that follows it.
     #[serde(skip)]
     skip_text: bool,
@@ -669,6 +673,12 @@ impl Terminal {
         let session = self.session.as_ref()?;
         let idle = session.shell_idle();
         self.prompted |= idle;
+        // Back here from ssh, or still there.
+        if idle {
+            self.in_server = None;
+        } else if self.in_server.is_some() {
+            return self.follow_in_server(now, folder);
+        }
         if crate::remote::is_remote(folder) {
             return self.follow_onto_server(folder, idle);
         }
@@ -708,10 +718,8 @@ impl Terminal {
 #[cfg(target_os = "linux")]
 impl Terminal {
     /// Follows the tab onto a server: from a prompt, ssh there, into the
-    /// folder, with the user's shell. Once in, the session isn't followed
-    /// further: there's no telling whether the shell at the other end is at
-    /// a prompt, so moving about the server leaves it be. Coming back out
-    /// of ssh doesn't go back in, unless the tab moves again.
+    /// folder, with the user's shell. Coming back out of ssh doesn't go
+    /// back in, unless the tab moves again.
     fn follow_onto_server(&mut self, folder: &Path, idle: bool) -> Option<PathBuf> {
         let moved = self.last_folder.as_deref() != Some(folder);
         self.last_folder = Some(folder.to_path_buf());
@@ -731,22 +739,135 @@ impl Terminal {
             return None;
         }
         let command = ssh_command(folder)?;
+        let authority = disk::sftp::parse(folder)?.authority;
+        let session = self.session.as_ref()?;
+        // What the shell here said of itself is no longer news.
+        *session.marks() = Marks::default();
         let mut keys = b"\x05\x15 ".to_vec();
         keys.extend_from_slice(command.as_bytes());
         keys.push(b'\r');
-        self.session.as_ref()?.write(keys);
+        session.write(keys);
         self.remote_sent = Some(folder.to_path_buf());
+        self.in_server = Some(InServer {
+            authority,
+            host: None,
+            synced: None,
+        });
+        None
+    }
+
+    /// In ssh on a server: keeps its shell and the tab in the same folder,
+    /// as here, if the shell says when it's at a prompt and where (see
+    /// ENTER). Only at a prompt, with nothing typed since but what's being
+    /// typed there, so a program that's running never gets a `cd`.
+    fn follow_in_server(&mut self, now: f64, folder: &Path) -> Option<PathBuf> {
+        self.last_folder = Some(folder.to_path_buf());
+        // Leaving ssh doesn't go back in, unless the tab moves again.
+        if crate::remote::is_remote(folder) {
+            self.remote_sent = Some(folder.to_path_buf());
+        }
+        let session = self.session.as_ref()?;
+        let (prompt, cwd) = {
+            let marks = session.marks();
+            (marks.prompt, marks.cwd.clone())
+        };
+        let (host, cwd) = cwd?;
+        let full_screen = session.term.lock().mode().contains(TermMode::ALT_SCREEN);
+        let server = self.in_server.as_mut()?;
+        // The computer first heard from: not another reached from it.
+        match &server.host {
+            None => server.host = Some(host),
+            Some(first) if *first != host => return None,
+            Some(_) => {}
+        }
+        if !prompt || full_screen {
+            return None;
+        }
+        if let Some((target, since)) = &self.pending_cd {
+            if *target != Path::new(&cwd) && now - since < CD_TIMEOUT {
+                return None;
+            }
+            self.pending_cd = None;
+        }
+        if server.synced.as_deref() != Some(cwd.as_str()) {
+            let first = server.synced.is_none();
+            server.synced = Some(cwd.clone());
+            if !first {
+                // The user changed folder there: the tab goes too.
+                let to = disk::sftp::url(&server.authority, &cwd);
+                self.remote_sent = Some(to.clone());
+                self.last_folder = Some(to.clone());
+                return (to != folder).then_some(to);
+            }
+        }
+        // The tab moved, on this server: the shell goes too.
+        let location = disk::sftp::parse(folder)?;
+        if location.authority != server.authority
+            || location.path.starts_with("/~")
+            || location.path == cwd
+        {
+            return None;
+        }
+        let mut keys = b"\x05\x15 cd -- ".to_vec();
+        keys.extend_from_slice(quote(&location.path).as_bytes());
+        keys.push(b'\r');
+        session.write(keys);
+        server.synced = Some(location.path.clone());
+        self.pending_cd = Some((PathBuf::from(location.path), now));
         None
     }
 }
 
+/// A shell on a server, reached with ssh by following the tab.
+#[cfg(target_os = "linux")]
+struct InServer {
+    /// The server, as the tab's paths name it.
+    authority: String,
+    /// The computer's name as its shell gives it, once it has.
+    host: Option<String>,
+    /// The folder the shell was last seen in, or sent to.
+    synced: Option<String>,
+}
+
+/// Quoted for a POSIX shell (and fish, and csh: none of them reads `'\''`
+/// differently).
+#[cfg(target_os = "linux")]
+fn quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', r"'\''"))
+}
+
+/// The environment variable that holds ENTER for the shells here, so the
+/// line typed to follow onto a server stays short.
+#[cfg(target_os = "linux")]
+const ENTER_VAR: &str = "EGUI_FILES_ENTER";
+
+/// Run on a server by `sh`, with a folder (`~` for home): goes there, then
+/// starts the user's shell as a login shell. bash and fish get a hook that
+/// says, with each prompt, that it's a prompt and where (OSC 133 and OSC 7),
+/// added to the user's own; other shells start as they are, and say so only
+/// if they do anyway. Nothing is written there. One line, as csh would have
+/// it, with nothing fish reads otherwise in single quotes.
+#[cfg(target_os = "linux")]
+const ENTER: &str = concat!(
+    r#"case $1 in '' | '~') cd ;; '~/'*) cd -- "$HOME/${1#'~/'}" ;; *) cd -- "$1" ;; esac; "#,
+    r#"s=${SHELL:-/bin/sh}; case ${s##*/} in "#,
+    r#"bash) PROMPT_COMMAND='printf "\033]7;file://%s%s\007\033]133;A\007" "$HOSTNAME" "$PWD"'"${PROMPT_COMMAND:+;$PROMPT_COMMAND}"; export PROMPT_COMMAND; exec "$s" -l ;; "#,
+    r#"fish) exec "$s" -l -C 'function __egui_files_prompt --on-event fish_prompt; printf "\e]7;file://%s%s\a\e]133;A\a" $hostname $PWD; end' ;; "#,
+    r#"*) exec "$s" -l ;; esac"#,
+);
+
+/// What the shells here hold in ENTER_VAR: ENTER, as ssh runs it there.
+#[cfg(target_os = "linux")]
+fn enter_command() -> String {
+    format!("exec sh -c {} sh", quote(ENTER))
+}
+
 /// What to type to reach `folder` on its server with ssh, in a login shell
-/// there.
+/// there (see ENTER).
 #[cfg(target_os = "linux")]
 fn ssh_command(folder: &Path) -> Option<String> {
     let location = disk::sftp::parse(folder)?;
     let target = disk::sftp::Target::parse(&location.authority)?;
-    let quote = |text: &str| format!("'{}'", text.replace('\'', r"'\''"));
     let mut command = "ssh -t".to_owned();
     // Over the app's connection, if it has one: no password again.
     if let Some(path) = disk::sftp::control_path() {
@@ -758,15 +879,19 @@ fn ssh_command(folder: &Path) -> Option<String> {
     if let Some(user) = &target.user {
         command.push_str(&format!(" -l {}", quote(user)));
     }
-    // Run by the shell over there: into the folder, then the user's shell.
-    // `~` is the home folder there, where ssh starts anyway.
-    let cd = match location.path.strip_prefix("/~") {
-        Some("") => String::new(),
-        Some(rest) if rest.starts_with('/') => format!("cd -- \"$HOME\"{}; ", quote(rest)),
-        _ => format!("cd -- {}; ", quote(&location.path)),
-    };
-    let remote = format!("{cd}exec \"$SHELL\" -l");
-    command.push_str(&format!(" -- {} {}", quote(&target.host), quote(&remote)));
+    // `~` is the home folder there, before it's known where.
+    let folder = location
+        .path
+        .strip_prefix('/')
+        .filter(|p| *p == "~" || p.starts_with("~/"));
+    let folder = folder.unwrap_or(&location.path);
+    // ssh joins what follows the host into the command line there: ENTER,
+    // then the folder, quoted for there and again for here.
+    command.push_str(&format!(
+        " -- {} \"${ENTER_VAR}\" {}",
+        quote(&target.host),
+        quote(&quote(folder))
+    ));
     Some(command)
 }
 
@@ -779,6 +904,203 @@ fn user_shell() -> Option<tty::Shell> {
 #[cfg(target_os = "linux")]
 fn shell_quote(path: &Path) -> String {
     format!("'{}'", path.to_string_lossy().replace('\'', r"'\''"))
+}
+
+// ---------------------------------------------------------------------------
+// What the shell says of itself
+
+/// What the shell has said of itself, in escape codes it writes along with
+/// its prompt: whether it's at a prompt (OSC 133's marks) and which folder
+/// it's in (OSC 7). Shells that say nothing leave it all unknown.
+#[cfg(target_os = "linux")]
+#[derive(Default, Debug)]
+struct Marks {
+    /// At a prompt: the last mark was the prompt's, and nothing that would
+    /// start a command (Enter) has been sent since.
+    prompt: bool,
+    /// The computer and folder, as of the last prompt.
+    cwd: Option<(String, String)>,
+}
+
+/// Picks escape codes out of what the shell writes, as it goes by.
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+struct OscScanner {
+    state: OscState,
+    payload: Vec<u8>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+enum OscState {
+    #[default]
+    Text,
+    Escape,
+    /// In an OSC, after `ESC ]`.
+    Osc,
+    /// An ESC in an OSC: `ESC \` ends it.
+    OscEscape,
+}
+
+#[cfg(target_os = "linux")]
+impl OscScanner {
+    /// OSCs longer than this aren't ones looked for.
+    const MAX: usize = 4096;
+
+    fn feed(&mut self, bytes: &[u8], marks: &std::sync::Mutex<Marks>) {
+        for &byte in bytes {
+            self.state = match (self.state, byte) {
+                (OscState::Text, 0x1b) => OscState::Escape,
+                (OscState::Text, _) => OscState::Text,
+                (OscState::Escape, b']') => {
+                    self.payload.clear();
+                    OscState::Osc
+                }
+                (OscState::Escape, 0x1b) => OscState::Escape,
+                (OscState::Escape, _) => OscState::Text,
+                (OscState::Osc, 0x07) => {
+                    self.finish(marks);
+                    OscState::Text
+                }
+                (OscState::Osc, 0x1b) => OscState::OscEscape,
+                (OscState::Osc, _) if self.payload.len() < Self::MAX => {
+                    self.payload.push(byte);
+                    OscState::Osc
+                }
+                (OscState::Osc, _) => OscState::Text,
+                (OscState::OscEscape, b'\\') => {
+                    self.finish(marks);
+                    OscState::Text
+                }
+                (OscState::OscEscape, b']') => {
+                    self.payload.clear();
+                    OscState::Osc
+                }
+                (OscState::OscEscape, _) => OscState::Text,
+            };
+        }
+    }
+
+    fn finish(&mut self, marks: &std::sync::Mutex<Marks>) {
+        let text = String::from_utf8_lossy(&self.payload);
+        let mut marks = marks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(mark) = text.strip_prefix("133;") {
+            match mark.as_bytes().first() {
+                // The prompt starts, or ends where typing starts.
+                Some(b'A' | b'B') => marks.prompt = true,
+                // A command starts.
+                Some(b'C') => marks.prompt = false,
+                _ => {}
+            }
+        } else if let Some(url) = text.strip_prefix("7;file://") {
+            let (host, path) = url.split_at(url.find('/').unwrap_or(url.len()));
+            if !path.is_empty() {
+                marks.cwd = Some((host.to_owned(), percent_decode(path)));
+            }
+        }
+    }
+}
+
+/// `%xx` decoded, as OSC 7's paths are encoded; anything else kept as it is.
+#[cfg(target_os = "linux")]
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = |b: u8| (b as char).to_digit(16);
+        if bytes[i] == b'%'
+            && let (Some(h), Some(l)) = (
+                bytes.get(i + 1).and_then(|&b| hex(b)),
+                bytes.get(i + 2).and_then(|&b| hex(b)),
+            )
+        {
+            out.push((h * 16 + l) as u8);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// The PTY, with what the shell writes looked through for [`Marks`] on its
+/// way to the terminal.
+#[cfg(target_os = "linux")]
+struct WatchedPty {
+    pty: tty::Pty,
+    reader: WatchedReader,
+}
+
+#[cfg(target_os = "linux")]
+struct WatchedReader {
+    /// The PTY's own file, opened again.
+    file: std::fs::File,
+    scanner: OscScanner,
+    marks: Arc<std::sync::Mutex<Marks>>,
+}
+
+#[cfg(target_os = "linux")]
+impl std::io::Read for WatchedReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = std::io::Read::read(&mut self.file, buf)?;
+        self.scanner.feed(&buf[..n], &self.marks);
+        Ok(n)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl tty::EventedReadWrite for WatchedPty {
+    type Reader = WatchedReader;
+    type Writer = std::fs::File;
+
+    unsafe fn register(
+        &mut self,
+        poll: &Arc<polling::Poller>,
+        interest: polling::Event,
+        mode: polling::PollMode,
+    ) -> std::io::Result<()> {
+        // SAFETY: as the caller promises us, so we promise the PTY.
+        unsafe { self.pty.register(poll, interest, mode) }
+    }
+
+    fn reregister(
+        &mut self,
+        poll: &Arc<polling::Poller>,
+        interest: polling::Event,
+        mode: polling::PollMode,
+    ) -> std::io::Result<()> {
+        self.pty.reregister(poll, interest, mode)
+    }
+
+    fn deregister(&mut self, poll: &Arc<polling::Poller>) -> std::io::Result<()> {
+        self.pty.deregister(poll)
+    }
+
+    fn reader(&mut self) -> &mut Self::Reader {
+        &mut self.reader
+    }
+
+    fn writer(&mut self) -> &mut Self::Writer {
+        self.pty.writer()
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl tty::EventedPty for WatchedPty {
+    fn next_child_event(&mut self) -> Option<tty::ChildEvent> {
+        self.pty.next_child_event()
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl alacritty_terminal::event::OnResize for WatchedPty {
+    fn on_resize(&mut self, size: WindowSize) {
+        self.pty.on_resize(size);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -841,6 +1163,10 @@ struct Session {
     /// shell is at a prompt and which folder it's in.
     #[cfg(target_os = "linux")]
     shell: (u32, std::fs::File),
+    /// What the shell (or one it ran, like ssh's at the other end) said of
+    /// itself.
+    #[cfg(target_os = "linux")]
+    marks: Arc<std::sync::Mutex<Marks>>,
 }
 
 impl Session {
@@ -852,10 +1178,16 @@ impl Session {
         size: TermSize,
         cell: Vec2,
     ) -> std::io::Result<Self> {
-        let env: HashMap<String, String> = [("TERM", "xterm-256color"), ("COLORTERM", "truecolor")]
-            .into_iter()
-            .map(|(k, v)| (k.to_owned(), v.to_owned()))
-            .collect();
+        #[allow(unused_mut)]
+        let mut env: HashMap<String, String> =
+            [("TERM", "xterm-256color"), ("COLORTERM", "truecolor")]
+                .into_iter()
+                .map(|(k, v)| (k.to_owned(), v.to_owned()))
+                .collect();
+        // What following onto a server runs there (see ENTER), so the line
+        // typed for it stays short.
+        #[cfg(target_os = "linux")]
+        env.insert(ENTER_VAR.to_owned(), enter_command());
         let options = tty::Options {
             shell,
             working_directory: cwd.map(Path::to_path_buf),
@@ -865,6 +1197,17 @@ impl Session {
         let pty = tty::new(&options, size.window_size(cell), 0)?;
         #[cfg(target_os = "linux")]
         let shell = (pty.child().id(), pty.file().try_clone()?);
+        #[cfg(target_os = "linux")]
+        let marks = Arc::new(std::sync::Mutex::new(Marks::default()));
+        #[cfg(target_os = "linux")]
+        let pty = WatchedPty {
+            reader: WatchedReader {
+                file: pty.file().try_clone()?,
+                scanner: OscScanner::default(),
+                marks: marks.clone(),
+            },
+            pty,
+        };
 
         let (tx, events) = mpsc::channel();
         let listener = Listener {
@@ -889,11 +1232,26 @@ impl Session {
             title: None,
             #[cfg(target_os = "linux")]
             shell,
+            #[cfg(target_os = "linux")]
+            marks,
         })
     }
 
     fn write(&self, bytes: impl Into<Cow<'static, [u8]>>) {
-        let _ = self.sender.send(Msg::Input(bytes.into()));
+        let bytes = bytes.into();
+        // Enter starts a command, if at a prompt: not at one until the next.
+        #[cfg(target_os = "linux")]
+        if bytes.iter().any(|&b| b == b'\r' || b == b'\n') {
+            self.marks().prompt = false;
+        }
+        let _ = self.sender.send(Msg::Input(bytes));
+    }
+
+    #[cfg(target_os = "linux")]
+    fn marks(&self) -> std::sync::MutexGuard<'_, Marks> {
+        self.marks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn resize(&mut self, size: TermSize, cell: Vec2) {
@@ -1404,30 +1762,33 @@ mod tests {
     #[test]
     fn following_onto_a_server_types_an_ssh_command() {
         let root = std::env::temp_dir().join(format!("egui-files-ssh-{}", std::process::id()));
-        let dir = root.join("it's a dir");
+        let dir = root.join("it's a \"dir\" $HOME");
         disk::create_dir_all(&dir).unwrap();
-        // The shell "over there": says where it started.
+        // The user's shell over there: says where it started, and how.
         let shell = root.join("shell");
-        disk::write(&shell, "#!/bin/sh\npwd\n").unwrap();
+        disk::write(&shell, "#!/bin/sh\npwd\necho \"$@\"\n").unwrap();
         {
             use std::os::unix::fs::PermissionsExt;
             disk::set_permissions(&shell, disk::Permissions::from_mode(0o755)).unwrap();
         }
-        let folder = PathBuf::from(format!("sftp://me@host:2222{}", dir.display()));
-        let command = ssh_command(&folder).unwrap();
-        // A stand-in ssh says what it was given, then runs the command for
-        // over there.
-        let script = format!(
-            "ssh() {{ printf '%s\\n' \"$@\"; while [ \"$1\" != -- ]; do shift; done; shift 2; sh -c \"$1\"; }}; {command}"
-        );
-        let output = std::process::Command::new("/bin/sh")
-            .args(["-c", &script])
-            .env("SHELL", &shell)
-            .output()
-            .unwrap();
-        let output = String::from_utf8(output.stdout).unwrap();
+        // A stand-in ssh says what it was given, then runs what's for over
+        // there as ssh does: joined into one line for the shell there.
+        let run = |folder: &str| {
+            let command = ssh_command(Path::new(folder)).unwrap();
+            let script = format!(
+                "ssh() {{ printf '%s\\n' \"$@\"; while [ \"$1\" != -- ]; do shift; done; shift 2; cd; sh -c \"$*\"; }}; {command}"
+            );
+            let output = std::process::Command::new("/bin/sh")
+                .args(["-c", &script])
+                .env("SHELL", &shell)
+                .env("HOME", &root)
+                .env(ENTER_VAR, enter_command())
+                .output()
+                .unwrap();
+            String::from_utf8(output.stdout).unwrap()
+        };
+        let output = run(&format!("sftp://me@host:2222{}", dir.display()));
         let lines: Vec<&str> = output.lines().collect();
-        let real = disk::canonicalize(&dir).unwrap();
         // Past the shared connection's socket, if there is one.
         let lines: Vec<&str> = match lines.iter().position(|l| *l == "-t") {
             Some(t) if lines.get(t + 1) == Some(&"-o") => {
@@ -1437,27 +1798,107 @@ mod tests {
             _ => lines,
         };
         assert_eq!(lines[..7], ["-t", "-p", "2222", "-l", "me", "--", "host"]);
-        assert_eq!(lines.last().copied(), Some(real.to_str().unwrap()));
+        assert_eq!(lines[7], enter_command());
+        let real = disk::canonicalize(&dir).unwrap();
+        // Where it started, and as a login shell.
+        assert_eq!(lines[lines.len() - 2..], [real.to_str().unwrap(), "-l"]);
         assert_eq!(ssh_command(Path::new("/local")), None);
         // Home, before it's known where that is.
         let home = |path| {
-            let command = ssh_command(Path::new(path)).unwrap();
-            // Like ssh, it starts over there in the home folder.
-            let script = format!(
-                "ssh() {{ while [ \"$1\" != -- ]; do shift; done; shift 2; cd; sh -c \"$1\"; }}; {command}"
-            );
-            let output = std::process::Command::new("/bin/sh")
-                .args(["-c", &script])
-                .env("SHELL", &shell)
-                .env("HOME", &root)
-                .output()
-                .unwrap();
-            String::from_utf8(output.stdout).unwrap()
+            run(path)
+                .lines()
+                .rev()
+                .nth(1)
+                .unwrap_or_default()
+                .to_owned()
         };
         let root_real = disk::canonicalize(&root).unwrap();
-        assert_eq!(home("sftp://h/~").trim(), root_real.to_str().unwrap());
-        assert_eq!(home("sftp://h/~/it's a dir").trim(), real.to_str().unwrap());
+        assert_eq!(home("sftp://h/~"), root_real.to_str().unwrap());
+        let inside = format!("sftp://h/~/{}", dir.file_name().unwrap().to_str().unwrap());
+        assert_eq!(home(&inside), real.to_str().unwrap());
         disk::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn shells_say_where_they_are_and_when_at_a_prompt() {
+        let marks = std::sync::Mutex::new(Marks::default());
+        let mut scanner = OscScanner::default();
+        let state = |marks: &std::sync::Mutex<Marks>| {
+            let marks = marks.lock().unwrap();
+            (marks.prompt, marks.cwd.clone())
+        };
+        // In pieces, as reads split them, ended by BEL or ST.
+        scanner.feed(b"output\x1b]7;file://box/home/me/a%20b", &marks);
+        scanner.feed(b"\x07\x1b]133;A\x1b\\$ ", &marks);
+        assert_eq!(
+            state(&marks),
+            (true, Some(("box".into(), "/home/me/a b".into())))
+        );
+        scanner.feed(b"\x1b]133;C\x07", &marks);
+        assert!(!state(&marks).0);
+        // Other escape codes, and ones cut short, change nothing.
+        scanner.feed(b"\x1b[31mred\x1b]0;title\x07\x1b]133", &marks);
+        scanner.feed(b"\x1bX", &marks);
+        assert!(!state(&marks).0);
+        scanner.feed(b"\x1b]133;B\x07", &marks);
+        assert!(state(&marks).0);
+        assert_eq!(percent_decode("/a%2Fb%zz%4"), "/a/b%zz%4");
+    }
+
+    /// bash and fish, given ENTER's hooks, mark their prompts and say where
+    /// they are; other shells are left as they are.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn enter_hooks_bash_and_fish() {
+        for (shell, script) in [
+            ("bash", "eval \"$PROMPT_COMMAND\""),
+            ("fish", "emit fish_prompt"),
+        ] {
+            let Ok(path) = which(shell) else { continue };
+            let root =
+                std::env::temp_dir().join(format!("egui-files-{shell}-{}", std::process::id()));
+            disk::create_dir_all(&root).unwrap();
+            // As ENTER would start it, but running `script` rather than
+            // waiting for input; the login shell's -l stays.
+            let enter = ENTER.replace(
+                "exec \"$s\" -l -C '",
+                &format!("exec \"$s\" -l -c '{script}' -C '"),
+            );
+            let enter = enter.replace(
+                "export PROMPT_COMMAND; exec \"$s\" -l",
+                &format!("export PROMPT_COMMAND; exec \"$s\" -c '{script}'"),
+            );
+            let output = std::process::Command::new("/bin/sh")
+                .args(["-c", &enter, "sh", root.to_str().unwrap()])
+                .env("SHELL", &path)
+                .env("HOSTNAME", "box")
+                .output()
+                .unwrap();
+            let marks = std::sync::Mutex::new(Marks::default());
+            OscScanner::default().feed(&output.stdout, &marks);
+            let marks = marks.lock().unwrap();
+            let real = disk::canonicalize(&root).unwrap();
+            assert!(marks.prompt, "{shell}: {output:?}");
+            assert_eq!(
+                marks.cwd.as_ref().map(|(_, cwd)| cwd.as_str()),
+                Some(real.to_str().unwrap()),
+                "{shell}"
+            );
+            disk::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn which(program: &str) -> std::io::Result<PathBuf> {
+        let output = std::process::Command::new("sh")
+            .args(["-c", &format!("command -v {program}")])
+            .output()?;
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if path.is_empty() {
+            return Err(std::io::ErrorKind::NotFound.into());
+        }
+        Ok(PathBuf::from(path))
     }
 
     use super::*;
