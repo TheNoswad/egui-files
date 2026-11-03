@@ -15,7 +15,8 @@
 - [ ] google drive
 - [ ] proton drive
 - [ ] Markdown renderer
-- [ ] CSV viewer
+- [x] CSV and TSV: a table in the preview and in editor tabs (`src/editor/table/`), keeping what isn't edited byte for byte. Tried by hand on the desktop and in the mobile layout through injected input, not on a phone or in the browser
+    - [ ] Scrolling or editing files over the editor's 10 MB limit (the preview shows their first rows)
 - [ ] ISO file support
 - [ ] PDF support
 - [ ] Office file formats (open and proprietary)
