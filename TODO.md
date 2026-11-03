@@ -11,7 +11,13 @@
 - [ ] Upstream: egui-winit makes a smithay clipboard per viewport and drops it with the viewport, which kills the Wayland connection ("not a valid new object id … data_offer"); we patch it to share one (patches/README.md has a repro). Report it or send the PR, then drop the patch.
 - [ ] Tab windows: check they keep updating while the main window is hidden (another workspace, minimized). Their UI runs in the main window's frame, and on Wayland winit may hold that frame until the compositor sends the main window a frame callback
 - [ ] Tab windows: try dropping a tab outside the window, and into another of the app's windows, by hand on Wayland, X11 and Windows (only unit-tested so far; the drop is told from the pointer, which egui may lose as it leaves)
-- [ ] sftp etc
+- [x] SFTP: `sftp://user@host:port/path` in tabs, jobs, preview, editor and properties, through `disk` (`disk/src/sftp/`), with ssh doing the connecting; servers from `~/.ssh/config` and `known_hosts` in Places, the path bar and "Connect to server". Tried against OpenSSH 9.7 in a container, in the app under Xvfb, also with 150 ms each way
+    - [ ] Android: there's no `ssh` there. russh (or similar) behind the same `Session`, with our own config parsing and auth
+    - [ ] Windows: not built here (the C dependencies need MinGW). Check Windows' OpenSSH runs the app as `SSH_ASKPASS` (it's a GUI-subsystem program printing to the pipe ssh gives it), that no console flashes up, and that `File::set_permissions`/read-only map sensibly
+    - [ ] Drag out of a server (copies, up to 16 MB) into another app, by hand: only built
+    - [ ] Others' changes on a server show only after 30 s or a refresh; poll the folders on screen now and then?
+    - [ ] Server-side copy (`copy-data` extension) for copies within one server, which go through this computer now
+    - [ ] FTP, WebDAV, SMB ("etc")
 - [ ] google drive
 - [ ] proton drive
 - [ ] Markdown renderer
@@ -78,7 +84,7 @@ unofficial, async on tokio, MSRV 1.96).
 
 ### Phase 1: account and read-only browsing
 
-- [ ] Local-or-remote "location" layer for browser tabs and jobs (the app currently assumes `std::fs` / `PathBuf`)
+- [ ] Local-or-remote "location" layer for browser tabs and jobs: SFTP made one, in `disk` (paths with a scheme, `std::fs`-like types that wrap either), and `remote::listing` for listing off the UI's thread; Proton Drive could stand behind the same
 - [ ] Tokio runtime on a background thread, talking to the UI over channels
 - [ ] Login dialog: SRP password, TOTP; clear error for FIDO2-only accounts (not supported by the SDK)
 - [ ] Store session tokens and key passphrases in the OS keyring (Secret Service / Credential Manager), not app state
