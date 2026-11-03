@@ -146,7 +146,8 @@ fn list_7z(path: &Path, password: Option<&str>) -> Result<Vec<Entry>, Error> {
             packed: None,
             modified: file
                 .has_last_modified_date
-                .then(|| file.last_modified_date.into()),
+                .then(|| nt_to_system(file.last_modified_date))
+                .flatten(),
             encrypted: encrypted && file.has_stream,
         })
         .collect())
@@ -531,7 +532,8 @@ fn unpack_7z(path: &Path, password: Option<&str>, out: &mut Unpacker) -> Result<
             mode,
             modified: entry
                 .has_last_modified_date
-                .then(|| entry.last_modified_date.into()),
+                .then(|| nt_to_system(entry.last_modified_date))
+                .flatten(),
         };
         if entry.is_directory {
             out.dir(name, meta);
@@ -633,6 +635,27 @@ fn rar_error(err: unrar::error::UnrarError, password: Option<&str>) -> Error {
     }
 }
 
+/// 7z's time unit, and how many of them after 1601 Unix time starts.
+const NT_TICKS_PER_SEC: u64 = 10_000_000;
+const NT_UNIX_EPOCH: u64 = 11_644_473_600 * NT_TICKS_PER_SEC;
+
+/// A time in a 7z archive, if it's after 1970. Not sevenz_rust2's conversions:
+/// they go by way of 1601, which `SystemTime` can't reach in the browser.
+fn nt_to_system(time: sevenz_rust2::NtTime) -> Option<SystemTime> {
+    let ticks = u64::from(time).checked_sub(NT_UNIX_EPOCH)?;
+    let nanos = (ticks % NT_TICKS_PER_SEC) as u32 * 100;
+    Some(UNIX_EPOCH + Duration::new(ticks / NT_TICKS_PER_SEC, nanos))
+}
+
+/// A time for a 7z archive, if it's after 1970; see [`nt_to_system`].
+#[cfg(any(test, target_arch = "wasm32"))]
+pub(super) fn system_to_nt(time: SystemTime) -> Option<sevenz_rust2::NtTime> {
+    let since = time.duration_since(UNIX_EPOCH).ok()?;
+    let ticks = since.as_secs().checked_mul(NT_TICKS_PER_SEC)?;
+    let ticks = ticks.checked_add(u64::from(since.subsec_nanos()) / 100)?;
+    Some(ticks.checked_add(NT_UNIX_EPOCH)?.into())
+}
+
 fn unix_time(seconds: u64) -> SystemTime {
     UNIX_EPOCH + Duration::from_secs(seconds)
 }
@@ -665,4 +688,19 @@ fn list_rar(_path: &Path, _password: Option<&str>) -> Result<Vec<Entry>, Error> 
 #[cfg(target_arch = "wasm32")]
 fn unpack_rar(_path: &Path, _password: Option<&str>, _out: &mut Unpacker) -> Result<(), Error> {
     Err(Error::Other(super::NOT_IN_BROWSER.into()))
+}
+
+#[cfg(test)]
+mod nt_time_tests {
+    use super::*;
+
+    #[test]
+    fn nt_times_convert_without_going_before_1970() {
+        let time = UNIX_EPOCH + Duration::new(1_700_000_000, 123_456_700);
+        let nt = system_to_nt(time).unwrap();
+        // What sevenz_rust2 makes of it, where its conversions work.
+        assert_eq!(nt, sevenz_rust2::NtTime::try_from(time).unwrap());
+        assert_eq!(nt_to_system(nt), Some(time));
+        assert_eq!(nt_to_system(sevenz_rust2::NtTime::new(0)), None);
+    }
 }

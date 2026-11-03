@@ -402,7 +402,27 @@ fn write_7z<W: Write + io::Seek>(
     writer.set_encrypt_header(password.is_some() && encrypt_names);
 
     let entry = |item: &Item| {
+        #[cfg(not(target_arch = "wasm32"))]
         let mut entry = ArchiveEntry::from_path(&item.path, item.name.clone());
+        // `from_path` goes to std for what it knows, which fails in the browser.
+        #[cfg(target_arch = "wasm32")]
+        let mut entry = {
+            let mut entry = if item.meta.is_dir() {
+                ArchiveEntry::new_directory(&item.name)
+            } else {
+                ArchiveEntry::new_file(&item.name)
+            };
+            if let Some(modified) = item
+                .meta
+                .modified()
+                .ok()
+                .and_then(super::read::system_to_nt)
+            {
+                entry.has_last_modified_date = true;
+                entry.last_modified_date = modified;
+            }
+            entry
+        };
         let dos = if item.meta.is_dir() {
             FILE_ATTRIBUTE_DIRECTORY
         } else {

@@ -44,6 +44,15 @@ pub fn now() -> std::time::SystemTime {
     std::time::UNIX_EPOCH + since
 }
 
+/// This process's id, to tell its temporary files from others'. The browser
+/// has no processes, and std panics there, but it has just the one app.
+pub fn process_id() -> u32 {
+    #[cfg(target_arch = "wasm32")]
+    return 1;
+    #[cfg(not(target_arch = "wasm32"))]
+    std::process::id()
+}
+
 /// Whether `path` is a folder, or a link to one (`Path::is_dir`).
 pub fn is_dir(path: impl AsRef<Path>) -> bool {
     metadata(path).is_ok_and(|m| m.is_dir())

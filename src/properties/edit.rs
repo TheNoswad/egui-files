@@ -236,7 +236,7 @@ fn retarget(path: &Path, target: &Path) -> io::Result<()> {
     // Make the new link beside the old one and rename it over, so the link
     // never goes missing.
     let name = path.file_name().unwrap_or_default().to_string_lossy();
-    let temp = path.with_file_name(format!(".{name}.relink-{}", std::process::id()));
+    let temp = path.with_file_name(format!(".{name}.relink-{}", disk::process_id()));
     std::os::unix::fs::symlink(target, &temp)?;
     disk::rename(&temp, path).inspect_err(|_| {
         let _ = disk::remove_file(&temp);
@@ -252,7 +252,7 @@ fn retarget(path: &Path, target: &Path) -> io::Result<()> {
     // Make the new link first: creating links needs a privilege that
     // removing doesn't, and failing then must leave the old one in place.
     let name = path.file_name().unwrap_or_default().to_string_lossy();
-    let temp = path.with_file_name(format!("{name}.relink-{}", std::process::id()));
+    let temp = path.with_file_name(format!("{name}.relink-{}", disk::process_id()));
     if was_dir {
         std::os::windows::fs::symlink_dir(target, &temp)?;
     } else {

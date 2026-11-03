@@ -194,7 +194,7 @@ impl CompressDialog {
                         ComboBox::from_id_salt(self.id.with("format"))
                             .selected_text(self.format.extension())
                             .show_ui(ui, |ui| {
-                                for format in Format::CREATE {
+                                for format in Format::CREATE.iter().copied() {
                                     let label =
                                         format!("{}  ({})", format.extension(), format.label());
                                     ui.selectable_value(&mut self.format, format, label);

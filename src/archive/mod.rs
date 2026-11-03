@@ -64,13 +64,17 @@ const SUFFIXES: &[(&str, Format)] = &[
 
 impl Format {
     /// What Compress can create.
-    pub const CREATE: [Self; 5] = [
+    #[cfg(not(target_arch = "wasm32"))]
+    pub const CREATE: &[Self] = &[
         Self::Zip,
         Self::TarGz,
         Self::TarXz,
         Self::TarZst,
         Self::SevenZ,
     ];
+    /// What Compress can create: zstd is C, so the browser has none.
+    #[cfg(target_arch = "wasm32")]
+    pub const CREATE: &[Self] = &[Self::Zip, Self::TarGz, Self::TarXz, Self::SevenZ];
 
     pub fn detect(path: &Path) -> Option<Self> {
         let name = path.file_name()?.to_string_lossy().to_lowercase();

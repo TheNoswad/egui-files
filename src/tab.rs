@@ -622,6 +622,8 @@ impl BrowserTab {
             || self.rename.is_some()
             || self.compress.is_some()
             || self.extract.is_some()
+            // A job's question, say: keys are for that, not what's behind it.
+            || ctx.memory(|m| m.top_modal_layer().is_some())
         {
             return;
         }

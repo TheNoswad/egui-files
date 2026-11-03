@@ -587,7 +587,10 @@ impl Jobs {
                         if ui.button(eye).on_hover_text("Show password").clicked() {
                             state.show_password = !state.show_password;
                         }
-                        if edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                        // Taken, so the file list doesn't also open what's selected.
+                        if edit.lost_focus()
+                            && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter))
+                        {
                             answer = Some(Answer::Password(state.password.clone()));
                         }
                     });

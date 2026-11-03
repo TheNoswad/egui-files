@@ -191,7 +191,7 @@ fn temp_path(target: &Path) -> Option<PathBuf> {
     let nanos = disk::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_or(0, |d| d.subsec_nanos());
-    Some(target.with_file_name(format!(".{name}.{}-{nanos}.tmp", std::process::id())))
+    Some(target.with_file_name(format!(".{name}.{}-{nanos}.tmp", disk::process_id())))
 }
 
 fn replace(target: &Path, bytes: &[u8], meta: &disk::Metadata) -> io::Result<()> {

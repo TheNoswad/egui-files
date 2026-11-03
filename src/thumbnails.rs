@@ -235,7 +235,7 @@ fn save_to_cache(path: &Path, mtime: u64, image: &RgbaImage) -> Option<()> {
     let temp = dir.join(format!(
         ".{}.egui-files-{}",
         cache_name(&uri),
-        std::process::id()
+        disk::process_id()
     ));
     write_private(&temp, &bytes)?;
     disk::rename(&temp, &file)

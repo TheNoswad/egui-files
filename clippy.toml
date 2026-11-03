@@ -35,6 +35,7 @@ disallowed-methods = [
     { path = "image::ImageReader::open", reason = "it opens the file with std; read it with disk" },
     { path = "std::time::SystemTime::now", reason = "panics in the browser; use web_time's" },
     { path = "std::thread::spawn", replacement = "crate::background::spawn" },
+    { path = "std::process::id", replacement = "disk::process_id" },
 ]
 disallowed-types = [
     { path = "std::fs::DirEntry", replacement = "disk::DirEntry" },

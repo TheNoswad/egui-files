@@ -600,7 +600,16 @@ pub fn line_job(
         section(&mut job, start..end, format);
         at = end;
     }
-    section(&mut job, at..line.len(), plain);
+    if job.sections.is_empty() {
+        // An empty line: a row's height comes from the sections on it.
+        job.sections.push(egui::text::LayoutSection {
+            leading_space: 0.0,
+            byte_range: ByteIndex(0)..ByteIndex(line.len()),
+            format: plain,
+        });
+    } else {
+        section(&mut job, at..line.len(), plain);
+    }
     job
 }
 
@@ -785,6 +794,24 @@ mod tests {
         highlighter.update(3, Arc::from("fn main() {}\nlet x = 1;\n// end\n"));
         let third = wait(3);
         assert_eq!(third.lines[1], first.lines[1]);
+    }
+
+    #[test]
+    fn empty_lines_keep_their_height() {
+        let ctx = egui::Context::default();
+        ctx.run_ui(Default::default(), |_| {})
+            .textures_delta
+            .clear();
+        let font = FontId::monospace(14.0);
+        let height = |line: &str| {
+            let job = line_job(line, &[], &font, Color32::WHITE, f32::INFINITY);
+            ctx.fonts_mut(|fonts| fonts.layout_job(job)).rect.height()
+        };
+        assert!(height("text") > 0.0);
+        assert_eq!(height(""), height("text"));
+        ctx.run_ui(Default::default(), |_| {})
+            .textures_delta
+            .clear();
     }
 
     #[test]

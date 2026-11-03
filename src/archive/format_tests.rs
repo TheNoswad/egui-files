@@ -124,7 +124,7 @@ fn every_format_round_trips() {
     let root = scratch("round-trip");
     let project = project(&root);
     let expected = snapshot(&project);
-    for format in Format::CREATE {
+    for format in Format::CREATE.iter().copied() {
         let out = root.join(format!("out-{format:?}"));
         disk::create_dir_all(&out).unwrap();
         let archive = compress_to(
