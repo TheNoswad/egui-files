@@ -294,12 +294,20 @@ async fn write_zip<W: Write + io::Seek>(
 /// The header's type, size, mode and time, from `meta`.
 #[cfg(not(target_arch = "wasm32"))]
 fn set_metadata(header: &mut tar::Header, meta: &Metadata) {
-    header.set_metadata_in_mode(meta, tar::HeaderMode::Complete);
+    match meta.as_std() {
+        Some(meta) => header.set_metadata_in_mode(meta, tar::HeaderMode::Complete),
+        // A server's file.
+        None => set_metadata_portably(header, meta),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn set_metadata(header: &mut tar::Header, meta: &Metadata) {
+    set_metadata_portably(header, meta);
 }
 
 /// tar takes only std's metadata, so this does what it does on Windows.
-#[cfg(target_arch = "wasm32")]
-fn set_metadata(header: &mut tar::Header, meta: &Metadata) {
+fn set_metadata_portably(header: &mut tar::Header, meta: &Metadata) {
     let (entry_type, mode) = if meta.is_dir() {
         (tar::EntryType::Directory, 0o755)
     } else if meta.is_symlink() {

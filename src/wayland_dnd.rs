@@ -213,7 +213,7 @@ impl WaylandDnd {
             return None;
         }
         // SAFETY: memfd_create returned a new descriptor we own.
-        let mut file = disk::File::from(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) });
+        let mut file = std::fs::File::from(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) });
         file.write_all(&icon.bgra).ok()?;
         let pool = shm.create_pool(file.as_fd(), len as i32, &self.qh, ());
         let buffer = pool.create_buffer(

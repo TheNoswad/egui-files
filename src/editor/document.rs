@@ -210,7 +210,11 @@ fn replace(target: &Path, bytes: &[u8], meta: &disk::Metadata) -> io::Result<()>
             if (mine.uid(), mine.gid()) != (meta.uid(), meta.gid()) {
                 // Only works as root (or for our own groups); otherwise the
                 // file would change owner, so don't replace it.
-                std::os::unix::fs::fchown(&file, Some(meta.uid()), Some(meta.gid()))?;
+                // A server's file can't change owner from here.
+                let Some(file) = file.as_std() else {
+                    return Err(io::ErrorKind::Unsupported.into());
+                };
+                std::os::unix::fs::fchown(file, Some(meta.uid()), Some(meta.gid()))?;
             }
         }
         file.sync_all()?;

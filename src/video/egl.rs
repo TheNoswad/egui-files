@@ -1,7 +1,7 @@
 //! A headless OpenGL context for mpv to render into, on its own GPU device
 //! rather than a window, so it's independent of the app's wgpu renderer.
 
-use disk::File;
+use std::fs::File;
 use std::{
     ffi::{CStr, CString, c_char, c_void},
     os::fd::AsRawFd,

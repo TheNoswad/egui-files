@@ -750,7 +750,7 @@ struct Session {
     /// The shell's process id and a handle on the PTY, to tell whether the
     /// shell is at a prompt and which folder it's in.
     #[cfg(target_os = "linux")]
-    shell: (u32, disk::File),
+    shell: (u32, std::fs::File),
 }
 
 impl Session {
