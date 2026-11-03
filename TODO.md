@@ -14,6 +14,14 @@
 - [ ] sftp etc
 - [ ] google drive
 - [ ] proton drive
+- [ ] Markdown renderer
+- [ ] CSV viewer
+- [ ] ISO file support
+- [ ] PDF support
+- [ ] Office file formats (open and proprietary)
+- [ ] Any other format not supported yet
+- [ ] Project focus or view mode, for IDE features
+- [ ] IDE features
 - [ ] mobile support (the layout runs on the desktop: View → Mobile layout; `src/app/mobile.rs`)
     - [x] tabs like a mobile browser
     - [x] Build for Android, with a phone's file access ("All files access"): `cargo apk build --release` in `android/` (Pixel 7a, Android 16)
