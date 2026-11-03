@@ -925,7 +925,7 @@ fn load(path: &Path, ctx: &Context) -> Receiver<Result<Loaded, LoadError>> {
     let (sender, receiver) = mpsc::channel();
     let path = path.to_path_buf();
     let ctx = ctx.clone();
-    std::thread::spawn(move || {
+    crate::background::spawn("load-document", move || {
         let _ = sender.send(document::load(&path));
         ctx.request_repaint();
     });
@@ -1513,7 +1513,7 @@ mod tests {
         /// frames: the first highlight loads the syntaxes, which takes
         /// seconds in a debug build with the other tests running.
         fn until(&mut self, done: impl Fn(&Self) -> bool) {
-            let start = std::time::Instant::now();
+            let start = web_time::Instant::now();
             while start.elapsed() < Duration::from_secs(30) {
                 self.frame(Vec::new());
                 if done(self) {

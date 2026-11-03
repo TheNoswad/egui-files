@@ -2,7 +2,7 @@
 //! permanently deletes them (as background jobs).
 
 // Android has no trash of its own; see android/trash.
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_arch = "wasm32"))]
 use trash_android as trash;
 
 use std::{
@@ -185,7 +185,7 @@ impl TrashCount {
             self.running.clone(),
             self.again.clone(),
         );
-        std::thread::spawn(move || {
+        crate::background::spawn("trash-count", move || {
             loop {
                 again.store(false, Ordering::Release);
                 let n = os_limited::list().map(|items| items.len()).ok();
@@ -830,7 +830,7 @@ fn size_key(item: &Item) -> (bool, u64) {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
+    use web_time::Instant;
 
     use egui::Key;
 

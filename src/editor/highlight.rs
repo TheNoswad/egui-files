@@ -8,8 +8,10 @@ use std::{
         Arc, OnceLock,
         mpsc::{self, Receiver, Sender, TryRecvError},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
+
+use web_time::Instant;
 
 use egui::{
     Color32, FontId, Stroke,
@@ -42,9 +44,10 @@ fn theme_set() -> &'static EmbeddedLazyThemeSet {
 }
 
 /// Loads the syntaxes and themes in the background, so the first preview
-/// doesn't wait for them.
+/// doesn't wait for them. Where threads can't start (the browser), they load
+/// on first use instead.
 pub fn preload() {
-    std::thread::spawn(|| {
+    let _ = std::thread::Builder::new().spawn(|| {
         syntaxes();
         theme(DEFAULT_DARK_THEME);
         theme(DEFAULT_LIGHT_THEME);

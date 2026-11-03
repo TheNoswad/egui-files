@@ -1905,7 +1905,7 @@ mod tests {
             &ctx,
             &mut shared,
         );
-        let start = std::time::Instant::now();
+        let start = web_time::Instant::now();
         loop {
             run_frame(&ctx, &mut tab, &mut shared, &[]);
             shared.usage.tick();
@@ -2036,9 +2036,9 @@ mod tests {
             cut: false,
         });
         tab.apply(Action::PasteInto(a.join("c")), &ctx, &mut shared);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = web_time::Instant::now() + std::time::Duration::from_secs(5);
         while shared.jobs.running() > 0 {
-            assert!(std::time::Instant::now() < deadline);
+            assert!(web_time::Instant::now() < deadline);
             shared.jobs.poll();
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
@@ -2093,9 +2093,9 @@ mod tests {
     }
 
     fn wait_for_jobs(shared: &mut Shared) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = web_time::Instant::now() + std::time::Duration::from_secs(5);
         while shared.jobs.running() > 0 {
-            assert!(std::time::Instant::now() < deadline, "job timed out");
+            assert!(web_time::Instant::now() < deadline, "job timed out");
             shared.jobs.poll();
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
@@ -2440,11 +2440,11 @@ mod tests {
                 id == Id::new("hover-video") && player.frame().is_some() && !player.status().paused
             })
         };
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = web_time::Instant::now() + std::time::Duration::from_secs(10);
         // The first grid cell is at the top left, below the toolbar.
         let cell = egui::pos2(50.0, 90.0);
         while !(preview_ready(&shared) && hover_ready(&shared)) {
-            assert!(std::time::Instant::now() < deadline, "videos did not play");
+            assert!(web_time::Instant::now() < deadline, "videos did not play");
             shared.images.begin_frame();
             shared.videos.begin_frame();
             run_events(
@@ -2601,9 +2601,9 @@ mod tests {
         let ctx = Context::default();
         let mut tab = BrowserTab::new(1, b.clone());
         let mut shared = shared(&ctx, &tab);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = web_time::Instant::now() + std::time::Duration::from_secs(10);
         while crate::open_with::catalog(&ctx).is_none() {
-            assert!(std::time::Instant::now() < deadline, "app catalog loads");
+            assert!(web_time::Instant::now() < deadline, "app catalog loads");
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         let frame = |tab: &mut BrowserTab, shared: &mut Shared, events: Vec<egui::Event>| {

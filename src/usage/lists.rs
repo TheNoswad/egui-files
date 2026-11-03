@@ -263,7 +263,7 @@ impl Breakdown {
         if !super::refresh_every(&mut self.key, key, ui.ctx(), every) {
             return;
         }
-        let start = std::time::Instant::now();
+        let start = web_time::Instant::now();
         let mut files = [0; CATEGORIES];
         let mut by_extension: HashMap<(Category, String), (u64, u64)> = HashMap::new();
         let mut largest = BinaryHeap::new();

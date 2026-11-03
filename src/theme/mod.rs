@@ -364,7 +364,7 @@ impl Themes {
         };
         let changed = self.changed.clone();
         let ctx = ctx.clone();
-        let watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+        let watcher = crate::watcher::recommended(move |event: notify::Result<notify::Event>| {
             if event.is_ok_and(|e| !e.kind.is_access()) {
                 changed.store(true, Ordering::Relaxed);
                 ctx.request_repaint();

@@ -81,6 +81,7 @@ pub enum Request {
 /// Whether the bar was on when the app last saved its state. Read before
 /// the window opens, so it opens without the system frame rather than
 /// losing it a frame later.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn saved_enabled(app_id: &str) -> bool {
     eframe::storage_dir(app_id)
         .and_then(|dir| std::fs::read_to_string(dir.join("app.ron")).ok())
@@ -89,6 +90,7 @@ pub fn saved_enabled(app_id: &str) -> bool {
 
 /// Whether the bar is on in eframe's saved state, `app_ron`: a map of keys
 /// to the RON of each value, the app's under [`eframe::APP_KEY`].
+#[cfg(not(target_arch = "wasm32"))]
 fn enabled_in(app_ron: &str) -> bool {
     #[derive(Deserialize)]
     struct Saved {

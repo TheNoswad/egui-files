@@ -2,7 +2,7 @@
 //! destination, then move the results into place, asking about conflicts.
 
 // Android has no trash of its own; see android/trash.
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_arch = "wasm32"))]
 use trash_android as trash;
 
 use std::{

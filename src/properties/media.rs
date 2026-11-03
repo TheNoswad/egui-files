@@ -40,13 +40,10 @@ impl Probe {
     pub fn start(ctx: &egui::Context, path: PathBuf) -> Self {
         let cell = Arc::new(OnceLock::new());
         let (c, ctx, p) = (cell.clone(), ctx.clone(), path.clone());
-        std::thread::Builder::new()
-            .name("properties-media".into())
-            .spawn(move || {
-                let _ = c.set(read(&p));
-                ctx.request_repaint();
-            })
-            .expect("spawn thread");
+        crate::background::spawn("properties-media", move || {
+            let _ = c.set(read(&p));
+            ctx.request_repaint();
+        });
         Self { path, cell }
     }
 

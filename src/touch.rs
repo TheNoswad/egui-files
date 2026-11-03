@@ -7,10 +7,9 @@
 //! menus, so the press is followed here in the raw input, and a long press
 //! let go without moving becomes a right click.
 
-use std::{
-    ops::RangeInclusive,
-    time::{Duration, Instant},
-};
+use std::{ops::RangeInclusive, time::Duration};
+
+use web_time::Instant;
 
 use egui::{Event, Id, PointerButton, Pos2, RawInput, scroll_area::ScrollSource, style::Style};
 

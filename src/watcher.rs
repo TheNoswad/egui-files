@@ -4,8 +4,10 @@ use std::{
     collections::HashSet,
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver},
-    time::{Duration, Instant},
+    time::Duration,
 };
+
+use web_time::Instant;
 
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher, event::ModifyKind};
 
@@ -13,6 +15,18 @@ use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher, event::Modif
 const QUIET: Duration = Duration::from_millis(200);
 /// ...but refresh at least this often during a burst (e.g. a large copy).
 const MAX_DELAY: Duration = Duration::from_millis(1000);
+
+/// notify's watcher for this platform. The browser has none to give: notify's
+/// fallback there polls from a thread, which the browser can't start.
+pub fn recommended<F: notify::EventHandler>(handler: F) -> notify::Result<RecommendedWatcher> {
+    #[cfg(not(target_arch = "wasm32"))]
+    return notify::recommended_watcher(handler);
+    #[cfg(target_arch = "wasm32")]
+    {
+        drop(handler);
+        Err(notify::Error::generic("the browser can't watch folders"))
+    }
+}
 
 pub struct DirWatcher {
     /// `None` if the platform watcher could not be created; refreshes are then manual.
@@ -29,7 +43,7 @@ impl DirWatcher {
     pub fn new(ctx: &egui::Context) -> Self {
         let (sender, events) = mpsc::channel();
         let repaint_ctx = ctx.clone();
-        let watcher = notify::recommended_watcher(move |event| {
+        let watcher = recommended(move |event| {
             if sender.send(event).is_ok() {
                 repaint_ctx.request_repaint_after(QUIET);
             }

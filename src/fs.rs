@@ -297,7 +297,28 @@ pub fn open(path: &Path) -> io::Result<()> {
     #[cfg(target_os = "android")]
     return crate::android::open(path, false);
     #[cfg(not(target_os = "android"))]
-    open::that_detached(path)
+    open_detached(path)
+}
+
+/// Opens a file, folder or link in the system's app for it. The browser opens
+/// only links, in a new tab.
+pub fn open_detached(target: impl AsRef<OsStr>) -> io::Result<()> {
+    #[cfg(not(target_arch = "wasm32"))]
+    return open::that_detached(target);
+    #[cfg(target_arch = "wasm32")]
+    {
+        let target = target.as_ref().to_string_lossy();
+        if !target.starts_with("https://") && !target.starts_with("http://") {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "opening files in other apps needs the desktop app",
+            ));
+        }
+        web_sys::window()
+            .and_then(|w| w.open_with_url_and_target(&target, "_blank").ok())
+            .map(drop)
+            .ok_or_else(|| io::Error::other("the browser blocked the new tab"))
+    }
 }
 
 pub fn rename(from: &Path, new_name: &str) -> io::Result<PathBuf> {

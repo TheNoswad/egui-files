@@ -3,7 +3,7 @@
 //! bar UI.
 
 // Android has no trash of its own; see android/trash.
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_arch = "wasm32"))]
 use trash_android as trash;
 
 use std::{
@@ -15,8 +15,10 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering::Relaxed},
     },
     thread::JoinHandle,
-    time::{Duration, Instant},
+    time::Duration,
 };
+
+use web_time::Instant;
 
 use egui::{Button, Id, Key, Modal, ProgressBar, RichText, TextEdit, Ui};
 use egui_phosphor::regular as icon;

@@ -17,8 +17,10 @@
 use std::{
     path::PathBuf,
     sync::mpsc::{self, Receiver, RecvTimeoutError, Sender},
-    time::{Duration, Instant},
+    time::Duration,
 };
+
+use web_time::Instant;
 
 use raw_window_handle::{HasDisplayHandle, RawDisplayHandle};
 use x11rb::{

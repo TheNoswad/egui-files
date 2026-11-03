@@ -7,8 +7,10 @@ use std::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering::Relaxed},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
+
+use web_time::Instant;
 
 #[derive(Default)]
 struct State {
@@ -43,14 +45,11 @@ impl Walk {
     pub fn start(ctx: &egui::Context, roots: Vec<PathBuf>) -> Self {
         let state = Arc::new(State::default());
         let (s, ctx) = (state.clone(), ctx.clone());
-        std::thread::Builder::new()
-            .name("properties-walk".into())
-            .spawn(move || {
-                walk(&s, roots, &ctx);
-                s.done.store(true, Relaxed);
-                ctx.request_repaint();
-            })
-            .expect("spawn thread");
+        crate::background::spawn("properties-walk", move || {
+            walk(&s, roots, &ctx);
+            s.done.store(true, Relaxed);
+            ctx.request_repaint();
+        });
         Self { state }
     }
 

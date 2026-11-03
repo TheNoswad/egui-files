@@ -125,7 +125,7 @@ mod tests {
     fn system_fonts_load_by_family_name() {
         let ctx = egui::Context::default();
         let mut fonts = SystemFonts::default();
-        let start = std::time::Instant::now();
+        let start = web_time::Instant::now();
         let families = loop {
             if let Some(families) = fonts.families(&ctx) {
                 break families;

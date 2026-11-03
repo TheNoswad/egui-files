@@ -1,11 +1,16 @@
 //! A tabbed file browser. The desktop binary and the Android library both
 //! start it from here.
 
+// Files are dropped to close them before a rename or removal; on
+// wasm32-unknown-unknown `File` has no `Drop`, so clippy calls that pointless.
+#![cfg_attr(target_arch = "wasm32", allow(clippy::drop_non_drop))]
+
 mod about;
 #[cfg(target_os = "android")]
 mod android;
 mod app;
 mod archive;
+mod background;
 mod dates;
 mod devices;
 mod dnd;
@@ -57,6 +62,7 @@ mod windows_frame;
 mod x11_dnd;
 
 /// Runs the desktop app.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn run() -> eframe::Result {
     // Started elevated to apply changes from the Properties window.
     if let Some(code) = properties::run_helper() {
@@ -87,6 +93,34 @@ pub fn run() -> eframe::Result {
         options,
         Box::new(|cc| Ok(Box::new(app::FilesApp::new(cc)))),
     )
+}
+
+/// Starts the app in the page's `<canvas id="app">` (see web/index.html).
+#[cfg(target_arch = "wasm32")]
+pub fn run_web() {
+    use wasm_bindgen::JsCast;
+
+    eframe::WebLogger::init(log::LevelFilter::Info).ok();
+    wasm_bindgen_futures::spawn_local(async {
+        let document = web_sys::window().and_then(|w| w.document());
+        let Some(canvas) = document
+            .and_then(|d| d.get_element_by_id("app"))
+            .and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok())
+        else {
+            log::error!("no <canvas id=\"app\"> to draw in");
+            return;
+        };
+        let started = eframe::WebRunner::new()
+            .start(
+                canvas,
+                eframe::WebOptions::default(),
+                Box::new(|cc| Ok(Box::new(app::FilesApp::new(cc)))),
+            )
+            .await;
+        if let Err(err) = started {
+            log::error!("egui-files didn't start: {err:?}");
+        }
+    });
 }
 
 /// Runs the app on Android, from the `android` crate's `android_main`.
@@ -121,6 +155,7 @@ pub fn run_android(android_app: egui_winit::winit::platform::android::activity::
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// egui-wgpu enables the GL backend alongside Vulkan/DX12/Metal by default,
 /// which loads the whole OpenGL driver (~20 MB on Mesa) even though it is never
 /// used. Only fall back to GL when no primary backend has an adapter.

@@ -4,17 +4,19 @@
 //! without opening a window.
 
 use std::{
-    io::{self, Read, Write},
+    io,
     sync::{Arc, Mutex},
 };
 
-use super::edit::{self, Failure, Plan, Report};
+use super::edit::{Failure, Plan, Report};
 
 /// The argument that makes the app apply a plan instead of starting.
+#[cfg(not(target_arch = "wasm32"))]
 pub const FLAG: &str = "--apply-properties";
 
 /// If the app was started as the helper, does its work and returns the
 /// exit code.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn run_helper() -> Option<i32> {
     let mut args = std::env::args_os().skip(1);
     if args.next()? != FLAG {
@@ -29,7 +31,10 @@ pub fn run_helper() -> Option<i32> {
     })
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn helper(args: Vec<std::ffi::OsString>) -> io::Result<()> {
+    use super::edit;
+    use std::io::{Read, Write};
     let to_io = |e: toml::de::Error| io::Error::new(io::ErrorKind::InvalidData, e.to_string());
     // Linux: the plan on stdin and the report on stdout. Windows can't pipe
     // into an elevated process, so they go through files named on the
@@ -104,6 +109,7 @@ fn parse_report(text: &str) -> io::Result<Vec<Failure>> {
 
 #[cfg(target_os = "linux")]
 fn run(plan: &Plan) -> io::Result<Vec<Failure>> {
+    use std::io::Write;
     use std::process::{Command, Stdio};
     let text = toml::to_string(plan).map_err(io::Error::other)?;
     let exe = std::env::current_exe()?;

@@ -175,6 +175,10 @@ impl Listing {
     }
 }
 
+/// Why RAR and zstd archives fail in the browser: both are C libraries.
+#[cfg(target_arch = "wasm32")]
+const NOT_IN_BROWSER: &str = "this kind of archive needs the desktop app";
+
 #[derive(Debug)]
 pub enum Error {
     NeedsPassword,

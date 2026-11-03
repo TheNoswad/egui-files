@@ -376,14 +376,11 @@ impl Applying {
         let progress = Arc::new(Progress::default());
         let result = Arc::new(std::sync::Mutex::new(None));
         let (p, r, ctx) = (progress.clone(), result.clone(), ctx.clone());
-        std::thread::Builder::new()
-            .name("properties-apply".into())
-            .spawn(move || {
-                let failures = apply(&plan, &p);
-                *r.lock().unwrap() = Some(failures);
-                ctx.request_repaint();
-            })
-            .expect("spawn thread");
+        crate::background::spawn("properties-apply", move || {
+            let failures = apply(&plan, &p);
+            *r.lock().unwrap() = Some(failures);
+            ctx.request_repaint();
+        });
         Self { progress, result }
     }
 

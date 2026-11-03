@@ -1065,12 +1065,12 @@ mod tests {
 
     /// Runs frames until the listing has been read.
     fn load(ctx: &Context, tab: &mut ArchiveTab, shared: &mut Shared) -> ListState {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = web_time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             frame(ctx, tab, shared, Vec::new());
             match shared.archives.get(&tab.archive) {
                 ListState::Loading => {
-                    assert!(std::time::Instant::now() < deadline, "listing timed out");
+                    assert!(web_time::Instant::now() < deadline, "listing timed out");
                     std::thread::sleep(std::time::Duration::from_millis(5));
                 }
                 state => {
@@ -1160,9 +1160,9 @@ mod tests {
             &mut shared,
         );
         tab.apply(Action::ExtractHere { selected: true }, &rows, &mut shared);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = web_time::Instant::now() + std::time::Duration::from_secs(5);
         while shared.jobs.running() > 0 {
-            assert!(std::time::Instant::now() < deadline, "extract timed out");
+            assert!(web_time::Instant::now() < deadline, "extract timed out");
             shared.jobs.poll();
             std::thread::sleep(std::time::Duration::from_millis(5));
         }

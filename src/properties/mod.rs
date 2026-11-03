@@ -22,6 +22,7 @@ use egui::Ui;
 use egui_phosphor::regular as icon;
 use serde::{Deserialize, Serialize};
 
+#[cfg(not(target_arch = "wasm32"))]
 pub use elevate::run_helper;
 use view::{Host, View};
 

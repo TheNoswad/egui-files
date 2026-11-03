@@ -8,8 +8,10 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering::Relaxed},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
+
+use web_time::Instant;
 
 use md5::{Digest, Md5};
 use sha2::Sha256;
@@ -37,16 +39,13 @@ impl Hashing {
     pub fn start(ctx: &egui::Context, path: PathBuf, total: u64) -> Self {
         let state = Arc::new(State::default());
         let (s, ctx) = (state.clone(), ctx.clone());
-        std::thread::Builder::new()
-            .name("properties-hash".into())
-            .spawn(move || {
-                let result = hash(&s, &path, &ctx);
-                if !s.cancel.load(Relaxed) {
-                    *s.result.lock().unwrap() = Some(result);
-                    ctx.request_repaint();
-                }
-            })
-            .expect("spawn thread");
+        crate::background::spawn("properties-hash", move || {
+            let result = hash(&s, &path, &ctx);
+            if !s.cancel.load(Relaxed) {
+                *s.result.lock().unwrap() = Some(result);
+                ctx.request_repaint();
+            }
+        });
         Self { state, total }
     }
 

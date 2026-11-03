@@ -141,13 +141,21 @@ pub struct About {
 
 impl About {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-        let windowing = match cc.window_handle().map(|h| h.as_raw()) {
-            Ok(RawWindowHandle::Wayland(_)) => "Wayland",
-            Ok(RawWindowHandle::Xlib(_) | RawWindowHandle::Xcb(_)) => "X11",
-            Ok(RawWindowHandle::Win32(_)) => "Win32",
-            Ok(RawWindowHandle::AppKit(_)) => "AppKit",
-            _ => "unknown",
+        #[cfg(not(target_arch = "wasm32"))]
+        let windowing = {
+            use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            match cc.window_handle().map(|h| h.as_raw()) {
+                Ok(RawWindowHandle::Wayland(_)) => "Wayland",
+                Ok(RawWindowHandle::Xlib(_) | RawWindowHandle::Xcb(_)) => "X11",
+                Ok(RawWindowHandle::Win32(_)) => "Win32",
+                Ok(RawWindowHandle::AppKit(_)) => "AppKit",
+                _ => "unknown",
+            }
+        };
+        #[cfg(target_arch = "wasm32")]
+        let windowing = {
+            let _ = cc;
+            "browser"
         };
         Self {
             open: false,
@@ -176,7 +184,7 @@ impl About {
             .get_or_insert_with(|| {
                 let cell = Arc::new(OnceLock::new());
                 let (cell2, ctx) = (cell.clone(), ctx.clone());
-                std::thread::spawn(move || {
+                crate::background::spawn("about-probe", move || {
                     let _ = cell2.set(probe());
                     ctx.request_repaint();
                 });
@@ -764,7 +772,11 @@ fn probe() -> Probed {
         tools,
         syntaxes: crate::editor::highlight::syntax_names().len(),
         themes: crate::editor::highlight::theme_names().count(),
+        #[cfg(not(target_arch = "wasm32"))]
         settings_dir: eframe::storage_dir(NAME),
+        // The browser keeps them in its local storage.
+        #[cfg(target_arch = "wasm32")]
+        settings_dir: None,
         thumbnail_dir: crate::thumbnails::cache_dir(),
     }
 }

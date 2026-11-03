@@ -492,7 +492,7 @@ mod tests {
                 .unwrap();
             t.dir.clone()
         };
-        let start = std::time::Instant::now();
+        let start = web_time::Instant::now();
         while dir(&panel, 2) != Some("/".into()) {
             assert!(start.elapsed().as_secs() < 10, "shell didn't cd");
             frame(&ctx, &mut panel, Vec::new());

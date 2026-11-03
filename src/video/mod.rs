@@ -98,7 +98,7 @@ pub fn probe(path: &Path) -> Result<MediaInfo, String> {
     }
     mpv.initialize()?;
     mpv.load_file(path)?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = web_time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
         match mpv.poll_event() {
             Some(mpv::Event::FileLoaded) => break,
@@ -107,7 +107,7 @@ pub fn probe(path: &Path) -> Result<MediaInfo, String> {
             }
             Some(mpv::Event::Shutdown) => return Err("mpv shut down".to_owned()),
             Some(_) => {}
-            None if std::time::Instant::now() > deadline => {
+            None if web_time::Instant::now() > deadline => {
                 return Err("mpv took too long to open the file".to_owned());
             }
             None => std::thread::sleep(std::time::Duration::from_millis(10)),
@@ -568,9 +568,9 @@ mod tests {
         let ctx = Context::default();
         let mut videos = Videos::new(&ctx);
         let id = Id::new("test");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = web_time::Instant::now() + std::time::Duration::from_secs(10);
         let image = loop {
-            assert!(std::time::Instant::now() < deadline, "no frame rendered");
+            assert!(web_time::Instant::now() < deadline, "no frame rendered");
             videos.begin_frame();
             let player = videos.player(id, &path, Mode::Preview).unwrap();
             let status = player.status();
@@ -645,12 +645,9 @@ mod tests {
             (&narrow, [240, 180], [0, 0, 255]),
             (&wide, [320, 180], [255, 0, 0]),
         ] {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let deadline = web_time::Instant::now() + std::time::Duration::from_secs(10);
             loop {
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "{path:?} never showed"
-                );
+                assert!(web_time::Instant::now() < deadline, "{path:?} never showed");
                 videos.begin_frame();
                 let player = videos.player(id, path, Mode::Preview).unwrap();
                 let status = player.status();
@@ -750,10 +747,10 @@ mod tests {
         for quality in Quality::ALL {
             videos.set_quality(quality);
             assert_eq!(videos.players().count(), 0, "players restart");
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let deadline = web_time::Instant::now() + std::time::Duration::from_secs(10);
             loop {
                 assert!(
-                    std::time::Instant::now() < deadline,
+                    web_time::Instant::now() < deadline,
                     "{quality:?} rendered nothing"
                 );
                 videos.begin_frame();

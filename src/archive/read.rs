@@ -152,6 +152,7 @@ fn list_7z(path: &Path, password: Option<&str>) -> Result<Vec<Entry>, Error> {
         .collect())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn list_rar(path: &Path, password: Option<&str>) -> Result<Vec<Entry>, Error> {
     let archive = match password {
         Some(password) => unrar::Archive::with_password(path, password),
@@ -406,6 +407,12 @@ fn set_mode(path: &Path, mode: Option<u32>) {
 #[cfg(not(unix))]
 fn set_mode(_path: &Path, _mode: Option<u32>) {}
 
+/// Unpacked symlinks are only tried, so the browser just reports them.
+#[cfg(target_arch = "wasm32")]
+fn make_symlink(_target: &Path, _path: &Path) -> io::Result<()> {
+    Err(io::ErrorKind::Unsupported.into())
+}
+
 #[cfg(unix)]
 fn make_symlink(target: &Path, path: &Path) -> io::Result<()> {
     std::os::unix::fs::symlink(target, path)
@@ -459,7 +466,10 @@ fn decoder<'a, R: Read + 'a>(format: Format, inner: R) -> Result<Box<dyn Read + 
         Format::Tar => Box::new(inner),
         Format::TarGz | Format::Gz => Box::new(flate2::read::MultiGzDecoder::new(inner)),
         Format::TarXz | Format::Xz => Box::new(lzma_rust2::XzReader::new(inner, true)),
+        #[cfg(not(target_arch = "wasm32"))]
         Format::TarZst | Format::Zst => Box::new(zstd::Decoder::new(inner)?),
+        #[cfg(target_arch = "wasm32")]
+        Format::TarZst | Format::Zst => return Err(Error::Other(super::NOT_IN_BROWSER.into())),
         Format::TarBz2 | Format::Bz2 => Box::new(bzip2::read::MultiBzDecoder::new(inner)),
         Format::Zip | Format::SevenZ | Format::Rar => unreachable!("not a stream format"),
     })
@@ -548,6 +558,7 @@ fn unpack_7z(path: &Path, password: Option<&str>, out: &mut Unpacker) -> Result<
     result.map_err(|e| sevenz_error(e, password))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn unpack_rar(path: &Path, password: Option<&str>, out: &mut Unpacker) -> Result<(), Error> {
     // unrar reads the file itself, so progress counts unpacked bytes instead.
     let entries = list_rar(path, password)?;
@@ -611,6 +622,7 @@ fn sevenz_error(err: sevenz_rust2::Error, password: Option<&str>) -> Error {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn rar_error(err: unrar::error::UnrarError, password: Option<&str>) -> Error {
     use unrar::error::Code;
     match err.code {
@@ -633,6 +645,7 @@ fn zip_time(time: zip::DateTime) -> Option<SystemTime> {
 }
 
 /// MS-DOS date and time, as rar headers store them, in local time.
+#[cfg(not(target_arch = "wasm32"))]
 fn dos_time(time: u32) -> Option<SystemTime> {
     let date = chrono::NaiveDate::from_ymd_opt(
         1980 + (time >> 25) as i32,
@@ -641,4 +654,15 @@ fn dos_time(time: u32) -> Option<SystemTime> {
     )?;
     let naive = date.and_hms_opt((time >> 11) & 0x1f, (time >> 5) & 0x3f, (time & 0x1f) * 2)?;
     Some(naive.and_local_timezone(chrono::Local).earliest()?.into())
+}
+
+/// RAR needs unrar, a C++ library the browser build can't include.
+#[cfg(target_arch = "wasm32")]
+fn list_rar(_path: &Path, _password: Option<&str>) -> Result<Vec<Entry>, Error> {
+    Err(Error::Other(super::NOT_IN_BROWSER.into()))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn unpack_rar(_path: &Path, _password: Option<&str>, _out: &mut Unpacker) -> Result<(), Error> {
+    Err(Error::Other(super::NOT_IN_BROWSER.into()))
 }

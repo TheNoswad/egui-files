@@ -78,6 +78,12 @@ pub fn compress(job: CompressJob, p: &Progress) {
                 let xz = lzma_rust2::XzWriterMt::new(out, options, threads())?;
                 finish(write_tar(xz, &items, p)?.finish()?)
             }
+            #[cfg(target_arch = "wasm32")]
+            Format::TarZst => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                super::NOT_IN_BROWSER,
+            )),
+            #[cfg(not(target_arch = "wasm32"))]
             Format::TarZst => {
                 let mut zst = zstd::Encoder::new(out, zstd_level(level))?;
                 zst.multithread(threads())?;
@@ -121,6 +127,7 @@ fn threads() -> u32 {
 }
 
 /// zstd goes to 19 (22 with huge windows); spread 0–9 over the useful range.
+#[cfg(not(target_arch = "wasm32"))]
 fn zstd_level(level: u32) -> i32 {
     [1, 1, 2, 3, 4, 6, 9, 12, 15, 19][level.min(9) as usize]
 }

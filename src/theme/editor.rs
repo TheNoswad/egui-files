@@ -2,7 +2,7 @@
 //! and the appearance settings that apply over every theme.
 
 // Android has no trash of its own; see android/trash.
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_arch = "wasm32"))]
 use trash_android as trash;
 
 use std::path::PathBuf;
@@ -260,7 +260,7 @@ impl Themes {
         {
             let opened = std::fs::create_dir_all(&dir)
                 .map_err(|e| e.to_string())
-                .and_then(|()| open::that_detached(&dir).map_err(|e| e.to_string()));
+                .and_then(|()| crate::fs::open_detached(&dir).map_err(|e| e.to_string()));
             if let Err(err) = opened {
                 self.editor.message =
                     Some((format!("Couldn't open {}: {err}", dir.display()), true));
@@ -384,7 +384,7 @@ impl Themes {
                 if ui
                     .button(format!("{} Open file", icon::FILE_TEXT))
                     .clicked()
-                    && let Err(err) = open::that_detached(path)
+                    && let Err(err) = crate::fs::open_detached(path)
                 {
                     self.editor.message = Some((err.to_string(), true));
                 }

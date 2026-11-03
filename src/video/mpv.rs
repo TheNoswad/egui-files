@@ -11,7 +11,10 @@ use std::{
     sync::OnceLock,
 };
 
+#[cfg(not(target_arch = "wasm32"))]
 use libloading::Library;
+#[cfg(target_arch = "wasm32")]
+use web::Library;
 
 #[cfg(target_os = "linux")]
 const LIBRARY_NAMES: &[&str] = &["libmpv.so.2", "libmpv.so"];
@@ -22,6 +25,29 @@ const LIBRARY_NAMES: &[&str] = &["libmpv.2.dylib", "libmpv.dylib"];
 // Only found if bundled into the APK, which it isn't yet.
 #[cfg(target_os = "android")]
 const LIBRARY_NAMES: &[&str] = &["libmpv.so"];
+#[cfg(target_arch = "wasm32")]
+const LIBRARY_NAMES: &[&str] = &[];
+
+#[cfg(not(target_arch = "wasm32"))]
+const NOT_FOUND: &str = "libmpv not found (install mpv)";
+#[cfg(target_arch = "wasm32")]
+const NOT_FOUND: &str = "video playback needs the desktop app";
+
+/// The browser can't load libraries, so there's never a libmpv.
+#[cfg(target_arch = "wasm32")]
+mod web {
+    pub enum Library {}
+
+    impl Library {
+        pub unsafe fn new(_name: &str) -> Result<Self, ()> {
+            Err(())
+        }
+
+        pub unsafe fn get<T>(&self, _symbol: &[u8]) -> Result<Box<T>, String> {
+            match *self {}
+        }
+    }
+}
 
 pub const FORMAT_STRING: c_int = 1;
 pub const FORMAT_FLAG: c_int = 3;
@@ -111,7 +137,7 @@ macro_rules! api {
                     .iter()
                     // SAFETY: libmpv has no library constructors with preconditions.
                     .find_map(|name| Some((*name, unsafe { Library::new(name) }.ok()?)))
-                    .ok_or("libmpv not found (install mpv)")?;
+                    .ok_or(NOT_FOUND)?;
                 // SAFETY: the signatures match libmpv's client.h and render.h.
                 unsafe {
                     Ok(Self {

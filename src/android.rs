@@ -2,10 +2,9 @@
 //! screen the status and navigation bars cover. Apps targeting Android 15
 //! and up draw under them, and egui-winit only reports these insets on iOS.
 
-use std::{
-    sync::OnceLock,
-    time::{Duration, Instant},
-};
+use std::{sync::OnceLock, time::Duration};
+
+use web_time::Instant;
 
 use egui::{SafeAreaInsets, epaint::MarginF32};
 use egui_winit::winit::platform::android::activity::AndroidApp;

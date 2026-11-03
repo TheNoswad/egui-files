@@ -107,19 +107,16 @@ impl Listings {
         );
         let path = path.to_path_buf();
         let ctx = self.ctx.clone();
-        std::thread::Builder::new()
-            .name("archive-listing".to_owned())
-            .spawn(move || {
-                let result = match read::list(&path, password.as_deref()) {
-                    Ok(listing) => ListState::Ready(Arc::new(listing)),
-                    Err(Error::NeedsPassword) => ListState::NeedsPassword { wrong: false },
-                    Err(Error::WrongPassword) => ListState::NeedsPassword { wrong: true },
-                    Err(err) => ListState::Failed(err.to_string()),
-                };
-                *state.lock().expect("listing poisoned") = result;
-                ctx.request_repaint();
-            })
-            .expect("failed to spawn listing thread");
+        crate::background::spawn("archive-listing", move || {
+            let result = match read::list(&path, password.as_deref()) {
+                Ok(listing) => ListState::Ready(Arc::new(listing)),
+                Err(Error::NeedsPassword) => ListState::NeedsPassword { wrong: false },
+                Err(Error::WrongPassword) => ListState::NeedsPassword { wrong: true },
+                Err(err) => ListState::Failed(err.to_string()),
+            };
+            *state.lock().expect("listing poisoned") = result;
+            ctx.request_repaint();
+        });
         ListState::Loading
     }
 }

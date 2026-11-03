@@ -24,8 +24,10 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock, mpsc},
-    time::{Duration, Instant},
+    time::Duration,
 };
+
+use web_time::Instant;
 
 use egui::{Atom, AtomExt, Button, Context, Response, RichText, TextureHandle, Ui, vec2};
 use egui_phosphor::regular as icon;
@@ -295,17 +297,14 @@ pub fn catalog(ctx: &Context) -> Option<Arc<Catalog>> {
     if (global.catalog.is_none() || stale) && !global.loading {
         global.loading = true;
         let ctx = ctx.clone();
-        std::thread::Builder::new()
-            .name("open-with catalog".into())
-            .spawn(move || {
-                let catalog = Arc::new(Catalog::load());
-                let mut global = GLOBAL.lock().unwrap();
-                global.catalog = Some(catalog);
-                global.cached = None;
-                global.loading = false;
-                ctx.request_repaint();
-            })
-            .expect("spawn thread");
+        crate::background::spawn("open-with catalog", move || {
+            let catalog = Arc::new(Catalog::load());
+            let mut global = GLOBAL.lock().unwrap();
+            global.catalog = Some(catalog);
+            global.cached = None;
+            global.loading = false;
+            ctx.request_repaint();
+        });
     }
     global.catalog.clone()
 }

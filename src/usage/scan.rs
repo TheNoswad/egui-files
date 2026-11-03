@@ -11,8 +11,10 @@ use std::{
         Arc, Condvar, Mutex, RwLock,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
+
+use web_time::Instant;
 
 use egui::Context;
 use egui_phosphor::regular as icon;

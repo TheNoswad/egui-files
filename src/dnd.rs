@@ -269,7 +269,8 @@ fn same_device(a: &Path, b: &Path) -> bool {
     dev(a).is_some() && dev(a) == dev(b)
 }
 
-#[cfg(windows)]
+/// The browser has no devices; prefix comparison suits its one filesystem.
+#[cfg(any(windows, target_arch = "wasm32"))]
 fn same_device(a: &Path, b: &Path) -> bool {
     // Compare drive prefixes (`C:`, `\\server\share`).
     a.components().next() == b.components().next()

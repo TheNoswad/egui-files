@@ -103,6 +103,9 @@ pub struct ImageCache {
     results: Receiver<Done>,
     slots: HashMap<Key, Slot>,
     frame: u64,
+    /// No worker thread could start (the browser can't): `begin_frame`
+    /// decodes instead.
+    inline: bool,
 }
 
 impl ImageCache {
@@ -112,26 +115,33 @@ impl ImageCache {
         let workers = std::thread::available_parallelism()
             .map_or(2, |n| n.get().saturating_sub(1))
             .clamp(1, 4);
-        for i in 0..workers {
-            let (queue, sender, ctx) = (queue.clone(), sender.clone(), ctx.clone());
-            std::thread::Builder::new()
-                .name(format!("image-decoder-{i}"))
-                .spawn(move || worker(&queue, &sender, &ctx))
-                .expect("failed to spawn image decoder thread");
-        }
+        let started = (0..workers)
+            .filter(|i| {
+                let (queue, sender, ctx) = (queue.clone(), sender.clone(), ctx.clone());
+                std::thread::Builder::new()
+                    .name(format!("image-decoder-{i}"))
+                    .spawn(move || worker(&queue, &sender, &ctx))
+                    .is_ok()
+            })
+            .count();
         Self {
             ctx: ctx.clone(),
             queue,
             results,
             slots: HashMap::new(),
             frame: 0,
+            inline: started == 0,
         }
     }
 
     /// Uploads finished decodes and evicts old textures. Call once per frame.
     pub fn begin_frame(&mut self) {
         self.frame += 1;
-        for Done { key, result } in self.results.try_iter() {
+        let mut done: Vec<Done> = self.results.try_iter().collect();
+        if self.inline {
+            done.extend(self.decode_inline());
+        }
+        for Done { key, result } in done {
             let slot = match result {
                 Ok((color_image, original_size)) => {
                     let name = key.path.display().to_string();
@@ -151,6 +161,20 @@ impl ImageCache {
             self.slots.insert(key, slot);
         }
         self.evict();
+    }
+
+    /// Without worker threads, decodes the newest request, one a frame so
+    /// the UI keeps responding.
+    fn decode_inline(&self) -> Option<Done> {
+        let key = self
+            .queue
+            .jobs
+            .lock()
+            .expect("image queue poisoned")
+            .pop()?;
+        let result = decode(&key.path, key.modified, key.max_side);
+        self.ctx.request_repaint();
+        Some(Done { key, result })
     }
 
     fn evict(&mut self) {
@@ -351,10 +375,10 @@ mod tests {
             Lookup::Unsupported
         ));
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = web_time::Instant::now() + std::time::Duration::from_secs(10);
         let (mut image_done, mut broken_done) = (false, false);
         while !(image_done && broken_done) {
-            assert!(std::time::Instant::now() < deadline, "decode timed out");
+            assert!(web_time::Instant::now() < deadline, "decode timed out");
             cache.begin_frame();
             if let Lookup::Ready(image) = cache.get(&path, None, 100) {
                 assert_eq!(image.original_size, [600, 300]);

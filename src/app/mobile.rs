@@ -9,7 +9,6 @@ use egui::{
 };
 use egui_dock::{DockState, TabViewer};
 use egui_phosphor::regular as icon;
-use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 
 use super::{FilesApp, Viewer};
@@ -304,6 +303,7 @@ impl FilesApp {
 
 /// Whether the mobile layout is on in eframe's saved state, to open the
 /// window at the right size before the app starts.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn saved_enabled(app_id: &str) -> bool {
     eframe::storage_dir(app_id)
         .and_then(|dir| std::fs::read_to_string(dir.join("app.ron")).ok())
@@ -312,8 +312,9 @@ pub fn saved_enabled(app_id: &str) -> bool {
 
 /// Whether the mobile layout is on in `app_ron`: a map of keys to the RON
 /// of each value, the app's under [`eframe::APP_KEY`].
+#[cfg(not(target_arch = "wasm32"))]
 fn enabled_in(app_ron: &str) -> bool {
-    #[derive(Deserialize)]
+    #[derive(serde::Deserialize)]
     struct Saved {
         #[serde(default)]
         mobile: bool,

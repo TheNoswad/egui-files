@@ -5,8 +5,10 @@
 use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    time::{Duration, Instant, SystemTime},
+    time::{Duration, SystemTime},
 };
+
+use web_time::Instant;
 
 use chrono::{DateTime, Local, NaiveDateTime, TimeZone};
 use egui::{
@@ -779,7 +781,7 @@ impl View {
                             let url = format!(
                                 "https://www.openstreetmap.org/?mlat={lat}&mlon={lon}#map=16/{lat}/{lon}"
                             );
-                            let _ = open::that_detached(url);
+                            let _ = crate::fs::open_detached(url);
                         }
                     });
                 }

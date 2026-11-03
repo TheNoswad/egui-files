@@ -3,6 +3,8 @@
 
 mod mobile;
 
+// For opening the native window.
+#[cfg(not(target_arch = "wasm32"))]
 pub use mobile::{DESKTOP_MIN_SIZE, MIN_SIZE as MOBILE_MIN_SIZE, saved_enabled as saved_mobile};
 
 use std::{

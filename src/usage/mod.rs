@@ -14,8 +14,10 @@ use std::{
     ffi::OsString,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, Weak},
-    time::{Duration, Instant},
+    time::Duration,
 };
+
+use web_time::Instant;
 
 use egui::{
     Button, CentralPanel, CornerRadius, FontId, Id, Key, Modifiers, Panel, Rect, Response,
@@ -31,6 +33,7 @@ use crate::{
 };
 pub use colors::ColorMode;
 use colors::{Painter, Palette};
+#[cfg(not(target_arch = "wasm32"))]
 pub use mft::run_helper;
 use scan::{Category, Kind, Metric, NONE, ROOT, Scan, ScanHandle, Tree};
 
