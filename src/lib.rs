@@ -34,6 +34,7 @@ mod images;
 mod jobs;
 mod keymap;
 mod list_columns;
+mod markdown;
 mod open_with;
 mod pane_sizes;
 mod places;

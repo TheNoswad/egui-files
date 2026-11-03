@@ -14,7 +14,6 @@
 - [ ] sftp etc
 - [ ] google drive
 - [ ] proton drive
-- [ ] Markdown renderer
 - [ ] CSV viewer
 - [ ] ISO file support
 - [ ] PDF support
@@ -44,6 +43,24 @@
     - [x] Haptic feedback (`src/haptics.rs`): a long press, each item a drag selection takes in, a pinch reaching its smallest or largest size, and a drop onto a folder. Checked on the Pixel (`dumpsys vibrator_manager`): the long press and the selection ticks; not yet the pinch or the drop
     - [ ] Moto G20 (Unisoc T700, Mali-G52, Android 11): noise at the bottom while scrolling with Vulkan, gone with "Disable HW overlays", so its display hardware mishandles the Vulkan driver's buffers. Settings → Appearance → Renderer → OpenGL is the workaround (checked on the Pixel that OpenGL runs); confirm it fixes the G20, and if so consider OpenGL by default on such phones
     - [ ] Haptics on Windows: `InputHapticsManager` (`Windows.Devices.Haptics`, SDK 10.0.28000, for haptic touchpads, mice and pens) once the `windows` crate has it (0.62.2 doesn't). Linux has no API for it
+
+## Markdown
+
+`src/markdown/`: `parse` (pulldown-cmark to blocks with source offsets), `layout` (blocks at a width, to a flat list of items), `view` (draws what's on screen, clicks), `images`, `links`. The editor tab shows it in Source, Split and Preview. The source is the only document: anything that changes it is a splice of its bytes.
+
+- [x] Renderer: CommonMark, GFM, footnotes, alerts and callouts, frontmatter, definition lists, sub/superscript, heading ids, wikilinks, highlights, tags, emoji shortcodes
+- [x] Preview and Split, with scrolling kept together; Open reads, Edit edits; the preview pane renders
+- [x] Links followed in place with Back and Forward; programs are revealed rather than run
+- [x] Local and remote pictures, SVG included; remote ones behind a setting, by default asked for each document
+- [ ] Phase 2, editing aids: formatting commands, table editing, outline, find in the rendered view, word count, pasted and dropped images, a picture's lightbox
+- [ ] Phase 3: math and Mermaid (their source is shown until then)
+- [ ] Phase 4: Live view
+- [ ] Phase 5: WYSIWYG
+- [ ] Phase 6: updating links in documents when files move in the app
+- [ ] Raw HTML: a subset (img, br, details/summary, kbd, sub/sup, center); shown as written, dimmed, until then
+- [ ] Export (HTML, rich text, PDF)
+- [ ] Text selection in rendered documents on touchscreens (dragging scrolls there)
+- [ ] Check on a real Android device: links opening through `android::open_url` (compiled, never run), and touch in rendered documents (checked with a mouse in the mobile layout)
 
 ## Web demo
 

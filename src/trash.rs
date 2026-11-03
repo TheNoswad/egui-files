@@ -902,6 +902,7 @@ mod tests {
             images: ImageCache::new(&ctx),
             videos: crate::video::Videos::new(&ctx),
             texts: TextCache::default(),
+            markdown_images: Default::default(),
             jobs: Jobs::new(&ctx),
             archives: crate::archive::Listings::new(&ctx),
             archive_prefs: Default::default(),

@@ -301,6 +301,17 @@ fn appearance(ui: &mut Ui, app: &mut Access) {
     ui.menu_button(format!("{} Syntax colors", icon::PALETTE), |ui| {
         app.shared.editor.menu_ui(ui);
     });
+
+    group(ui, "Markdown");
+    {
+        use crate::markdown::RemoteImages;
+        let remote = &mut app.shared.editor.markdown.remote_images;
+        ui.label("Pictures on other servers")
+            .on_hover_text("Fetching a picture tells its server that the document is being read");
+        ui.radio_value(remote, RemoteImages::Ask, "Ask for each document");
+        ui.radio_value(remote, RemoteImages::Always, "Always load");
+        ui.radio_value(remote, RemoteImages::Never, "Never load");
+    }
 }
 
 fn window_buttons(ui: &mut Ui, prefs: &mut crate::window_buttons::Prefs) {

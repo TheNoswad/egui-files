@@ -1042,6 +1042,7 @@ mod tests {
             images: ImageCache::new(ctx),
             videos: Videos::new(ctx),
             texts: TextCache::default(),
+            markdown_images: Default::default(),
             jobs: Jobs::new(ctx),
             archives: Listings::new(ctx),
             archive_prefs: Prefs::default(),

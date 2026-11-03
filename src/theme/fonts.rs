@@ -4,6 +4,33 @@ use std::sync::{Arc, OnceLock};
 
 use egui::{FontData, FontDefinitions, FontFamily};
 
+/// The font families of rendered documents, which have real bold and italic.
+pub const DOC_REGULAR: &str = "doc-regular";
+pub const DOC_BOLD: &str = "doc-bold";
+pub const DOC_ITALIC: &str = "doc-italic";
+pub const DOC_BOLD_ITALIC: &str = "doc-bold-italic";
+
+pub const INTER_REGULAR: &[u8] = include_bytes!("../../assets/fonts/inter/Inter-Regular.ttf");
+pub const INTER_BOLD: &[u8] = include_bytes!("../../assets/fonts/inter/Inter-Bold.ttf");
+const INTER_ITALIC: &[u8] = include_bytes!("../../assets/fonts/inter/Inter-Italic.ttf");
+const INTER_BOLD_ITALIC: &[u8] = include_bytes!("../../assets/fonts/inter/Inter-BoldItalic.ttf");
+
+/// Goes up with each change of fonts: what's laid out with the old ones,
+/// and kept, is laid out again.
+pub fn generation(ctx: &egui::Context) -> u64 {
+    ctx.data(|d| d.get_temp(generation_id())).unwrap_or(0)
+}
+
+fn generation_id() -> egui::Id {
+    egui::Id::new("font-generation")
+}
+
+fn set_fonts(ctx: &egui::Context, fonts: FontDefinitions) {
+    ctx.set_fonts(fonts);
+    let next = generation(ctx) + 1;
+    ctx.data_mut(|d| d.insert_temp(generation_id(), next));
+}
+
 /// The installed font families, found on a background thread since scanning
 /// the system's fonts takes a moment.
 #[derive(Default)]
@@ -76,9 +103,9 @@ impl SystemFonts {
             self.start(ctx);
             // Keep egui's fonts until the system's have been found.
             let Some(db) = self.db.get() else { return };
-            ctx.set_fonts(definitions(db, ui, mono));
+            set_fonts(ctx, definitions(db, ui, mono));
         } else if self.installed.is_some() {
-            ctx.set_fonts(definitions(&fontdb::Database::new(), None, None));
+            set_fonts(ctx, definitions(&fontdb::Database::new(), None, None));
         }
         self.installed = Some(wanted);
     }
@@ -101,7 +128,92 @@ pub fn definitions(db: &fontdb::Database, ui: Option<&str>, mono: Option<&str>) 
         fonts.font_data.insert(key.clone(), Arc::new(data));
         fonts.families.entry(family).or_default().insert(0, key);
     }
+    document_fonts(&mut fonts, db, ui);
     fonts
+}
+
+/// The families of rendered documents: the UI font's own styles where it has
+/// them, then Inter, then whatever else the UI falls back on, like emoji.
+/// Icons aren't reached this way: Inter has glyphs of its own where they are,
+/// so draw them in `FontFamily::Proportional`.
+fn document_fonts(fonts: &mut FontDefinitions, db: &fontdb::Database, ui: Option<&str>) {
+    let fallbacks = fonts
+        .families
+        .get(&FontFamily::Proportional)
+        .cloned()
+        .unwrap_or_default();
+    let styles = [
+        (
+            DOC_REGULAR,
+            INTER_REGULAR,
+            fontdb::Weight::NORMAL,
+            fontdb::Style::Normal,
+        ),
+        (
+            DOC_BOLD,
+            INTER_BOLD,
+            fontdb::Weight::BOLD,
+            fontdb::Style::Normal,
+        ),
+        (
+            DOC_ITALIC,
+            INTER_ITALIC,
+            fontdb::Weight::NORMAL,
+            fontdb::Style::Italic,
+        ),
+        (
+            DOC_BOLD_ITALIC,
+            INTER_BOLD_ITALIC,
+            fontdb::Weight::BOLD,
+            fontdb::Style::Italic,
+        ),
+    ];
+    for (family, bytes, weight, style) in styles {
+        let mut chain = Vec::new();
+        if let Some(name) = ui
+            && let Some(data) = load_style(db, name, weight, style)
+        {
+            let key = format!("system:{name}:{family}");
+            fonts.font_data.insert(key.clone(), Arc::new(data));
+            chain.push(key);
+        }
+        let inter = format!("inter:{family}");
+        fonts
+            .font_data
+            .insert(inter.clone(), Arc::new(FontData::from_static(bytes)));
+        chain.push(inter);
+        chain.extend(fallbacks.iter().cloned());
+        fonts
+            .families
+            .insert(FontFamily::Name(family.into()), chain);
+    }
+}
+
+/// A family's face in this style, only if it really has one: asking for an
+/// italic gets the upright face of a family without any.
+fn load_style(
+    db: &fontdb::Database,
+    family: &str,
+    weight: fontdb::Weight,
+    style: fontdb::Style,
+) -> Option<FontData> {
+    let id = db.query(&fontdb::Query {
+        families: &[fontdb::Family::Name(family)],
+        weight,
+        style,
+        ..fontdb::Query::default()
+    })?;
+    let face = db.face(id)?;
+    let bold_enough = (weight == fontdb::Weight::BOLD) == (face.weight.0 >= 600);
+    let slanted = (style == fontdb::Style::Italic) == (face.style != fontdb::Style::Normal);
+    if !bold_enough || !slanted {
+        return None;
+    }
+    db.with_face_data(id, |data, index| {
+        let mut font = FontData::from_owned(data.to_vec());
+        font.index = index;
+        font
+    })
 }
 
 fn load(db: &fontdb::Database, family: &str) -> Option<FontData> {

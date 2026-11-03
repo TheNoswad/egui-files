@@ -30,7 +30,10 @@ use self::{
     highlight::{Highlighter, LineSpans, ThemeColors},
     ops::{Edit, Indent},
 };
-use crate::tab::Shared;
+use crate::{
+    markdown::{self, Click, MdView, Mode, Target, view::toggle_task},
+    tab::{AppAction, Shared},
+};
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -40,6 +43,7 @@ pub struct Prefs {
     /// Use the app theme's suggestion instead of the named theme.
     pub dark_matches_app: bool,
     pub light_matches_app: bool,
+    pub markdown: markdown::Prefs,
 }
 
 impl Default for Prefs {
@@ -49,6 +53,7 @@ impl Default for Prefs {
             light_theme: highlight::DEFAULT_LIGHT_THEME.to_owned(),
             dark_matches_app: true,
             light_matches_app: true,
+            markdown: markdown::Prefs::default(),
         }
     }
 }
@@ -120,9 +125,15 @@ pub struct EditorTab {
     /// Chosen by hand instead of detected.
     #[serde(default)]
     syntax: Option<String>,
+    /// How a markdown document is shown; other files are always source.
+    #[serde(default)]
+    mode: Mode,
 
     #[serde(skip)]
     doc: Doc,
+    /// What's rendered, for a markdown document.
+    #[serde(skip)]
+    md: MarkdownState,
     #[serde(skip)]
     find: Option<FindBar>,
     #[serde(skip)]
@@ -386,6 +397,42 @@ impl RowIndex {
     }
 }
 
+/// A document in its place in the links followed.
+struct Visited {
+    path: PathBuf,
+    offset: f32,
+}
+
+/// What a tab keeps about the document it renders.
+#[derive(Default)]
+struct MarkdownState {
+    view: MdView,
+    back: Vec<Visited>,
+    forward: Vec<Visited>,
+    /// Scroll here once the document is loaded and laid out.
+    anchor: Option<String>,
+    restore_offset: Option<f32>,
+    /// The documents whose remote pictures the user chose to load.
+    allow_remote: HashSet<PathBuf>,
+    /// The rendered pane moved by itself: the source pane follows it.
+    preview_jumped: bool,
+    /// Where the panes of Split should go next frame.
+    preview_to: Option<f32>,
+    source_to: Option<f32>,
+    /// Where they were last frame, to tell which moved.
+    preview_was: f32,
+    source_was: f32,
+    version_was: u64,
+}
+
+/// Where the source pane is scrolled, for keeping the panes together.
+struct SourceScroll {
+    offset: f32,
+    viewport: f32,
+    content: f32,
+    galley: Arc<Galley>,
+}
+
 struct FindBar {
     query: String,
     replacement: String,
@@ -419,16 +466,22 @@ enum Command {
     Newline,
     Replace { all: bool },
     GoToLine,
+    NextMode,
+    Back,
+    Forward,
 }
 
 impl EditorTab {
     pub fn new(id: u64, path: PathBuf) -> Self {
         Self {
             id,
+            // Markdown is mostly prose, on long lines.
+            wrap: markdown::is_markdown(&path),
             edit: path,
-            wrap: false,
             syntax: None,
+            mode: Mode::Preview,
             doc: Doc::Unloaded,
+            md: MarkdownState::default(),
             find: None,
             goto: None,
             select: None,
@@ -439,10 +492,47 @@ impl EditorTab {
         }
     }
 
+    /// A tab for reading a markdown document.
+    pub fn new_markdown(id: u64, path: PathBuf) -> Self {
+        Self {
+            mode: Mode::Preview,
+            focus_text: false,
+            ..Self::new(id, path)
+        }
+    }
+
+    /// Asked to edit the file: a document being read changes to `mode`.
+    pub fn show_for_editing(&mut self, mode: Mode) {
+        if self.is_markdown() && self.mode == Mode::Preview {
+            self.mode = mode;
+        }
+        self.focus_text = true;
+    }
+
+    /// Scrolls to a heading, once the document is here.
+    pub fn go_to_anchor(&mut self, anchor: Option<String>) {
+        if anchor.is_some() {
+            self.md.anchor = anchor;
+        }
+    }
+
+    /// Whether the file is shown as markdown.
+    fn is_markdown(&self) -> bool {
+        match &self.syntax {
+            Some(syntax) => highlight::syntax_name(syntax) == "Markdown",
+            None => markdown::is_markdown(&self.edit),
+        }
+    }
+
     pub fn title(&self) -> String {
         let name = crate::fs::display_name(&self.edit);
         let dirty = if self.is_dirty() { " ●" } else { "" };
-        format!("{} {name}{dirty}", icon::NOTE_PENCIL)
+        let glyph = if self.is_markdown() && self.mode == Mode::Preview {
+            icon::BOOK_OPEN
+        } else {
+            icon::NOTE_PENCIL
+        };
+        format!("{glyph} {name}{dirty}")
     }
 
     pub fn is_dirty(&self) -> bool {
@@ -595,26 +685,66 @@ impl EditorTab {
 
         let theme = shared.editor.theme(ui).to_owned();
         let syntax = self.syntax.as_deref().unwrap_or(buffer.detected_syntax);
-        update_highlighter(&ctx, buffer, syntax, &theme);
+        let is_markdown = match &self.syntax {
+            Some(syntax) => highlight::syntax_name(syntax) == "Markdown",
+            None => markdown::is_markdown(&self.edit),
+        };
+        let mode = if is_markdown {
+            self.mode.at_width(ui.available_width())
+        } else {
+            Mode::Source
+        };
+        // Colors for source that isn't shown can wait until it is.
+        if mode != Mode::Preview {
+            update_highlighter(&ctx, buffer, syntax, &theme);
+        }
 
         let focused = shared.focused_tab == Some(self.id);
         let text_focused = ctx.memory(|m| m.has_focus(text_id(self.id)));
         let editable = buffer.read_only.is_none();
+        let can_edit_text = mode != Mode::Preview;
         let commands = if focused {
-            shortcuts(&ctx, text_focused && editable)
+            shortcuts(&ctx, text_focused && editable && can_edit_text, is_markdown)
         } else {
             Vec::new()
         };
         for command in commands {
-            self.run(&ctx, command);
+            // What works on the source does nothing while it isn't shown.
+            if can_edit_text
+                || matches!(
+                    command,
+                    Command::Save
+                        | Command::CloseBars
+                        | Command::NextMode
+                        | Command::Back
+                        | Command::Forward
+                )
+            {
+                self.run(&ctx, command);
+            }
         }
 
         let Doc::Ready(buffer) = &mut self.doc else {
             return;
         };
         let mut commands = Vec::new();
+        let width = ui.available_width();
         Panel::top(Id::new(("editor-toolbar", self.id))).show(ui, |ui| {
-            toolbar(ui, buffer, &self.edit, &mut self.wrap, &mut commands)
+            let markdown = is_markdown.then_some(MarkdownBar {
+                mode: &mut self.mode,
+                shown: mode,
+                has_room: width >= markdown::MIN_SPLIT_WIDTH,
+                can_go_back: !self.md.back.is_empty(),
+                can_go_forward: !self.md.forward.is_empty(),
+            });
+            toolbar(
+                ui,
+                buffer,
+                &self.edit,
+                &mut self.wrap,
+                markdown,
+                &mut commands,
+            );
         });
         let mut reload = false;
         if buffer.disk != Disk::InSync || buffer.error.is_some() || buffer.read_only.is_some() {
@@ -645,36 +775,94 @@ impl EditorTab {
             return;
         };
         let colors = ThemeColors::of(&theme, ui.visuals());
-        CentralPanel::default()
-            .frame(egui::Frame::NONE.fill(colors.background))
-            .show(ui, |ui| {
-                let id = text_id(self.id);
-                if let Some(range) = self.select.take() {
-                    let mut state = TextEditState::load(&ctx, id).unwrap_or_default();
-                    state.cursor.set_char_range(Some(CCursorRange::two(
-                        CCursor::new(range.start),
-                        CCursor::new(range.end),
-                    )));
-                    state.store(&ctx, id);
-                }
-                if std::mem::take(&mut self.focus_text) {
-                    ctx.memory_mut(|m| m.request_focus(id));
-                }
-                text_area(
+        if mode != Mode::Source {
+            buffer.view.sync(&buffer.text);
+            self.md.view.sync(&ctx, &buffer.text);
+        }
+        let mut clicks = Vec::new();
+        let mut preview_rect = None;
+        if mode != Mode::Source {
+            let mut show = |ui: &mut Ui| {
+                preview_rect = Some(ui.max_rect());
+                clicks = rendered(
                     ui,
-                    buffer,
-                    TextArea {
-                        id,
-                        wrap: self.wrap,
+                    &mut self.md,
+                    Rendered {
+                        id: Id::new(("editor-rendered", self.id)),
+                        path: &self.edit,
+                        theme: &theme,
                         colors: &colors,
-                        matches: self
-                            .find
-                            .as_ref()
-                            .map(|f| (f.matches.as_slice(), f.current)),
-                        scroll_to_cursor: std::mem::take(&mut self.scroll_to_cursor),
+                        editable,
+                        prefs: &shared.editor.markdown,
+                        keyboard: focused && !text_focused,
                     },
+                    &mut shared.markdown_images,
                 );
-            });
+            };
+            if mode == Mode::Split {
+                Panel::right(Id::new(("editor-rendered-pane", self.id)))
+                    .resizable(true)
+                    .default_size(width / 2.0)
+                    .min_size(200.0)
+                    .max_size((width - 200.0).max(200.0))
+                    .frame(egui::Frame::NONE.fill(ui.visuals().panel_fill))
+                    .show(ui, |ui| show(ui));
+            } else {
+                CentralPanel::default()
+                    .frame(egui::Frame::NONE.fill(ui.visuals().panel_fill))
+                    .show(ui, |ui| show(ui));
+            }
+        }
+        let mut source_scroll = None;
+        if mode != Mode::Preview {
+            CentralPanel::default()
+                .frame(egui::Frame::NONE.fill(colors.background))
+                .show(ui, |ui| {
+                    let id = text_id(self.id);
+                    if let Some(range) = self.select.take() {
+                        let mut state = TextEditState::load(&ctx, id).unwrap_or_default();
+                        state.cursor.set_char_range(Some(CCursorRange::two(
+                            CCursor::new(range.start),
+                            CCursor::new(range.end),
+                        )));
+                        state.store(&ctx, id);
+                    }
+                    if std::mem::take(&mut self.focus_text) {
+                        ctx.memory_mut(|m| m.request_focus(id));
+                    }
+                    source_scroll = text_area(
+                        ui,
+                        buffer,
+                        TextArea {
+                            id,
+                            wrap: self.wrap,
+                            colors: &colors,
+                            matches: self
+                                .find
+                                .as_ref()
+                                .map(|f| (f.matches.as_slice(), f.current)),
+                            scroll_to_cursor: std::mem::take(&mut self.scroll_to_cursor),
+                            offset: self.md.source_to.take(),
+                        },
+                    );
+                });
+        }
+        if mode == Mode::Split {
+            // What was typed reaches the rendered pane next frame.
+            if self.md.version_was != buffer.view.version {
+                ctx.request_repaint();
+            }
+            if let (Some(source), Some(rect)) = (&source_scroll, preview_rect) {
+                sync_panes(
+                    &ctx,
+                    &mut self.md,
+                    &buffer.text,
+                    buffer.view.version,
+                    source,
+                    rect,
+                );
+            }
+        }
 
         if buffer.view.version != buffer.dirty_version {
             buffer.dirty = buffer.text != buffer.saved;
@@ -715,6 +903,123 @@ impl EditorTab {
         if std::mem::take(&mut self.pending_find_next) {
             self.find_next(&ctx, false);
         }
+        for click in clicks {
+            self.clicked(&ctx, click, &mut shared.app_actions);
+        }
+    }
+
+    /// Acts on a click in the rendered document.
+    fn clicked(&mut self, ctx: &Context, click: Click, actions: &mut Vec<AppAction>) {
+        match click {
+            Click::Task(task) => {
+                let Doc::Ready(buffer) = &self.doc else {
+                    return;
+                };
+                let Some((range, mark)) = toggle_task(&buffer.text, &task) else {
+                    return;
+                };
+                let mut text = buffer.text.clone();
+                text.replace_range(range, mark);
+                // A task's mark doesn't change the count of chars before the cursor.
+                let selection = self.selection(ctx);
+                self.apply_edit(ctx, Edit { text, selection });
+                self.scroll_to_cursor = false;
+            }
+            Click::Link { link, new_tab } => {
+                let dir = self.dir().unwrap_or_default();
+                let target = markdown::links::resolve(&link, &dir);
+                self.follow(ctx, target, new_tab, actions);
+            }
+        }
+    }
+
+    fn follow(
+        &mut self,
+        ctx: &Context,
+        target: Target,
+        new_tab: bool,
+        actions: &mut Vec<AppAction>,
+    ) {
+        let problem = match target {
+            Target::Web(url) => {
+                markdown::links::open_web(ctx, url);
+                None
+            }
+            Target::Anchor(anchor) => {
+                self.md.anchor = Some(anchor);
+                None
+            }
+            Target::Document(path, anchor) => {
+                if !disk::path_exists(&path) {
+                    Some(format!("{} doesn't exist.", path.display()))
+                } else if new_tab || self.is_dirty() {
+                    // Going elsewhere in this tab would lose unsaved changes.
+                    actions.push(AppAction::OpenMarkdown { path, anchor });
+                    None
+                } else {
+                    self.go_to(path, anchor, 0.0, true);
+                    None
+                }
+            }
+            Target::File(path) => match markdown::links::open_local(&path) {
+                markdown::links::Opened::Done => None,
+                markdown::links::Opened::Missing => {
+                    Some(format!("{} doesn't exist.", path.display()))
+                }
+                markdown::links::Opened::Reveal => {
+                    actions.push(AppAction::Reveal(path));
+                    None
+                }
+                markdown::links::Opened::Archive => {
+                    actions.push(AppAction::OpenArchive(path));
+                    None
+                }
+                markdown::links::Opened::Failed(err) => {
+                    Some(format!("Could not open {}: {err}", path.display()))
+                }
+            },
+            Target::Refused => Some("This link can't be followed.".to_owned()),
+        };
+        if let (Some(problem), Doc::Ready(buffer)) = (problem, &mut self.doc) {
+            buffer.error = Some(problem);
+        }
+    }
+
+    /// Shows another document in this tab.
+    fn go_to(&mut self, path: PathBuf, anchor: Option<String>, offset: f32, remember: bool) {
+        if remember {
+            self.md.back.push(Visited {
+                path: self.edit.clone(),
+                offset: self.md.view.offset,
+            });
+            self.md.forward.clear();
+        }
+        self.edit = path;
+        self.doc = Doc::Unloaded;
+        self.syntax = None;
+        self.md.view = MdView::default();
+        self.md.anchor = anchor;
+        self.md.restore_offset = (offset > 0.0).then_some(offset);
+    }
+
+    fn go_back(&mut self, back: bool) {
+        // Unsaved changes stay until they're saved or the tab is closed.
+        if self.is_dirty() {
+            return;
+        }
+        let (from, to) = if back {
+            (&mut self.md.back, &mut self.md.forward)
+        } else {
+            (&mut self.md.forward, &mut self.md.back)
+        };
+        let Some(visited) = from.pop() else {
+            return;
+        };
+        to.push(Visited {
+            path: self.edit.clone(),
+            offset: self.md.view.offset,
+        });
+        self.go_to(visited.path, None, visited.offset, false);
     }
 
     fn selection(&self, ctx: &Context) -> Range<usize> {
@@ -758,6 +1063,15 @@ impl EditorTab {
             Command::Save => {
                 let _ = self.save();
             }
+            Command::NextMode => {
+                self.mode = match self.mode {
+                    Mode::Source => Mode::Split,
+                    Mode::Split => Mode::Preview,
+                    Mode::Preview => Mode::Source,
+                };
+            }
+            Command::Back => self.go_back(true),
+            Command::Forward => self.go_back(false),
             Command::Find { replace } => {
                 let selected = (selection.start != selection.end)
                     .then(|| {
@@ -960,10 +1274,27 @@ fn update_highlighter(ctx: &Context, buffer: &mut Buffer, syntax: &str, theme: &
 }
 
 /// Keys the editor handles itself, taken before the text field sees them.
-fn shortcuts(ctx: &Context, text_focused: bool) -> Vec<Command> {
+fn shortcuts(ctx: &Context, text_focused: bool, is_markdown: bool) -> Vec<Command> {
+    use crate::keymap::Command as Global;
     let cmd = Modifiers::COMMAND;
+    let keymap = crate::keymap::get(ctx);
     ctx.input_mut(|i| {
         let mut commands = Vec::new();
+        if is_markdown {
+            if i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::V) {
+                commands.push(Command::NextMode);
+            }
+            if keymap.pressed(i, Global::Back)
+                || i.pointer.button_pressed(egui::PointerButton::Extra1)
+            {
+                commands.push(Command::Back);
+            }
+            if keymap.pressed(i, Global::Forward)
+                || i.pointer.button_pressed(egui::PointerButton::Extra2)
+            {
+                commands.push(Command::Forward);
+            }
+        }
         let mut key = |mods, key, command| {
             if i.consume_key(mods, key) {
                 commands.push(command);
@@ -1012,11 +1343,22 @@ fn shortcuts(ctx: &Context, text_focused: bool) -> Vec<Command> {
     })
 }
 
+/// The toolbar's part for a markdown document.
+struct MarkdownBar<'a> {
+    mode: &'a mut Mode,
+    /// What's showing, which may differ from `mode` if there's no room.
+    shown: Mode,
+    has_room: bool,
+    can_go_back: bool,
+    can_go_forward: bool,
+}
+
 fn toolbar(
     ui: &mut Ui,
     buffer: &Buffer,
     path: &Path,
     wrap: &mut bool,
+    markdown: Option<MarkdownBar<'_>>,
     commands: &mut Vec<Command>,
 ) {
     ui.horizontal(|ui| {
@@ -1034,19 +1376,62 @@ fn toolbar(
         ) {
             commands.push(Command::Save);
         }
-        ui.separator();
-        if button(ui, true, icon::MAGNIFYING_GLASS, "Find (Ctrl+F)") {
-            commands.push(Command::Find { replace: false });
+        let mut source_shown = true;
+        if let Some(markdown) = markdown {
+            source_shown = markdown.shown != Mode::Preview;
+            ui.separator();
+            if button(
+                ui,
+                markdown.can_go_back,
+                icon::ARROW_LEFT,
+                "Back (Alt+Left)",
+            ) {
+                commands.push(Command::Back);
+            }
+            if button(
+                ui,
+                markdown.can_go_forward,
+                icon::ARROW_RIGHT,
+                "Forward (Alt+Right)",
+            ) {
+                commands.push(Command::Forward);
+            }
+            ui.separator();
+            let modes = [
+                (Mode::Source, icon::CODE),
+                (Mode::Split, icon::COLUMNS),
+                (Mode::Preview, icon::BOOK_OPEN),
+            ];
+            for (mode, glyph) in modes {
+                if mode == Mode::Split && !markdown.has_room {
+                    continue;
+                }
+                let selected = markdown.shown == mode;
+                let label = RichText::new(glyph).size(16.0);
+                if ui
+                    .selectable_label(selected, label)
+                    .on_hover_text(format!("{} (Ctrl+Shift+V to change)", mode.label()))
+                    .clicked()
+                {
+                    *markdown.mode = mode;
+                }
+            }
         }
-        if button(ui, editable, icon::SWAP, "Replace (Ctrl+H)") {
-            commands.push(Command::Find { replace: true });
+        if source_shown {
+            ui.separator();
+            if button(ui, true, icon::MAGNIFYING_GLASS, "Find (Ctrl+F)") {
+                commands.push(Command::Find { replace: false });
+            }
+            if button(ui, editable, icon::SWAP, "Replace (Ctrl+H)") {
+                commands.push(Command::Find { replace: true });
+            }
+            if button(ui, true, icon::LIST_NUMBERS, "Go to line (Ctrl+G)") {
+                commands.push(Command::GoTo);
+            }
+            ui.separator();
+            ui.toggle_value(wrap, RichText::new(icon::TEXT_ALIGN_LEFT).size(16.0))
+                .on_hover_text("Wrap long lines (Alt+Z)");
         }
-        if button(ui, true, icon::LIST_NUMBERS, "Go to line (Ctrl+G)") {
-            commands.push(Command::GoTo);
-        }
-        ui.separator();
-        ui.toggle_value(wrap, RichText::new(icon::TEXT_ALIGN_LEFT).size(16.0))
-            .on_hover_text("Wrap long lines (Alt+Z)");
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.add(egui::Label::new(RichText::new(path.display().to_string()).weak()).truncate());
         });
@@ -1265,16 +1650,19 @@ struct TextArea<'a> {
     /// Find matches, and which one is selected.
     matches: Option<(&'a [Range<usize>], Option<usize>)>,
     scroll_to_cursor: bool,
+    /// Scroll to this height.
+    offset: Option<f32>,
 }
 
 /// The text with line numbers beside it.
-fn text_area(ui: &mut Ui, buffer: &mut Buffer, area: TextArea<'_>) {
+fn text_area(ui: &mut Ui, buffer: &mut Buffer, area: TextArea<'_>) -> Option<SourceScroll> {
     let TextArea {
         id,
         wrap,
         colors,
         matches,
         scroll_to_cursor,
+        offset,
     } = area;
     let font = TextStyle::Monospace.resolve(ui.style());
     let rect = ui.max_rect();
@@ -1292,6 +1680,7 @@ fn text_area(ui: &mut Ui, buffer: &mut Buffer, area: TextArea<'_>) {
     let editable = buffer.read_only.is_none();
     let mut placed = None;
     let mut viewport = text_rect;
+    let mut scrolled = (0.0, 0.0);
     ui.scope_builder(UiBuilder::new().max_rect(text_rect), |ui| {
         let visuals = ui.visuals_mut();
         if let Some(caret) = colors.caret {
@@ -1304,6 +1693,10 @@ fn text_area(ui: &mut Ui, buffer: &mut Buffer, area: TextArea<'_>) {
             ScrollArea::vertical()
         } else {
             ScrollArea::both()
+        };
+        let scroll = match offset {
+            Some(offset) => scroll.vertical_scroll_offset(offset),
+            None => scroll,
         };
         let output = scroll
             .id_salt(("editor-scroll", id))
@@ -1391,10 +1784,15 @@ fn text_area(ui: &mut Ui, buffer: &mut Buffer, area: TextArea<'_>) {
                 (galley, origin, cursor)
             });
         viewport = output.inner_rect;
+        scrolled = (output.state.offset.y, output.content_size.y);
         placed = Some(output.inner);
     });
-    let Some((galley, origin, cursor)) = placed else {
-        return;
+    let (galley, origin, cursor) = placed?;
+    let source_scroll = SourceScroll {
+        offset: scrolled.0,
+        viewport: viewport.height(),
+        content: scrolled.1,
+        galley: galley.clone(),
     };
 
     // Line numbers for the rows on screen.
@@ -1439,6 +1837,168 @@ fn text_area(ui: &mut Ui, buffer: &mut Buffer, area: TextArea<'_>) {
             },
         );
     }
+    Some(source_scroll)
+}
+
+struct Rendered<'a> {
+    id: Id,
+    path: &'a Path,
+    theme: &'a str,
+    colors: &'a ThemeColors,
+    editable: bool,
+    prefs: &'a markdown::Prefs,
+    /// Takes the keys that scroll, as no text field does.
+    keyboard: bool,
+}
+
+/// The rendered document, and the bar offering its remote pictures.
+fn rendered(
+    ui: &mut Ui,
+    md: &mut MarkdownState,
+    rendered: Rendered<'_>,
+    images: &mut markdown::Images,
+) -> Vec<Click> {
+    let allow_remote = match rendered.prefs.remote_images {
+        markdown::RemoteImages::Always => true,
+        markdown::RemoteImages::Never => false,
+        markdown::RemoteImages::Ask => md.allow_remote.contains(rendered.path),
+    };
+    if md.view.has_remote_images()
+        && !allow_remote
+        && rendered.prefs.remote_images == markdown::RemoteImages::Ask
+    {
+        Panel::top(rendered.id.with("remote-images")).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                if ui
+                    .button(format!("{} Load", icon::IMAGE))
+                    .on_hover_text("Fetching them tells those servers it's being read")
+                    .clicked()
+                {
+                    md.allow_remote.insert(rendered.path.to_path_buf());
+                }
+                ui.add(
+                    egui::Label::new(
+                        RichText::new("Pictures on other servers aren't loaded.").weak(),
+                    )
+                    .truncate(),
+                );
+            });
+        });
+    }
+    let dir = markdown::view::base_dir(rendered.path);
+    let mut scroll_to = md.preview_to.take();
+    if let Some(anchor) = &md.anchor
+        && !md.view.layout().items.is_empty()
+    {
+        scroll_to = md.view.anchor_offset(anchor).or(scroll_to);
+        md.anchor = None;
+        md.preview_jumped = true;
+    }
+    if let Some(offset) = md.restore_offset
+        && !md.view.layout().items.is_empty()
+    {
+        scroll_to = Some(offset);
+        md.restore_offset = None;
+        md.preview_jumped = true;
+    }
+    if rendered.keyboard {
+        scroll_to = scroll_keys(ui.ctx(), &md.view).or(scroll_to);
+    }
+    let options = markdown::Options {
+        dir: &dir,
+        syntax_theme: rendered.theme,
+        code_fg: rendered.colors.foreground,
+        code_bg: rendered.colors.background,
+        allow_remote,
+        editable: rendered.editable,
+        scroll_to,
+        compact: false,
+    };
+    md.view.show(ui, rendered.id, &options, images)
+}
+
+/// Where the scrolling keys go from here, if one was pressed.
+fn scroll_keys(ctx: &Context, view: &MdView) -> Option<f32> {
+    if ctx.egui_wants_keyboard_input() {
+        return None;
+    }
+    let (line, page) = (40.0, (view.viewport_height - 40.0).max(40.0));
+    let delta = ctx.input(|i| {
+        let pressed = |key| i.key_pressed(key) && i.modifiers.is_none();
+        if pressed(Key::ArrowDown) {
+            Some(line)
+        } else if pressed(Key::ArrowUp) {
+            Some(-line)
+        } else if pressed(Key::PageDown) || pressed(Key::Space) {
+            Some(page)
+        } else if pressed(Key::PageUp) {
+            Some(-page)
+        } else if pressed(Key::Home) {
+            Some(f32::NEG_INFINITY)
+        } else if pressed(Key::End) {
+            Some(f32::INFINITY)
+        } else {
+            None
+        }
+    })?;
+    let bottom = (view.content_height() - view.viewport_height).max(0.0);
+    Some((view.offset + delta).clamp(0.0, bottom))
+}
+
+/// Keeps Split's panes showing the same part of the document: the pane under
+/// the pointer leads, and the source pane leads when it's being typed in.
+fn sync_panes(
+    ctx: &Context,
+    md: &mut MarkdownState,
+    text: &str,
+    version: u64,
+    source: &SourceScroll,
+    preview_rect: Rect,
+) {
+    let jumped = std::mem::take(&mut md.preview_jumped);
+    let preview_leads = jumped
+        || ctx
+            .pointer_hover_pos()
+            .is_some_and(|pointer| preview_rect.contains(pointer));
+    let source_moved = (source.offset - md.source_was).abs() > 0.5;
+    let preview_moved = (md.view.offset - md.preview_was).abs() > 0.5;
+    let edited = md.version_was != version;
+    md.version_was = version;
+    let view = &md.view;
+    if preview_leads && (preview_moved || jumped) {
+        let bottom = (view.content_height() - view.viewport_height).max(0.0);
+        let along_bottom = view.offset >= bottom - 1.0;
+        let to = if along_bottom {
+            (source.content - source.viewport).max(0.0)
+        } else {
+            let byte = view.source_of_offset(view.offset);
+            let chars = text.get(..byte).map_or(0, |t| t.chars().count());
+            source.galley.pos_from_cursor(CCursor::new(chars)).min.y
+        };
+        md.source_to = Some(to);
+        md.source_was = to;
+        md.preview_was = view.offset;
+        ctx.request_repaint();
+    } else if !preview_leads && (source_moved || edited) {
+        let along_bottom = source.offset >= source.content - source.viewport - 1.0;
+        let to = if along_bottom && source.offset > 0.0 {
+            (view.content_height() - view.viewport_height).max(0.0)
+        } else {
+            let char = source
+                .galley
+                .cursor_from_pos(egui::vec2(0.0, source.offset))
+                .index
+                .0;
+            view.offset_of_source(ops::char_to_byte(text, char))
+        };
+        md.preview_to = Some(to);
+        md.preview_was = to;
+        md.source_was = source.offset;
+        ctx.request_repaint();
+    } else {
+        md.source_was = source.offset;
+        md.preview_was = view.offset;
+    }
 }
 
 #[cfg(test)]
@@ -1460,11 +2020,15 @@ mod tests {
 
     impl Harness {
         fn new(name: &str, contents: &str) -> Self {
+            Self::with_file(name, "main.rs", contents)
+        }
+
+        fn with_file(name: &str, file: &str, contents: &str) -> Self {
             let dir = std::env::temp_dir()
                 .join(format!("egui-files-editor-{name}-{}", std::process::id()));
             let _ = disk::remove_dir_all(&dir);
             disk::create_dir_all(&dir).unwrap();
-            let path = dir.join("main.rs");
+            let path = dir.join(file);
             disk::write(&path, contents).unwrap();
             let ctx = Context::default();
             let shared = Shared {
@@ -1480,6 +2044,7 @@ mod tests {
                 images: ImageCache::new(&ctx),
                 videos: Videos::new(&ctx),
                 texts: TextCache::default(),
+                markdown_images: Default::default(),
                 jobs: Jobs::new(&ctx),
                 archives: crate::archive::Listings::new(&ctx),
                 archive_prefs: Default::default(),
@@ -1564,6 +2129,172 @@ mod tests {
     }
 
     const CODE: &str = "fn main() {\n    let x = 1;\n}\n";
+
+    fn press(key: Key, modifiers: Modifiers) -> Event {
+        Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    fn text_of(h: &Harness) -> String {
+        match &h.tab.doc {
+            Doc::Ready(buffer) => buffer.text.clone(),
+            _ => panic!("not loaded"),
+        }
+    }
+
+    #[test]
+    fn keys_in_preview_leave_the_hidden_text_alone() {
+        let source = "- one\n- two\n";
+        let mut h = Harness::with_file("md-keys", "note.md", source);
+        h.tab.mode = Mode::Preview;
+        h.tab.focus_text = true;
+        h.frame(vec![]);
+        h.frame(vec![
+            Event::Text("x".into()),
+            press(Key::Enter, Modifiers::NONE),
+            press(Key::Tab, Modifiers::NONE),
+            press(Key::Slash, Modifiers::COMMAND),
+            press(Key::Backspace, Modifiers::NONE),
+        ]);
+        h.frame(vec![]);
+        assert_eq!(text_of(&h), source);
+        assert!(!h.tab.is_dirty());
+    }
+
+    #[test]
+    fn other_files_stay_source_whatever_their_mode_says() {
+        let mut h = Harness::new("md-other", "fn main() {}\n");
+        h.tab.mode = Mode::Preview;
+        h.frame(vec![]);
+        h.frame(vec![Event::Text("x".into())]);
+        h.frame(vec![]);
+        assert!(text_of(&h).contains('x'), "still edits");
+    }
+
+    #[test]
+    fn ticking_a_task_changes_its_mark_and_nothing_else() {
+        let source = "# T\n\n- [ ] é one\n- [x] two  \n\t\nend\n";
+        let mut h = Harness::with_file("md-task", "note.md", source);
+        h.tab.mode = Mode::Preview;
+        h.frame(vec![]);
+        h.frame(vec![]);
+        let at = source.find("[ ]").unwrap();
+        let ctx = h.ctx.clone();
+        h.tab.clicked(
+            &ctx,
+            Click::Task(markdown::parse::Task {
+                checked: false,
+                source: at..at + 3,
+            }),
+            &mut Vec::new(),
+        );
+        h.frame(vec![]);
+        h.frame(vec![]);
+        assert_eq!(text_of(&h), source.replacen("[ ]", "[x]", 1));
+        assert!(h.tab.is_dirty());
+    }
+
+    fn link(url: &str) -> Click {
+        Click::Link {
+            link: markdown::parse::Link {
+                url: url.to_owned(),
+                title: String::new(),
+                wiki: false,
+            },
+            new_tab: false,
+        }
+    }
+
+    #[test]
+    fn links_go_to_documents_and_back() {
+        let mut h = Harness::with_file("md-links", "a.md", "# A\n");
+        let other = h.dir.join("b.md");
+        disk::write(&other, "# B\n").unwrap();
+        h.tab.mode = Mode::Preview;
+        h.frame(vec![]);
+        let ctx = h.ctx.clone();
+        let mut actions = Vec::new();
+
+        h.tab.clicked(&ctx, link("nowhere.md"), &mut actions);
+        assert_eq!(h.tab.edit, h.path, "a missing document goes nowhere");
+        assert!(matches!(&h.tab.doc, Doc::Ready(b) if b.error.is_some()));
+
+        h.tab.clicked(&ctx, link("b.md"), &mut actions);
+        assert_eq!(h.tab.edit, other);
+        h.until(|h| matches!(&h.tab.doc, Doc::Ready(b) if b.text == "# B\n"));
+        assert!(actions.is_empty());
+
+        h.tab.go_back(true);
+        assert_eq!(h.tab.edit, h.path);
+        h.until(|h| matches!(&h.tab.doc, Doc::Ready(b) if b.text == "# A\n"));
+        h.tab.go_back(false);
+        assert_eq!(h.tab.edit, other);
+    }
+
+    #[test]
+    fn a_link_leaves_unsaved_changes_in_their_tab() {
+        let mut h = Harness::with_file("md-dirty", "a.md", "# A\n");
+        disk::write(h.dir.join("b.md"), "# B\n").unwrap();
+        h.tab.mode = Mode::Split;
+        h.tab.focus_text = true;
+        h.frame(vec![]);
+        h.frame(vec![Event::Text("x".into())]);
+        h.frame(vec![]);
+        assert!(h.tab.is_dirty());
+        let ctx = h.ctx.clone();
+        let mut actions = Vec::new();
+        h.tab.clicked(&ctx, link("b.md"), &mut actions);
+        assert_eq!(h.tab.edit, h.path);
+        assert!(matches!(
+            actions.as_slice(),
+            [AppAction::OpenMarkdown { path, .. }] if path.ends_with("b.md")
+        ));
+        // And Back doesn't throw them away either.
+        h.tab.md.back.push(Visited {
+            path: h.dir.join("b.md"),
+            offset: 0.0,
+        });
+        h.tab.go_back(true);
+        assert_eq!(h.tab.edit, h.path);
+    }
+
+    #[test]
+    fn a_link_to_a_program_reveals_it() {
+        let mut h = Harness::with_file("md-program", "a.md", "# A\n");
+        disk::write(h.dir.join("setup.bat"), "echo hi\n").unwrap();
+        h.tab.mode = Mode::Preview;
+        h.frame(vec![]);
+        let ctx = h.ctx.clone();
+        let mut actions = Vec::new();
+        h.tab.clicked(&ctx, link("setup.bat"), &mut actions);
+        assert!(matches!(
+            actions.as_slice(),
+            [AppAction::Reveal(path)] if path.ends_with("setup.bat")
+        ));
+    }
+
+    #[test]
+    fn opening_reads_and_editing_edits() {
+        let mut tab = EditorTab::new_markdown(1, "/x/a.md".into());
+        assert_eq!(tab.mode, Mode::Preview);
+        tab.show_for_editing(Mode::Split);
+        assert_eq!(tab.mode, Mode::Split);
+        // Not taken out of what the user chose.
+        tab.show_for_editing(Mode::Source);
+        assert_eq!(tab.mode, Mode::Split);
+        tab.mode = Mode::Source;
+        tab.show_for_editing(Mode::Split);
+        assert_eq!(tab.mode, Mode::Source);
+        // What Edit makes of a new tab.
+        let mut tab = EditorTab::new(1, "/x/a.md".into());
+        tab.show_for_editing(Mode::Split);
+        assert_eq!(tab.mode, Mode::Split);
+    }
 
     #[test]
     fn typing_keeps_indentation_and_saves() {

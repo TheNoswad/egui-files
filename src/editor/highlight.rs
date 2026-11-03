@@ -108,6 +108,14 @@ pub fn detect(path: &std::path::Path, first_line: &str) -> &'static str {
         .map_or(PLAIN_TEXT, |s| s.name.as_str())
 }
 
+/// The syntax a code block's language names: `rust`, `rs`, `sh` and so on.
+pub fn syntax_for_token(token: &str) -> Option<&'static str> {
+    syntaxes()
+        .find_syntax_by_token(token)
+        .map(|syntax| syntax.name.as_str())
+        .filter(|name| *name != PLAIN_TEXT)
+}
+
 /// The bundled syntax's name for `name`, or plain text's if there's none.
 pub fn syntax_name(name: &str) -> &'static str {
     syntax(name).name.as_str()

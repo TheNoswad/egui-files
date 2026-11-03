@@ -18,6 +18,7 @@ use crate::{
     },
     fs::{self, Entry},
     images::{self, ImageCache, Lookup},
+    markdown,
     tab::{Action, Shared},
     video::{self, Videos},
 };
@@ -34,6 +35,8 @@ struct TextPreview {
     truncated: bool,
     syntax: &'static str,
     colors: Option<Colors>,
+    /// Rendered, for a markdown document.
+    markdown: Option<Box<markdown::MdView>>,
 }
 
 /// Syntax colors for a preview, for one theme.
@@ -104,6 +107,7 @@ impl TextCache {
                     text,
                     truncated,
                     colors: None,
+                    markdown: None,
                 });
                 self.entries.len() - 1
             }
@@ -168,6 +172,7 @@ pub fn show(
         texts,
         archives,
         editor: editor_prefs,
+        markdown_images,
         ..
     } = shared;
     let mut dimensions = None;
@@ -194,6 +199,35 @@ pub fn show(
                 }
                 let theme = editor_prefs.theme(ui);
                 let colors = ThemeColors::of(theme, ui.visuals());
+                if markdown::is_markdown(&entry.path) {
+                    let view = preview.markdown.get_or_insert_default();
+                    view.sync(ui.ctx(), preview.text.as_deref().unwrap_or_default());
+                    let dir = markdown::view::base_dir(&entry.path);
+                    let options = markdown::Options {
+                        dir: &dir,
+                        syntax_theme: theme,
+                        code_fg: colors.foreground,
+                        code_bg: colors.background,
+                        allow_remote: editor_prefs.markdown.remote_images
+                            == markdown::RemoteImages::Always,
+                        editable: false,
+                        scroll_to: None,
+                        compact: true,
+                    };
+                    ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                        let id = egui::Id::new(("preview-markdown", &entry.path));
+                        let clicks = view.show_inline(ui, id, &options, markdown_images);
+                        for click in clicks {
+                            if let markdown::Click::Link { link, .. } = click {
+                                follow_link(ui.ctx(), &link, &dir, actions);
+                            }
+                        }
+                        if preview.truncated {
+                            ui.weak("…");
+                        }
+                    });
+                    return;
+                }
                 preview.update_colors(ui.ctx(), theme);
                 let spans = preview.spans();
                 let text = preview.text.as_deref().unwrap_or_default();
@@ -234,6 +268,28 @@ pub fn show(
         archive_contents(ui, &entry.path, archives);
     }
     editable
+}
+
+/// Follows a link in a previewed document, where there's no place to go to
+/// within it: another document or file opens as if it was chosen.
+fn follow_link(
+    ctx: &egui::Context,
+    link: &markdown::parse::Link,
+    dir: &Path,
+    actions: &mut Vec<Action>,
+) {
+    match markdown::links::resolve(link, dir) {
+        markdown::Target::Web(url) => markdown::links::open_web(ctx, url),
+        markdown::Target::Document(path, _) => actions.push(Action::Activate(path)),
+        markdown::Target::File(path) => {
+            let run =
+                disk::metadata(&path).is_ok_and(|meta| markdown::links::is_program(&path, &meta));
+            if !run {
+                actions.push(Action::Activate(path));
+            }
+        }
+        markdown::Target::Anchor(_) | markdown::Target::Refused => {}
+    }
 }
 
 /// The name, metadata and Open/Edit buttons under (or above) a preview.
@@ -613,6 +669,7 @@ mod tests {
             images: ImageCache::new(&ctx),
             videos: Videos::new(&ctx),
             texts: TextCache::default(),
+            markdown_images: Default::default(),
             jobs: crate::jobs::Jobs::new(&ctx),
             archives: archive::Listings::new(&ctx),
             archive_prefs: Default::default(),

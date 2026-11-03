@@ -327,6 +327,35 @@ pub fn open(path: &std::path::Path, choose: bool) -> std::io::Result<()> {
     .map_err(std::io::Error::other)
 }
 
+/// Opens a web link or mail address in the app that handles it.
+pub fn open_url(url: &str) -> std::io::Result<()> {
+    with_activity("open a link", |env, activity| {
+        let url = env.new_string(url)?;
+        let uri = env
+            .call_static_method(
+                jni_str!("android/net/Uri"),
+                jni_str!("parse"),
+                jni_sig!("(Ljava/lang/String;)Landroid/net/Uri;"),
+                &[JValue::Object(&url)],
+            )?
+            .l()?;
+        let action = env.new_string("android.intent.action.VIEW")?;
+        let intent = env.new_object(
+            jni_str!("android/content/Intent"),
+            jni_sig!("(Ljava/lang/String;Landroid/net/Uri;)V"),
+            &[JValue::Object(&action), JValue::Object(&uri)],
+        )?;
+        env.call_method(
+            activity,
+            jni_str!("startActivity"),
+            jni_sig!("(Landroid/content/Intent;)V"),
+            &[JValue::Object(&intent)],
+        )?;
+        Ok(())
+    })
+    .map_err(std::io::Error::other)
+}
+
 /// The media store's URI for the file at `path`, and its type if the store
 /// knows it. A file it hasn't indexed yet is scanned, and waited for a moment.
 fn media_uri<'local>(

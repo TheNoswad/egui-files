@@ -707,6 +707,12 @@ fn syntaxes_ui(ui: &mut Ui) {
 
     static LISTING: OnceLock<Acknowledgements> = OnceLock::new();
     let listing = LISTING.get_or_init(two_face::acknowledgement::listing);
+    ui.heading("Fonts");
+    ui.horizontal_wrapped(|ui| {
+        ui.hyperlink_to("Inter", "https://rsms.me/inter/");
+        ui.label("by The Inter Project Authors, for rendered documents, under the SIL Open Font License 1.1.");
+    });
+    ui.add_space(8.0);
     ui.heading("Syntaxes & themes");
     ui.label(
         "Syntax definitions and color themes collected by bat, embedded through the two-face crate. \

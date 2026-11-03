@@ -31,6 +31,7 @@ use crate::{
     fs::{Entry, Sort},
     images::ImageCache,
     jobs::{Jobs, Outcome},
+    markdown,
     open_with::{self, OpenWith},
     pane_sizes::PaneSizes,
     places,
@@ -442,9 +443,11 @@ pub struct FilesApp {
 
 impl FilesApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let mut fonts = egui::FontDefinitions::default();
-        egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
-        cc.egui_ctx.set_fonts(fonts);
+        cc.egui_ctx.set_fonts(crate::theme::fonts::definitions(
+            &fontdb::Database::new(),
+            None,
+            None,
+        ));
 
         #[cfg(not(target_arch = "wasm32"))]
         let persisted: Option<Persisted> = cc
@@ -553,6 +556,7 @@ impl FilesApp {
                     videos
                 },
                 texts: TextCache::default(),
+                markdown_images: Default::default(),
                 jobs: Jobs::new(&cc.egui_ctx),
                 archives: archive::Listings::new(&cc.egui_ctx),
                 archive_prefs,
@@ -977,11 +981,37 @@ impl FilesApp {
     /// a new tab in `window`.
     fn open_editor(&mut self, window: Option<u64>, path: PathBuf) {
         let existing = self.find_tab(|t| t.editor().is_some_and(|e| e.edit == path));
+        // On a phone there's no room for Split.
+        let mode = if self.mobile.enabled {
+            markdown::Mode::Source
+        } else {
+            self.shared.editor.markdown.edit_mode
+        };
         if let Some(id) = existing {
+            if let Some(editor) = self.editor_mut(id) {
+                editor.show_for_editing(mode);
+            }
             self.focus_tab(id);
         } else {
-            let tab = DockTab::Editor(EditorTab::new(self.next_id(), path));
-            self.push_tab(window, tab);
+            let mut editor = EditorTab::new(self.next_id(), path);
+            editor.show_for_editing(mode);
+            self.push_tab(window, DockTab::Editor(editor));
+        }
+    }
+
+    /// Reads a markdown document, in the tab already showing it if there is
+    /// one, else in a new tab in `window`.
+    fn open_markdown(&mut self, window: Option<u64>, path: PathBuf, anchor: Option<String>) {
+        let existing = self.find_tab(|t| t.editor().is_some_and(|e| e.edit == path));
+        if let Some(id) = existing {
+            if let Some(editor) = self.editor_mut(id) {
+                editor.go_to_anchor(anchor);
+            }
+            self.focus_tab(id);
+        } else {
+            let mut editor = EditorTab::new_markdown(self.next_id(), path);
+            editor.go_to_anchor(anchor);
+            self.push_tab(window, DockTab::Editor(editor));
         }
     }
 
@@ -2457,6 +2487,7 @@ impl FilesApp {
             }
             AppAction::OpenWith(request, None) => self.shared.open_with.ask(request),
             AppAction::Edit(path) => self.open_editor(window, path),
+            AppAction::OpenMarkdown { path, anchor } => self.open_markdown(window, path, anchor),
             AppAction::CloseTab(id) => self.request_close(id),
             AppAction::TogglePin(id) => self.toggle_pin(id),
             AppAction::CopyFiles { paths, cut } => self.copy_files(ctx, &paths, cut),
@@ -2501,6 +2532,7 @@ impl FilesApp {
         self.themes.touch = self.mobile.enabled;
         self.themes.update(&ctx);
         self.shared.images.begin_frame();
+        self.shared.markdown_images.begin_frame(&ctx);
         self.shared.videos.begin_frame();
         self.sync_with_disk(&ctx);
         self.shared.usage.tick();

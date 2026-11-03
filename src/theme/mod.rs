@@ -8,7 +8,7 @@
 
 mod editor;
 pub mod file;
-mod fonts;
+pub mod fonts;
 pub mod presets;
 mod value;
 

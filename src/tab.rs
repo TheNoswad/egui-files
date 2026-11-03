@@ -39,6 +39,8 @@ pub struct Shared {
     pub images: ImageCache,
     pub videos: Videos,
     pub texts: TextCache,
+    /// The pictures in rendered markdown documents.
+    pub markdown_images: crate::markdown::Images,
     pub jobs: Jobs,
     pub archives: archive::Listings,
     pub archive_prefs: archive::Prefs,
@@ -72,6 +74,11 @@ pub enum AppAction {
     OpenWith(open_with::Request, Option<open_with::Target>),
     /// Open a file in an editor tab.
     Edit(PathBuf),
+    /// Read a markdown document in a tab, at this heading.
+    OpenMarkdown {
+        path: PathBuf,
+        anchor: Option<String>,
+    },
     /// Close a tab, asking first if it has unsaved changes.
     CloseTab(u64),
     /// Pin a tab, or unpin it.
@@ -1635,6 +1642,8 @@ impl BrowserTab {
             self.navigate(path);
         } else if archive::is_archive(&path) {
             app_actions.push(AppAction::OpenArchive(path));
+        } else if crate::markdown::is_markdown(&path) {
+            app_actions.push(AppAction::OpenMarkdown { path, anchor: None });
         } else if let Err(err) = fs::open(&path) {
             self.error = Some(format!("Could not open {}: {err}", path.display()));
         }
@@ -1693,6 +1702,7 @@ mod tests {
             images: ImageCache::new(ctx),
             videos: Videos::new(ctx),
             texts: TextCache::default(),
+            markdown_images: Default::default(),
             jobs: Jobs::new(ctx),
             archives: archive::Listings::new(ctx),
             archive_prefs: archive::Prefs::default(),

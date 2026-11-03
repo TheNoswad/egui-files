@@ -123,7 +123,7 @@ pub fn icon_for(path: &Path, is_dir: bool, is_symlink: bool) -> &'static str {
 }
 
 /// Whether a file can be run: any execute bit set, on Unix.
-fn is_executable(meta: Option<&disk::Metadata>) -> bool {
+pub fn is_executable(meta: Option<&disk::Metadata>) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
