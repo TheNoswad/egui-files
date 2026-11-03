@@ -28,6 +28,8 @@ Things to try:
 - Preview a picture or a source file with F3.
 - Look inside the archives in Downloads, and extract one.
 - Copy, rename, trash and restore files.
+- Drop your own files on the page, or use File → Add files…. They stay in
+  this browser tab: nothing is uploaded.
 - Pick another theme under View → Theme.
 
 What needs the desktop app: the terminal, playing videos, opening files in

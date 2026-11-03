@@ -60,6 +60,8 @@ mod views;
 mod watcher;
 #[cfg(target_os = "linux")]
 mod wayland_dnd;
+#[cfg(target_arch = "wasm32")]
+mod web_files;
 mod widgets;
 mod window_buttons;
 #[cfg(windows)]
@@ -123,7 +125,10 @@ pub fn run_web() {
             .start(
                 canvas,
                 eframe::WebOptions::default(),
-                Box::new(|cc| Ok(Box::new(app::FilesApp::new(cc)))),
+                Box::new(|cc| {
+                    web_files::install(&cc.egui_ctx);
+                    Ok(Box::new(app::FilesApp::new(cc)))
+                }),
             )
             .await;
         // For web/demo/loading.js, which waits to show the app.

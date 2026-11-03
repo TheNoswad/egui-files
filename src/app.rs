@@ -1510,6 +1510,24 @@ impl FilesApp {
         egui::MenuBar::new()
             .ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        if ui
+                            .button(format!("{} Add files…", icon::FILE_PLUS))
+                            .on_hover_text("Bring in files from your device. They stay in this browser tab; nothing is uploaded.")
+                            .clicked()
+                        {
+                            crate::web_files::pick(false);
+                        }
+                        if ui
+                            .button(format!("{} Add folder…", icon::FOLDER_PLUS))
+                            .on_hover_text("Bring in a folder from your device. It stays in this browser tab; nothing is uploaded.")
+                            .clicked()
+                        {
+                            crate::web_files::pick(true);
+                        }
+                        ui.separator();
+                    }
                     if ui
                         .add(Button::new("New tab").shortcut_text(keys(C::NewTab)))
                         .clicked()
@@ -2764,6 +2782,13 @@ impl FilesApp {
         self.pane_sizes
             .fit(self.dock.main_surface_mut(), self.dock_size, None);
         self.drag_out(&ctx);
+        #[cfg(target_arch = "wasm32")]
+        for items in crate::web_files::take() {
+            let dest = self.focused_path();
+            self.shared
+                .jobs
+                .start(crate::jobs::JobKind::Import { items, dest });
+        }
         if !self.os_dropped.is_empty() {
             // winit reports no drop position, so use the focused folder.
             let sources = std::mem::take(&mut self.os_dropped);

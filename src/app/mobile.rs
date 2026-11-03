@@ -659,6 +659,16 @@ fn menu(ui: &mut Ui, mobile: &mut Mobile, viewer: &mut Viewer, requests: &mut Ve
                 }
             }
             ui.separator();
+            #[cfg(target_arch = "wasm32")]
+            {
+                if item(ui, icon::FILE_PLUS, "Add files…") {
+                    crate::web_files::pick(false);
+                }
+                if item(ui, icon::FOLDER_PLUS, "Add folder…") {
+                    crate::web_files::pick(true);
+                }
+                ui.separator();
+            }
             let commands = [
                 (icon::TRASH, "Trash", Request::OpenTrash),
                 (icon::CHART_PIE_SLICE, "Disk usage", Request::DiskUsage),

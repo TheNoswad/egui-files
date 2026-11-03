@@ -74,6 +74,12 @@ pub enum JobKind {
         drive: PathBuf,
         label: String,
     },
+    /// Brings in files the browser was given.
+    #[cfg(target_arch = "wasm32")]
+    Import {
+        items: Vec<crate::web_files::Incoming>,
+        dest: PathBuf,
+    },
 }
 
 impl JobKind {
@@ -86,6 +92,8 @@ impl JobKind {
             }
         };
         match self {
+            #[cfg(target_arch = "wasm32")]
+            Self::Import { dest, .. } => format!("Adding to {}", display_name(dest)),
             Self::Copy { sources, dest } => {
                 format!("Copying {} to {}", items(sources.len()), display_name(dest))
             }
@@ -803,6 +811,8 @@ async fn run(kind: JobKind, p: &Progress) {
                 p.error(&drive, err);
             }
         }
+        #[cfg(target_arch = "wasm32")]
+        JobKind::Import { items, dest } => crate::web_files::import(items, &dest, p).await,
         JobKind::Compress(job) => archive::compress(job, p).await,
         JobKind::Extract(job) => archive::extract(job, p).await,
         JobKind::Trash { paths } => {
