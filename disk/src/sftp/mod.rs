@@ -8,7 +8,7 @@
 //! any part but the host optional), and the rest is where on it. One
 //! connection per such name is shared by everything that uses it.
 //!
-//! What listings say about each file is remembered for a few seconds, so
+//! What listings say about each file is remembered for half a minute, so
 //! that looking at each entry in turn doesn't cost a round trip apiece.
 //! Changes made through here are noted for [`take_changes`], as nothing
 //! watches the server's folders.
@@ -37,8 +37,9 @@ use wire::{Reply, Writer};
 
 pub const SCHEME: &str = "sftp://";
 
-/// How long what the server said about a file is believed.
-const FRESH: Duration = Duration::from_secs(5);
+/// How long what the server said about a file is believed. Changes made
+/// through here are known at once; others' show after this, or a refresh.
+const FRESH: Duration = Duration::from_secs(30);
 
 /// A computer to connect to, as ssh is told it.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

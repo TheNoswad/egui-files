@@ -139,6 +139,10 @@ mod imp {
     }
 
     pub fn volume(path: &Path) -> Option<Volume> {
+        // A server's files are on none of this computer's mounts.
+        if crate::remote::is_remote(path) {
+            return None;
+        }
         let path = disk::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         let text = disk::read_to_string("/proc/self/mountinfo").ok()?;
         text.lines()

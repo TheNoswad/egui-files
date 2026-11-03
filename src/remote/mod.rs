@@ -40,6 +40,14 @@ static RECENT: Mutex<Vec<String>> = Mutex::new(Vec::new());
 /// Things gone wrong in the background, to tell the user about.
 static NOTICES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
+/// Draws the next frame, from any thread: something from a server is in.
+pub fn repaint() {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(ctx) = CTX.get() {
+        ctx.request_repaint();
+    }
+}
+
 /// Tells the user something went wrong, from any thread.
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub fn notify(message: String) {

@@ -34,6 +34,8 @@ struct TextPreview {
     truncated: bool,
     syntax: &'static str,
     colors: Option<Colors>,
+    /// A server's file, still being read in the background.
+    loading: Option<std::sync::mpsc::Receiver<Option<(String, bool)>>>,
 }
 
 /// Syntax colors for a preview, for one theme.
@@ -94,8 +96,19 @@ impl TextCache {
                 if self.entries.len() >= TEXT_CACHE_LEN {
                     self.entries.remove(0);
                 }
-                let (text, truncated) =
-                    read_text(&entry.path).map_or((None, false), |(t, tr)| (Some(t), tr));
+                // A server's file is read in the background: it may take a while.
+                let (read, loading) = if crate::remote::is_remote(&entry.path) {
+                    let (send, receive) = std::sync::mpsc::channel();
+                    let path = entry.path.clone();
+                    crate::background::spawn("preview a server's file", move || {
+                        let _ = send.send(read_text(&path));
+                        crate::remote::repaint();
+                    });
+                    (None, Some(receive))
+                } else {
+                    (read_text(&entry.path), None)
+                };
+                let (text, truncated) = read.map_or((None, false), |(t, tr)| (Some(t), tr));
                 let first_line = text.as_deref().and_then(|t| t.lines().next()).unwrap_or("");
                 self.entries.push(TextPreview {
                     path: entry.path.clone(),
@@ -104,11 +117,22 @@ impl TextCache {
                     text,
                     truncated,
                     colors: None,
+                    loading,
                 });
                 self.entries.len() - 1
             }
         };
-        &mut self.entries[index]
+        let preview = &mut self.entries[index];
+        if let Some(read) = preview.loading.as_ref().and_then(|r| r.try_recv().ok()) {
+            preview.loading = None;
+            if let Some((text, truncated)) = read {
+                let first_line = text.lines().next().unwrap_or("");
+                preview.syntax = highlight::detect(&preview.path, first_line);
+                preview.text = Some(text);
+                preview.truncated = truncated;
+            }
+        }
+        preview
     }
 }
 
