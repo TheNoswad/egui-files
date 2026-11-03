@@ -209,6 +209,19 @@ impl OpenWith {
             self.prefs.recent.insert(0, custom);
             self.prefs.recent.truncate(MAX_RECENT);
         }
+        // Copies of a server's files open in their place, once fetched.
+        #[cfg(not(target_arch = "wasm32"))]
+        if paths.iter().any(|p| crate::remote::is_remote(p))
+            && let Some(catalog) = catalog(ctx)
+        {
+            let target = target.clone();
+            crate::remote::copies::with_copies(paths.to_vec(), move |locals| {
+                if let Err(err) = catalog.launch(&target, &locals) {
+                    crate::remote::notify(format!("Couldn't start it: {err}"));
+                }
+            });
+            return Vec::new();
+        }
         let result = match catalog(ctx) {
             Some(catalog) => catalog.launch(target, paths),
             None => Err(std::io::Error::other("the list of apps is still loading")),

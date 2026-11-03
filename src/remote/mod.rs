@@ -8,6 +8,8 @@
 //! only known once connected.
 
 mod connect;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod copies;
 pub mod hosts;
 #[cfg(not(target_arch = "wasm32"))]
 mod prompts;
@@ -34,6 +36,44 @@ pub fn available() -> Result<(), &'static str> {
 }
 
 static RECENT: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Things gone wrong in the background, to tell the user about.
+static NOTICES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Tells the user something went wrong, from any thread.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+pub fn notify(message: String) {
+    NOTICES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .push(message);
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(ctx) = CTX.get() {
+        ctx.request_repaint();
+    }
+}
+
+fn notices_ui(ctx: &egui::Context) {
+    let first = NOTICES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .first()
+        .cloned();
+    let Some(message) = first else { return };
+    let mut done = false;
+    let modal = egui::Modal::new(egui::Id::new("server_notice")).show(ctx, |ui| {
+        ui.set_max_width(crate::widgets::modal_width(ui, 480.0));
+        ui.label(message);
+        ui.add_space(8.0);
+        done = ui.button("OK").clicked();
+    });
+    if done || modal.should_close() {
+        NOTICES
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(0);
+    }
+}
 
 /// Servers connected to lately, as `user@host:port`, latest first.
 pub fn recent() -> Vec<String> {
@@ -213,8 +253,7 @@ pub fn init(ctx: &egui::Context) {
 pub fn prompts_ui(ctx: &egui::Context) {
     #[cfg(not(target_arch = "wasm32"))]
     prompts::ui(ctx);
-    #[cfg(target_arch = "wasm32")]
-    let _ = ctx;
+    notices_ui(ctx);
 }
 
 /// Whether `dir` can be read without waiting; if not, it's fetched.
