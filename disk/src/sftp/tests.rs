@@ -134,13 +134,22 @@ fn files_and_folders() {
     disk::rename(dir.join("b.txt"), dir.join("c.txt")).unwrap();
     assert_eq!(disk::read_to_string(dir.join("c.txt")).unwrap(), "hello");
     assert_eq!(
-        disk::rename(dir.join("c.txt"), "/tmp/anywhere").unwrap_err().kind(),
+        disk::rename(dir.join("c.txt"), "/tmp/anywhere")
+            .unwrap_err()
+            .kind(),
         io::ErrorKind::CrossesDevices
     );
 
     disk::symlink("c.txt", dir.join("link")).unwrap();
-    assert_eq!(disk::read_link(dir.join("link")).unwrap(), Path::new("c.txt"));
-    assert!(disk::symlink_metadata(dir.join("link")).unwrap().is_symlink());
+    assert_eq!(
+        disk::read_link(dir.join("link")).unwrap(),
+        Path::new("c.txt")
+    );
+    assert!(
+        disk::symlink_metadata(dir.join("link"))
+            .unwrap()
+            .is_symlink()
+    );
     assert_eq!(disk::metadata(dir.join("link")).unwrap().len(), 5);
     assert_eq!(
         disk::canonicalize(dir.join("link")).unwrap(),
@@ -155,7 +164,9 @@ fn files_and_folders() {
 
 #[test]
 fn listings_say_what_links_lead_to() {
-    let Some(dir) = scratch("listings") else { return };
+    let Some(dir) = scratch("listings") else {
+        return;
+    };
     disk::create_dir(dir.join("sub")).unwrap();
     disk::symlink("sub", dir.join("to-sub")).unwrap();
     disk::symlink("nowhere", dir.join("broken")).unwrap();
@@ -167,7 +178,11 @@ fn listings_say_what_links_lead_to() {
     // From what the listing said, with the server none the wiser.
     assert!(disk::metadata(dir.join("to-sub")).unwrap().is_dir());
     assert!(disk::metadata(dir.join("broken")).is_err());
-    assert!(disk::symlink_metadata(dir.join("broken")).unwrap().is_symlink());
+    assert!(
+        disk::symlink_metadata(dir.join("broken"))
+            .unwrap()
+            .is_symlink()
+    );
     disk::remove_dir_all(&dir).unwrap();
 }
 
@@ -239,7 +254,9 @@ fn copies_between_here_and_there() {
 
 #[test]
 fn changes_are_noted() {
-    let Some(dir) = scratch("changes") else { return };
+    let Some(dir) = scratch("changes") else {
+        return;
+    };
     take_changes();
     disk::write(dir.join("new"), "x").unwrap();
     assert!(take_changes().contains(&dir.join("new")));

@@ -43,7 +43,12 @@ pub struct File {
 }
 
 impl File {
-    pub(super) fn new(session: Arc<Session>, handle: Vec<u8>, location: Location, append: bool) -> Self {
+    pub(super) fn new(
+        session: Arc<Session>,
+        handle: Vec<u8>,
+        location: Location,
+        append: bool,
+    ) -> Self {
         Self {
             session,
             handle,
@@ -134,7 +139,11 @@ impl File {
         })
     }
 
-    pub fn set_times(&mut self, accessed: Option<SystemTime>, modified: SystemTime) -> io::Result<()> {
+    pub fn set_times(
+        &mut self,
+        accessed: Option<SystemTime>,
+        modified: SystemTime,
+    ) -> io::Result<()> {
         let accessed = match accessed {
             Some(time) => wire::seconds(time),
             // SFTP sets both or neither; keep when it was last read.

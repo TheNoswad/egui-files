@@ -393,6 +393,9 @@ mod tests {
     #[test]
     fn failure_reasons_skip_host_key_notes() {
         let stderr = "Warning: Permanently added 'h' (ED25519) to the list of known hosts.\r\nuser@h: Permission denied (publickey).\r\n";
-        assert_eq!(failure_reason(stderr), "user@h: Permission denied (publickey).");
+        assert_eq!(
+            failure_reason(stderr),
+            "user@h: Permission denied (publickey)."
+        );
     }
 }

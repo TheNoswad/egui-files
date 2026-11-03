@@ -102,9 +102,7 @@ impl Attrs {
 
 /// Seconds since 1970, as SFTP 3 keeps times (in 32 bits, until 2106).
 pub fn seconds(time: SystemTime) -> u32 {
-    let secs = time
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
+    let secs = time.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
     u32::try_from(secs).unwrap_or(u32::MAX)
 }
 
@@ -274,7 +272,9 @@ impl Reply {
     /// An error for anything but an OK status.
     pub fn ok(self) -> io::Result<()> {
         match self {
-            Self::Status { code: STATUS_OK, .. } => Ok(()),
+            Self::Status {
+                code: STATUS_OK, ..
+            } => Ok(()),
             other => Err(other.error()),
         }
     }
@@ -309,11 +309,23 @@ impl Reply {
     }
 
     pub fn is_eof(&self) -> bool {
-        matches!(self, Self::Status { code: STATUS_EOF, .. })
+        matches!(
+            self,
+            Self::Status {
+                code: STATUS_EOF,
+                ..
+            }
+        )
     }
 
     pub fn is_failure(&self) -> bool {
-        matches!(self, Self::Status { code: STATUS_FAILURE, .. })
+        matches!(
+            self,
+            Self::Status {
+                code: STATUS_FAILURE,
+                ..
+            }
+        )
     }
 
     /// What went wrong, as std would put it.

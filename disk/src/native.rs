@@ -180,7 +180,10 @@ pub struct Metadata(Meta);
 enum Meta {
     Local(std::fs::Metadata),
     #[cfg_attr(not(unix), allow(dead_code))]
-    Remote { attrs: Attrs, device: u64 },
+    Remote {
+        attrs: Attrs,
+        device: u64,
+    },
 }
 
 fn no_time() -> io::Error {
@@ -302,7 +305,8 @@ impl std::os::unix::fs::MetadataExt for Metadata {
     }
 
     fn nlink(&self) -> u64 {
-        self.as_std().map_or(1, std::os::unix::fs::MetadataExt::nlink)
+        self.as_std()
+            .map_or(1, std::os::unix::fs::MetadataExt::nlink)
     }
 
     fn uid(&self) -> u32 {
@@ -320,7 +324,8 @@ impl std::os::unix::fs::MetadataExt for Metadata {
     }
 
     fn rdev(&self) -> u64 {
-        self.as_std().map_or(0, std::os::unix::fs::MetadataExt::rdev)
+        self.as_std()
+            .map_or(0, std::os::unix::fs::MetadataExt::rdev)
     }
 
     fn size(&self) -> u64 {
@@ -335,7 +340,8 @@ impl std::os::unix::fs::MetadataExt for Metadata {
     }
 
     fn atime_nsec(&self) -> i64 {
-        self.as_std().map_or(0, std::os::unix::fs::MetadataExt::atime_nsec)
+        self.as_std()
+            .map_or(0, std::os::unix::fs::MetadataExt::atime_nsec)
     }
 
     fn mtime(&self) -> i64 {
@@ -346,7 +352,8 @@ impl std::os::unix::fs::MetadataExt for Metadata {
     }
 
     fn mtime_nsec(&self) -> i64 {
-        self.as_std().map_or(0, std::os::unix::fs::MetadataExt::mtime_nsec)
+        self.as_std()
+            .map_or(0, std::os::unix::fs::MetadataExt::mtime_nsec)
     }
 
     /// SFTP doesn't tell; when it was changed is the nearest.
@@ -358,7 +365,8 @@ impl std::os::unix::fs::MetadataExt for Metadata {
     }
 
     fn ctime_nsec(&self) -> i64 {
-        self.as_std().map_or(0, std::os::unix::fs::MetadataExt::ctime_nsec)
+        self.as_std()
+            .map_or(0, std::os::unix::fs::MetadataExt::ctime_nsec)
     }
 
     fn blksize(&self) -> u64 {
@@ -619,12 +627,8 @@ impl File {
             }
             Handle::Remote(_) => {
                 let mut file = self.remote().expect("remote");
-                let mode = permissions.mode(|| {
-                    file.metadata()
-                        .ok()
-                        .and_then(|a| a.mode)
-                        .unwrap_or(0o644)
-                });
+                let mode =
+                    permissions.mode(|| file.metadata().ok().and_then(|a| a.mode).unwrap_or(0o644));
                 file.set_mode(mode)
             }
         }
@@ -701,7 +705,10 @@ impl Write for File {
     fn flush(&mut self) -> io::Result<()> {
         match &mut self.0 {
             Handle::Local(file) => file.flush(),
-            Handle::Remote(file) => file.get_mut().unwrap_or_else(PoisonError::into_inner).flush(),
+            Handle::Remote(file) => file
+                .get_mut()
+                .unwrap_or_else(PoisonError::into_inner)
+                .flush(),
         }
     }
 }

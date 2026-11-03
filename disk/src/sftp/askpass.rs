@@ -186,8 +186,14 @@ mod tests {
         let host_key = "The authenticity of host 'h (1.2.3.4)' can't be established.\nED25519 key fingerprint is SHA256:x.\nAre you sure you want to continue connecting (yes/no/[fingerprint])?";
         assert_eq!(prompt_kind("", host_key), PromptKind::HostKey);
         assert_eq!(prompt_kind("", "user@h's password: "), PromptKind::Secret);
-        assert_eq!(prompt_kind("confirm", "Allow use of key?"), PromptKind::Confirm);
-        assert_eq!(prompt_kind("none", "Confirm user presence"), PromptKind::Notice);
+        assert_eq!(
+            prompt_kind("confirm", "Allow use of key?"),
+            PromptKind::Confirm
+        );
+        assert_eq!(
+            prompt_kind("none", "Confirm user presence"),
+            PromptKind::Notice
+        );
     }
 
     #[test]

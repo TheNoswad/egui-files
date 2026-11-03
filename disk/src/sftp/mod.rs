@@ -70,7 +70,9 @@ impl Target {
         };
         // Nothing ssh would take for an option, or that splits into two.
         let fine = |s: &str| {
-            !s.is_empty() && !s.starts_with('-') && !s.chars().any(|c| c.is_whitespace() || c.is_control())
+            !s.is_empty()
+                && !s.starts_with('-')
+                && !s.chars().any(|c| c.is_whitespace() || c.is_control())
         };
         if !fine(host) || host.contains('/') || !user.as_deref().is_none_or(fine) {
             return None;
@@ -117,7 +119,11 @@ impl Location {
         let cut = self.path.rfind('/').unwrap_or(0);
         Some(Self {
             authority: self.authority.clone(),
-            path: if cut == 0 { "/".into() } else { self.path[..cut].into() },
+            path: if cut == 0 {
+                "/".into()
+            } else {
+                self.path[..cut].into()
+            },
         })
     }
 
@@ -507,7 +513,9 @@ pub fn forget(path: &Path) {
     let Some(location) = parse(path) else { return };
     let mut cache = cache();
     cache.files.retain(|known, _| !known.is_within(&location));
-    cache.listings.retain(|known, _| !known.is_within(&location));
+    cache
+        .listings
+        .retain(|known, _| !known.is_within(&location));
 }
 
 /// Whether the folder at `path` was listed recently enough that listing it
@@ -721,10 +729,7 @@ pub fn open(location: &Location, how: Open) -> io::Result<File> {
     let handle = match session.call(wire::OPEN, request)? {
         Reply::Handle(handle) => handle,
         reply if reply.is_failure() && how.create_new && exists(&session, location) => {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "File exists",
-            ));
+            return Err(io::Error::new(io::ErrorKind::AlreadyExists, "File exists"));
         }
         reply => return Err(reply.error()),
     };
@@ -743,17 +748,14 @@ fn exists(session: &Session, location: &Location) -> bool {
 
 pub fn create_dir(location: &Location) -> io::Result<()> {
     let session = session(&location.authority)?;
-    let request = Writer::default()
-        .str(&location.path)
-        .attrs(&Attrs {
-            mode: Some(0o777),
-            ..Attrs::default()
-        });
+    let request = Writer::default().str(&location.path).attrs(&Attrs {
+        mode: Some(0o777),
+        ..Attrs::default()
+    });
     match session.call(wire::MKDIR, request)? {
-        reply if reply.is_failure() && exists(&session, location) => Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            "File exists",
-        )),
+        reply if reply.is_failure() && exists(&session, location) => {
+            Err(io::Error::new(io::ErrorKind::AlreadyExists, "File exists"))
+        }
         reply => reply.ok(),
     }?;
     changed(location);
@@ -819,15 +821,16 @@ pub fn rename(from: &Location, to: &Location) -> io::Result<()> {
     let session = session(&from.authority)?;
     let request = Writer::default().str(&from.path).str(&to.path);
     let reply = if session.has_extension("posix-rename@openssh.com") {
-        session.extended("posix-rename@openssh.com", request)?.wait()?
+        session
+            .extended("posix-rename@openssh.com", request)?
+            .wait()?
     } else {
         session.call(wire::RENAME, request)?
     };
     match reply {
-        reply if reply.is_failure() && exists(&session, to) => Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            "File exists",
-        )),
+        reply if reply.is_failure() && exists(&session, to) => {
+            Err(io::Error::new(io::ErrorKind::AlreadyExists, "File exists"))
+        }
         reply => reply.ok(),
     }?;
     changed_within(from);
