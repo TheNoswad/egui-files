@@ -110,6 +110,8 @@ pub enum Action {
         extend: bool,
     },
     Activate(PathBuf),
+    /// Open a file in the app the system has for it.
+    OpenDefault(PathBuf),
     ActivateCursor,
     OpenInNewTab(PathBuf),
     /// Scan a folder in a disk usage tab.
@@ -1357,6 +1359,7 @@ impl BrowserTab {
                 self.scroll_to = Some(index);
             }
             Action::Activate(path) => self.activate(path, &mut shared.app_actions),
+            Action::OpenDefault(path) => self.open_default(&path),
             Action::ActivateCursor => {
                 if let Some(&i) = self.cursor.and_then(|c| visible.get(c)) {
                     self.activate(self.entries()[i].path.clone(), &mut shared.app_actions);
@@ -1635,7 +1638,18 @@ impl BrowserTab {
             self.navigate(path);
         } else if archive::is_archive(&path) {
             app_actions.push(AppAction::OpenArchive(path));
-        } else if let Err(err) = fs::open(&path) {
+        } else if crate::editor::table::is_table_file(&path) {
+            // Shown in the preview, which follows the selection.
+            self.reveal(path);
+            app_actions.push(AppAction::ShowPreview);
+        } else {
+            self.open_default(&path);
+        }
+    }
+
+    /// Opens a file in the app the system has for it.
+    pub fn open_default(&mut self, path: &Path) {
+        if let Err(err) = fs::open(path) {
             self.error = Some(format!("Could not open {}: {err}", path.display()));
         }
     }
@@ -1677,6 +1691,21 @@ mod tests {
         disk::create_dir_all(root.join("a/.hidden")).unwrap();
         disk::write(root.join("a/b/file.txt"), "hi").unwrap();
         root
+    }
+
+    #[test]
+    fn activating_a_table_shows_it_in_the_preview() {
+        let root = std::env::temp_dir().join(format!("egui-files-activate-{}", std::process::id()));
+        let _ = disk::remove_dir_all(&root);
+        disk::create_dir_all(&root).unwrap();
+        let path = root.join("a.csv");
+        disk::write(&path, "a,b\n").unwrap();
+        let mut tab = BrowserTab::new(1, root.clone());
+        let mut actions = Vec::new();
+        tab.activate(path.clone(), &mut actions);
+        assert!(matches!(actions.as_slice(), [AppAction::ShowPreview]));
+        assert_eq!(tab.reveal.as_ref(), Some(&path));
+        disk::remove_dir_all(root).unwrap();
     }
 
     fn shared(ctx: &Context, tab: &BrowserTab) -> Shared {

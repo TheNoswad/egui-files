@@ -19,10 +19,10 @@ use std::{
 };
 
 use egui::{
-    Align2, Button, Context, CursorIcon, Event, EventFilter, FontId, Id, Key, KeyboardShortcut,
-    Layout, Modifiers, Pos2, Rect, Response, RichText, ScrollArea, Stroke, StrokeKind, TextEdit,
-    TextStyle, Ui, UiBuilder, ViewportCommand, pos2, text::CCursor, text::CCursorRange,
-    text_edit::TextEditState, vec2,
+    Align2, Button, Context, CursorIcon, Event, EventFilter, FontId, Grid, Id, Key,
+    KeyboardShortcut, Layout, Modifiers, Pos2, Rect, Response, RichText, ScrollArea, Stroke,
+    StrokeKind, TextEdit, TextStyle, Ui, UiBuilder, ViewportCommand, pos2, text::CCursor,
+    text::CCursorRange, text_edit::TextEditState, vec2,
 };
 use egui_phosphor::regular as icon;
 use serde::{Deserialize, Serialize};
@@ -2210,6 +2210,108 @@ impl Geometry<'_> {
     }
 }
 
+/// How many rows and columns of a table the preview pane shows, and how much
+/// of each cell.
+const PREVIEW_ROWS: usize = 50;
+const PREVIEW_COLUMNS: usize = 30;
+const PREVIEW_CHARS: usize = 60;
+
+/// The start of a table, for the preview pane.
+pub struct Preview {
+    rows: Vec<Vec<String>>,
+    header: bool,
+    /// How many rows and columns the part read has.
+    total_rows: usize,
+    columns: usize,
+    /// There's more to the file than was read.
+    truncated: bool,
+}
+
+impl Preview {
+    /// `truncated`: `text` is only the start of the file.
+    pub fn new(text: &str, path: &Path, truncated: bool) -> Self {
+        let parsed = parse::parse(text, detected_delimiter(text, path));
+        let mut total_rows = parsed.rows.len();
+        // The last row read is probably cut off.
+        if truncated && total_rows > 1 {
+            total_rows -= 1;
+        }
+        let header = parse::detect_header(text, &parsed);
+        let rows = (0..total_rows.min(PREVIEW_ROWS))
+            .map(|row| {
+                (0..parsed.cell_count(row).min(PREVIEW_COLUMNS))
+                    .map(|col| {
+                        let value = parsed.value(text, row, col);
+                        let shown = shown_value(&value);
+                        match shown.char_indices().nth(PREVIEW_CHARS) {
+                            Some((at, _)) => format!("{}…", &shown[..at]),
+                            None => shown.into_owned(),
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+        Self {
+            rows,
+            header,
+            total_rows: total_rows - usize::from(header && total_rows > 0),
+            columns: parsed.columns,
+            truncated,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+
+    pub fn ui(&self, ui: &mut Ui) {
+        let frame = egui::Frame::group(ui.style());
+        frame.show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.with_layout(Layout::top_down(egui::Align::Min), |ui| {
+                ScrollArea::horizontal()
+                    .id_salt("table-preview")
+                    .scroll_source(touch::scroll_source(ui.ctx()))
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        Grid::new("table-preview-grid")
+                            .striped(true)
+                            .show(ui, |ui| {
+                                for (index, row) in self.rows.iter().enumerate() {
+                                    for cell in row {
+                                        let mut label = RichText::new(cell).size(11.0);
+                                        if self.header && index == 0 {
+                                            label = label.strong();
+                                        }
+                                        ui.add(egui::Label::new(label).extend());
+                                    }
+                                    ui.end_row();
+                                }
+                            });
+                    });
+                let shown = self.rows.len() - usize::from(self.header);
+                let rows = if self.truncated {
+                    format!("{}+ rows", self.total_rows)
+                } else if self.total_rows == 1 {
+                    "1 row".to_owned()
+                } else {
+                    format!("{} rows", self.total_rows)
+                };
+                let columns = if self.columns == 1 {
+                    "1 column".to_owned()
+                } else {
+                    format!("{} columns", self.columns)
+                };
+                if shown < self.total_rows || self.truncated {
+                    ui.weak(format!("First {shown} of {rows}, {columns}"));
+                } else {
+                    ui.weak(format!("{rows}, {columns}"));
+                }
+            });
+        });
+    }
+}
+
 /// What the editor's tests look at.
 #[cfg(test)]
 impl Table {
@@ -2313,5 +2415,19 @@ mod tests {
         for name in ["a.txt", "csv", "a.csv.gz"] {
             assert!(!is_table_file(Path::new(name)), "{name}");
         }
+    }
+
+    #[test]
+    fn previews_the_start_of_a_table() {
+        let preview = Preview::new("Name,Age\nAl,30\nBo,4", Path::new("a.csv"), true);
+        // The row cut off by the end of what was read is left out.
+        assert_eq!(preview.rows.len(), 2);
+        assert!(preview.header);
+        assert_eq!(preview.total_rows, 1);
+        assert_eq!(preview.columns, 2);
+
+        let tabs = Preview::new("a\tb\n", Path::new("a.tsv"), false);
+        assert_eq!(tabs.rows, [["a", "b"]]);
+        assert!(!tabs.header);
     }
 }

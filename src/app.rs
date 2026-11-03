@@ -2729,6 +2729,11 @@ impl FilesApp {
                         tab.activate(path, &mut app_actions);
                     }
                 }
+                tab::Action::OpenDefault(path) => {
+                    if let Some(tab) = self.active_browser_mut() {
+                        tab.open_default(&path);
+                    }
+                }
                 tab::Action::Edit(path) => app_actions.push(AppAction::Edit(path)),
                 _ => {}
             }

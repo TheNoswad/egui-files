@@ -34,6 +34,8 @@ struct TextPreview {
     truncated: bool,
     syntax: &'static str,
     colors: Option<Colors>,
+    /// For a table file.
+    table: Option<editor::table::Preview>,
 }
 
 /// Syntax colors for a preview, for one theme.
@@ -97,6 +99,10 @@ impl TextCache {
                 let (text, truncated) =
                     read_text(&entry.path).map_or((None, false), |(t, tr)| (Some(t), tr));
                 let first_line = text.as_deref().and_then(|t| t.lines().next()).unwrap_or("");
+                let table = text
+                    .as_deref()
+                    .filter(|_| editor::table::is_table_file(&entry.path))
+                    .map(|t| editor::table::Preview::new(t, &entry.path, truncated));
                 self.entries.push(TextPreview {
                     path: entry.path.clone(),
                     modified: entry.modified,
@@ -104,6 +110,7 @@ impl TextCache {
                     text,
                     truncated,
                     colors: None,
+                    table,
                 });
                 self.entries.len() - 1
             }
@@ -122,6 +129,11 @@ fn read_text(path: &Path) -> Option<(String, bool)> {
         .ok()?;
     let truncated = bytes.len() as u64 > TEXT_BYTES;
     bytes.truncate(TEXT_BYTES as usize);
+    if editor::table::is_table_file(path) {
+        let text = editor::document::decode(&bytes, truncated).text;
+        let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+        return (!text.contains('\0')).then(|| (text.to_owned(), truncated));
+    }
     if bytes.contains(&0) {
         return None;
     }
@@ -191,6 +203,10 @@ pub fn show(
                 if with_details {
                     details(ui, entry, None, None, editable, actions);
                     ui.add_space(8.0);
+                }
+                if let Some(table) = preview.table.as_ref().filter(|t| !t.is_empty()) {
+                    table.ui(ui);
+                    return;
                 }
                 let theme = editor_prefs.theme(ui);
                 let colors = ThemeColors::of(theme, ui.visuals());
@@ -268,11 +284,20 @@ pub fn buttons(ui: &mut Ui, entry: &Entry, editable: bool, actions: &mut Vec<Act
         let buttons = if editable { 2.0 } else { 1.0 };
         let width = 70.0 * buttons;
         ui.add_space(((ui.available_width() - width) / 2.0).max(0.0));
-        if ui
-            .button(format!("{} Open", icon::ARROW_SQUARE_OUT))
-            .clicked()
-        {
-            actions.push(Action::Activate(entry.path.clone()));
+        // Activating a table shows it here, so this one goes to its app.
+        let table = editor::table::is_table_file(&entry.path);
+        let open = ui.button(format!("{} Open", icon::ARROW_SQUARE_OUT));
+        let open = if table {
+            open.on_hover_text("Open in the default app")
+        } else {
+            open
+        };
+        if open.clicked() {
+            actions.push(if table {
+                Action::OpenDefault(entry.path.clone())
+            } else {
+                Action::Activate(entry.path.clone())
+            });
         }
         if editable
             && ui
