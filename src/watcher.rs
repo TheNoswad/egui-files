@@ -61,12 +61,19 @@ impl DirWatcher {
     }
 
     /// Watches exactly `dirs` (non-recursively). Servers' folders can't be
-    /// watched; what changes there through disk is noted instead.
+    /// watched: what changes there through disk is noted, and others'
+    /// changes are looked for every so often (`remote::watch`).
     pub fn set_watched(&mut self, mut dirs: HashSet<PathBuf>) {
+        let remote: Vec<PathBuf> = dirs
+            .iter()
+            .filter(|dir| crate::remote::is_remote(dir))
+            .cloned()
+            .collect();
+        dirs.retain(|dir| !crate::remote::is_remote(dir));
+        crate::remote::watch(remote);
         let Some(watcher) = &mut self.watcher else {
             return;
         };
-        dirs.retain(|dir| !crate::remote::is_remote(dir));
         for dir in self.watched.difference(&dirs) {
             let _ = watcher.unwatch(dir);
         }

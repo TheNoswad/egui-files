@@ -299,6 +299,32 @@ fn copies_between_here_and_there() {
 }
 
 #[test]
+fn others_changes_are_found_by_listing_again() {
+    let Some(dir) = scratch("relist") else { return };
+    disk::write(dir.join("a"), "a").unwrap();
+    disk::read_dir(&dir).unwrap().for_each(drop);
+    assert!(!relist(&dir).unwrap());
+    // As someone else would, behind the cache's back.
+    let session = session("sftp-test").unwrap();
+    let path = parse(&dir.join("b")).unwrap().path;
+    let open = Writer::default()
+        .str(&path)
+        .u32(wire::OPEN_WRITE | wire::OPEN_CREATE)
+        .attrs(&Attrs::default());
+    let handle = session.call(wire::OPEN, open).unwrap().handle().unwrap();
+    session
+        .call(wire::CLOSE, Writer::default().bytes(&handle))
+        .unwrap()
+        .ok()
+        .unwrap();
+    take_changes();
+    assert!(relist(&dir).unwrap());
+    assert!(take_changes().contains(&dir));
+    assert!(!relist(&dir).unwrap());
+    disk::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
 fn changes_are_noted() {
     let Some(dir) = scratch("changes") else {
         return;

@@ -15,7 +15,8 @@
     - [ ] Android: there's no `ssh` there. russh (or similar) behind the same `Session`, with our own config parsing and auth
     - [ ] Windows: not built here (the C dependencies need MinGW). Check Windows' OpenSSH runs the app as `SSH_ASKPASS` (it's a GUI-subsystem program printing to the pipe ssh gives it), that no console flashes up, and that `File::set_permissions`/read-only map sensibly
     - [ ] Drag out of a server (copies, up to 16 MB) into another app, by hand: only built
-    - [ ] Others' changes on a server show only after 30 s or a refresh; poll the folders on screen now and then?
+    - [x] Others' changes on a server: the folders on screen are listed again every 10 s while connected
+    - [ ] Terminal: once ssh'd onto a server it doesn't follow the tab about the server, nor the tab it (there's no telling whether the shell over there is at a prompt). A prompt hook sent along (OSC 7, or a title) could tell
     - [ ] Server-side copy (`copy-data` extension) for copies within one server, which go through this computer now
     - [ ] FTP, WebDAV, SMB ("etc")
 - [ ] google drive

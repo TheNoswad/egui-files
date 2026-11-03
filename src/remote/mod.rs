@@ -40,6 +40,47 @@ static RECENT: Mutex<Vec<String>> = Mutex::new(Vec::new());
 /// Things gone wrong in the background, to tell the user about.
 static NOTICES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
+/// How often the servers' folders on screen are listed again, for changes
+/// others made there.
+#[cfg(not(target_arch = "wasm32"))]
+const LOOK_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
+
+#[cfg(not(target_arch = "wasm32"))]
+static WATCHED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+/// Looks at these servers' folders (those on screen) every so often, for
+/// changes others made there: nothing tells of them otherwise. A change
+/// reaches the tabs as the file watcher's would. Only while connected, so
+/// it never asks the user anything.
+pub fn watch(dirs: Vec<PathBuf>) {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        static LOOKING: std::sync::Once = std::sync::Once::new();
+        let any = !dirs.is_empty();
+        *WATCHED.lock().unwrap_or_else(PoisonError::into_inner) = dirs;
+        if any {
+            LOOKING.call_once(|| {
+                crate::background::spawn("look at servers' folders", || {
+                    loop {
+                        std::thread::sleep(LOOK_EVERY);
+                        let dirs = WATCHED
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .clone();
+                        for dir in dirs {
+                            if matches!(disk::sftp::relist(&dir), Ok(true)) {
+                                repaint();
+                            }
+                        }
+                    }
+                });
+            });
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    let _ = dirs;
+}
+
 /// Draws the next frame, from any thread: something from a server is in.
 pub fn repaint() {
     #[cfg(not(target_arch = "wasm32"))]

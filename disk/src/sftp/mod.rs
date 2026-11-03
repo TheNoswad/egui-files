@@ -554,6 +554,52 @@ pub fn forget(path: &Path) {
         .retain(|known, _| !known.is_within(&location));
 }
 
+/// What a listing said, to tell whether it's changed: each name, with its
+/// type, size and when it was changed.
+type Summary = Vec<(String, Option<u32>, Option<u64>, Option<(u32, u32)>)>;
+
+fn summary(cache: &Cache, location: &Location) -> Option<Summary> {
+    let (_, names) = cache.listings.get(location)?;
+    let mut summary: Summary = names
+        .iter()
+        .map(|name| {
+            let attrs = cache.files.get(&location.join(name)).map(|k| &k.link);
+            (
+                name.clone(),
+                attrs.and_then(|a| a.mode),
+                attrs.and_then(|a| a.size),
+                attrs.and_then(|a| a.atime_mtime).map(|(_, m)| (0, m)),
+            )
+        })
+        .collect();
+    summary.sort();
+    Some(summary)
+}
+
+/// Lists the folder at `path` again, if connected, and says whether it
+/// changed since it was last listed (others' changes: the app's own are
+/// known already). A change is noted for [`take_changes`]. Never connects,
+/// so never asks the user anything: for looking now and then.
+pub fn relist(path: &Path) -> io::Result<bool> {
+    let location = parse(path).ok_or_else(not_remote)?;
+    if status_of(&location.authority) != Status::Connected {
+        return Err(not_connected(&location.authority, None));
+    }
+    let before = {
+        let mut cache = cache();
+        let before = summary(&cache, &location);
+        cache.listings.remove(&location);
+        before
+    };
+    read_dir(&location)?;
+    let after = summary(&cache(), &location);
+    let changed = before.is_some() && before != after;
+    if changed {
+        note_change(&location.to_path());
+    }
+    Ok(changed)
+}
+
 /// Whether the folder at `path` was listed recently enough that listing it
 /// again needs no round trip.
 pub fn is_listed(path: &Path) -> bool {
