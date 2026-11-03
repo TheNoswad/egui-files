@@ -32,7 +32,7 @@ use self::{
 };
 use crate::{
     markdown::{
-        self, Click, MdView, Mode, Target,
+        self, BlockEditor, Click, MdView, Mode, Target, block_edit,
         format::{self, Inline, LineKind},
         layout::Hit,
         parse::{Heading, Stats},
@@ -453,6 +453,10 @@ struct MarkdownState {
     outline_current: Option<usize>,
     /// Where pasted and dropped pictures go; from the settings.
     image_folder: String,
+    /// The block being edited in place, while reading.
+    block: Option<BlockEditor>,
+    /// A click outside it: it's done.
+    block_done: bool,
 }
 
 /// Where the source pane is scrolled, for keeping the panes together.
@@ -523,6 +527,11 @@ enum Command {
     PasteUrl(String),
     /// Files or a picture on the clipboard, with the text that came with them.
     PasteClipboard(Option<String>),
+    /// While reading, with no text field for it to go to.
+    Undo {
+        redo: bool,
+    },
+    FinishBlock,
 }
 
 impl EditorTab {
@@ -592,7 +601,12 @@ impl EditorTab {
     }
 
     pub fn is_dirty(&self) -> bool {
-        matches!(&self.doc, Doc::Ready(buffer) if buffer.dirty)
+        let editing = self
+            .md
+            .block
+            .as_ref()
+            .is_some_and(|b| b.draft.trim_end() != b.original.trim_end());
+        editing || matches!(&self.doc, Doc::Ready(buffer) if buffer.dirty)
     }
 
     pub fn dir(&self) -> Option<PathBuf> {
@@ -612,6 +626,7 @@ impl EditorTab {
 
     /// Writes the text to the file. Errors are also shown in the tab.
     pub fn save(&mut self) -> Result<(), String> {
+        self.keep_block_edit()?;
         let Doc::Ready(buffer) = &mut self.doc else {
             return Ok(());
         };
@@ -637,6 +652,142 @@ impl EditorTab {
 
     fn text_id(&self) -> Id {
         text_id(self.id)
+    }
+
+    /// Puts what's been typed into the block being edited into the text, and
+    /// goes on editing. For saving, which writes the text.
+    fn keep_block_edit(&mut self) -> Result<(), String> {
+        let (Some(block), Doc::Ready(buffer)) = (&mut self.md.block, &mut self.doc) else {
+            return Ok(());
+        };
+        if block.draft.trim_end() == block.original.trim_end() {
+            return Ok(());
+        }
+        if buffer.text.get(block.range.clone()) != Some(block.original.as_str()) {
+            return Err("The file changed while that block was being edited.".to_owned());
+        }
+        let kept = block.draft.trim_end().to_owned();
+        let at_end = block.range.is_empty();
+        buffer.text = block_edit::splice(&buffer.text, &block.range, &kept);
+        if kept.is_empty() {
+            self.md.block = None;
+            return Ok(());
+        }
+        // A new block lands past the blank line it's given.
+        let start = if at_end {
+            buffer.text.len() - kept.len() - 1
+        } else {
+            block.range.start
+        };
+        block.range = start..start + kept.len();
+        block.original = kept;
+        Ok(())
+    }
+
+    /// Edits a block of the document where it is on the page.
+    fn start_block(&mut self, source: Option<Range<usize>>, word: Option<(String, usize)>) {
+        let Doc::Ready(buffer) = &self.doc else {
+            return;
+        };
+        if buffer.read_only.is_some() {
+            return;
+        }
+        let end = buffer.text.len();
+        let range = source.map_or(end..end, |source| {
+            block_edit::block_range(&buffer.text, &source)
+        });
+        let original = buffer.text[range.clone()].to_owned();
+        let caret = word.map(|(word, nth)| block_edit::caret_for(&original, &word, nth));
+        let lines = original.lines().count().max(1) as f32;
+        self.md.block = Some(BlockEditor {
+            id: block_id(self.id),
+            range,
+            draft: original.clone(),
+            original,
+            height: lines * 18.0 + 16.0,
+            rect: Rect::NOTHING,
+            focus: true,
+            caret: Some(caret.unwrap_or(usize::MAX)),
+        });
+    }
+
+    /// Puts the block back in the text and renders it again, as one undo step.
+    fn finish_block(&mut self, ctx: &Context) {
+        self.md.block_done = false;
+        let Some(block) = self.md.block.take() else {
+            return;
+        };
+        if block.draft.trim_end() == block.original.trim_end() {
+            return;
+        }
+        let Doc::Ready(buffer) = &mut self.doc else {
+            return;
+        };
+        if buffer.text.get(block.range.clone()) != Some(block.original.as_str()) {
+            ctx.copy_text(block.draft);
+            buffer.error = Some(
+                "The file changed while that block was being edited, so it wasn't changed. \
+                 What you typed is on the clipboard."
+                    .to_owned(),
+            );
+            return;
+        }
+        let text = block_edit::splice(&buffer.text, &block.range, &block.draft);
+        let chars = text.chars().count();
+        let selection = self.selection(ctx);
+        let selection = selection.start.min(chars)..selection.end.min(chars);
+        self.apply_edit(ctx, Edit { text, selection });
+        self.scroll_to_cursor = false;
+    }
+
+    /// Applies an edit to what's being edited: the block, or else the source.
+    fn apply_to_target(&mut self, ctx: &Context, edit: Edit) {
+        let Some(block) = &mut self.md.block else {
+            self.apply_edit(ctx, edit);
+            self.focus_text = true;
+            return;
+        };
+        let mut state = TextEditState::load(ctx, block.id).unwrap_or_default();
+        let before = state.cursor.char_range().unwrap_or_default();
+        let mut undoer = state.undoer();
+        undoer.add_undo(&(before, block.draft.clone()));
+        state.set_undoer(undoer);
+        block.draft = edit.text;
+        state.cursor.set_char_range(Some(CCursorRange::two(
+            CCursor::new(edit.selection.start),
+            CCursor::new(edit.selection.end),
+        )));
+        state.store(ctx, block.id);
+        block.focus = true;
+    }
+
+    /// Undo and redo while reading: there's no text field to do it.
+    fn undo(&mut self, ctx: &Context, redo: bool) {
+        let id = self.text_id();
+        let Doc::Ready(buffer) = &mut self.doc else {
+            return;
+        };
+        if buffer.read_only.is_some() {
+            return;
+        }
+        let mut state = TextEditState::load(ctx, id).unwrap_or_default();
+        let current = (
+            state.cursor.char_range().unwrap_or_default(),
+            buffer.text.clone(),
+        );
+        let mut undoer = state.undoer();
+        let restored = if redo {
+            undoer.redo(&current)
+        } else {
+            undoer.undo(&current)
+        }
+        .cloned();
+        state.set_undoer(undoer);
+        if let Some((cursor, text)) = restored {
+            buffer.text = text;
+            state.cursor.set_char_range(Some(cursor));
+        }
+        state.store(ctx, id);
     }
 
     /// Loads the file, applies reloads, and reacts to changes on disk.
@@ -683,7 +834,7 @@ impl EditorTab {
                         buffer.disk = Disk::Deleted;
                         false
                     }
-                    Some(_) if buffer.dirty => {
+                    Some(_) if buffer.dirty || self.md.block.is_some() => {
                         buffer.disk = Disk::Changed;
                         false
                     }
@@ -760,9 +911,16 @@ impl EditorTab {
         }
 
         let focused = shared.focused_tab == Some(self.id);
-        let text_focused = ctx.memory(|m| m.has_focus(text_id(self.id)));
+        let text_focused =
+            ctx.memory(|m| m.has_focus(text_id(self.id)) || m.has_focus(block_id(self.id)));
         let editable = buffer.read_only.is_none();
-        let can_edit_text = mode != Mode::Preview;
+        let source_shown = mode != Mode::Preview;
+        // Leaving Preview leaves the block being edited in it.
+        if source_shown && self.md.block.is_some() {
+            self.finish_block(&ctx);
+        }
+        let editing_block = self.md.block.is_some();
+        let can_edit_text = source_shown || editing_block;
         let commands = if focused {
             shortcuts(
                 &ctx,
@@ -770,6 +928,7 @@ impl EditorTab {
                 is_markdown,
                 self.md.view.lightbox_is_open(),
                 is_markdown && editable && !ctx.egui_wants_keyboard_input(),
+                editing_block,
             )
         } else {
             Vec::new()
@@ -786,6 +945,7 @@ impl EditorTab {
                         | Command::Forward
                         | Command::ToggleOutline
                         | Command::PasteClipboard(_)
+                        | Command::Undo { .. }
                         | Command::Find { .. }
                         | Command::FindNext { .. }
                 )
@@ -819,9 +979,18 @@ impl EditorTab {
                 &mut commands,
             );
         });
-        if is_markdown && can_edit_text && editable {
+        // Always there while reading too, greyed out until a block is being
+        // edited: the page would jump under the pointer when it came and went.
+        if is_markdown && editable {
             Panel::top(Id::new(("editor-format", self.id))).show(ui, |ui| {
-                format_bar(ui, &buffer.text, cursor, &mut commands);
+                let text = self
+                    .md
+                    .block
+                    .as_ref()
+                    .map_or(buffer.text.as_str(), |block| block.draft.as_str());
+                ui.add_enabled_ui(can_edit_text, |ui| {
+                    format_bar(ui, text, cursor, &mut commands);
+                });
             });
         }
         let mut reload = false;
@@ -831,7 +1000,7 @@ impl EditorTab {
         }
         if let Some(find) = &mut self.find {
             Panel::top(Id::new(("editor-find", self.id))).show(ui, |ui| {
-                find_bar(ui, find, editable && can_edit_text, &mut commands);
+                find_bar(ui, find, editable && source_shown, &mut commands);
             });
         }
         if let Some(goto) = &mut self.goto {
@@ -841,7 +1010,20 @@ impl EditorTab {
         }
         Panel::bottom(Id::new(("editor-status", self.id))).show(ui, |ui| {
             let stats = is_markdown.then(|| self.md.view.stats());
-            status_bar(ui, buffer, &mut self.syntax, self.id, stats, can_edit_text);
+            let hint = (is_markdown && !source_shown && editable).then_some(if editing_block {
+                "Escape or a click outside to finish"
+            } else {
+                "Double-click to edit"
+            });
+            status_bar(
+                ui,
+                buffer,
+                &mut self.syntax,
+                self.id,
+                stats,
+                source_shown,
+                hint,
+            );
         });
         if reload {
             buffer.reload = Some(load(&self.edit, &ctx));
@@ -1045,6 +1227,9 @@ impl EditorTab {
         if std::mem::take(&mut self.pending_find_next) {
             self.find_next(&ctx, false);
         }
+        if self.md.block_done {
+            self.finish_block(&ctx);
+        }
         for click in clicks {
             self.clicked(&ctx, click, &mut shared.app_actions);
         }
@@ -1099,6 +1284,12 @@ impl EditorTab {
         let Doc::Ready(buffer) = &self.doc else {
             return;
         };
+        if let Some(editing) = &self.md.block {
+            let selection = self.selection(ctx);
+            let edit = format::insert_block(&editing.draft, selection, &format!("{block}\n"));
+            self.apply_to_target(ctx, edit);
+            return;
+        }
         let selection = if self.shown_mode == Mode::Preview {
             let end = buffer.text.chars().count();
             end..end
@@ -1130,6 +1321,18 @@ impl EditorTab {
                 let dir = self.dir().unwrap_or_default();
                 let target = markdown::links::resolve(&link, &dir);
                 self.follow(ctx, target, new_tab, actions);
+            }
+            Click::EditBlock { source, word } => {
+                if self.shown_mode == Mode::Preview {
+                    self.start_block(source, word);
+                } else if let (Some(source), Doc::Ready(buffer)) = (source, &self.doc) {
+                    // With the source showing, that's where to edit it.
+                    let range = block_edit::block_range(&buffer.text, &source);
+                    let chars = |to: usize| buffer.text[..to].chars().count();
+                    self.select = Some(chars(range.start)..chars(range.end));
+                    self.scroll_to_cursor = true;
+                    self.focus_text = true;
+                }
             }
         }
     }
@@ -1199,6 +1402,7 @@ impl EditorTab {
         self.doc = Doc::Unloaded;
         self.syntax = None;
         self.md.view = MdView::default();
+        self.md.block = None;
         self.md.anchor = anchor;
         self.md.restore_offset = (offset > 0.0).then_some(offset);
     }
@@ -1223,8 +1427,14 @@ impl EditorTab {
         self.go_to(visited.path, None, visited.offset, false);
     }
 
+    /// What's selected in what's being edited: the block, or else the source.
     fn selection(&self, ctx: &Context) -> Range<usize> {
-        TextEditState::load(ctx, self.text_id())
+        let id = self
+            .md
+            .block
+            .as_ref()
+            .map_or(self.text_id(), |block| block.id);
+        TextEditState::load(ctx, id)
             .and_then(|s| s.cursor.char_range())
             .map_or(0..0, |range| {
                 let [min, max] = range.sorted_cursors();
@@ -1260,6 +1470,23 @@ impl EditorTab {
             return;
         };
         let selection = self.selection(ctx);
+        let target = self
+            .md
+            .block
+            .as_ref()
+            .map_or(buffer.text.as_str(), |block| block.draft.as_str());
+        let edit = markdown_edit(
+            target,
+            selection.clone(),
+            &command,
+            self.is_markdown(),
+            self.md.block.is_some(),
+            buffer.indent,
+        );
+        if let Some(edit) = edit {
+            self.apply_to_target(ctx, edit);
+            return;
+        }
         match command {
             Command::Save => {
                 let _ = self.save();
@@ -1274,48 +1501,19 @@ impl EditorTab {
             Command::Back => self.go_back(true),
             Command::Forward => self.go_back(false),
             Command::ToggleOutline => self.outline = !self.outline,
-            Command::Inline(style) => {
-                let edit = format::toggle_inline(&buffer.text, selection, style);
-                self.apply_format(ctx, edit);
-            }
-            Command::Heading(level) => {
-                let edit = format::set_heading(&buffer.text, selection, level);
-                self.apply_format(ctx, edit);
-            }
-            Command::Lines(kind) => {
-                let edit = format::toggle_lines(&buffer.text, selection, kind);
-                self.apply_format(ctx, edit);
-            }
-            Command::CodeBlock => {
-                let edit = format::code_block(&buffer.text, selection);
-                self.apply_format(ctx, edit);
-            }
-            Command::Link => {
-                let edit = format::link(&buffer.text, selection);
-                self.apply_format(ctx, edit);
-            }
-            Command::Image => {
-                let edit = format::image(&buffer.text, selection);
-                self.apply_format(ctx, edit);
-            }
-            Command::Rule => {
-                let edit = format::rule(&buffer.text, selection);
-                self.apply_format(ctx, edit);
-            }
-            Command::InsertTable => {
-                let edit = format::insert_table(&buffer.text, selection);
-                self.apply_format(ctx, edit);
-            }
-            Command::Table(action) => {
-                if let Some(edit) = table::apply(&buffer.text, selection.start, action) {
-                    self.apply_format(ctx, edit);
-                }
-            }
-            Command::PasteUrl(pasted) => {
-                let edit = format::paste_url(&buffer.text, selection.clone(), &pasted)
-                    .unwrap_or_else(|| ops::insert(&buffer.text, selection, &pasted));
-                self.apply_edit(ctx, edit);
-            }
+            // Done above, or nothing to do: no table at the cursor.
+            Command::Inline(_)
+            | Command::Heading(_)
+            | Command::Lines(_)
+            | Command::CodeBlock
+            | Command::Link
+            | Command::Image
+            | Command::Rule
+            | Command::InsertTable
+            | Command::Table(_)
+            | Command::PasteUrl(_) => {}
+            Command::Undo { redo } => self.undo(ctx, redo),
+            Command::FinishBlock => self.finish_block(ctx),
             Command::PasteClipboard(text) => self.paste_from_clipboard(ctx, text),
             Command::Find { replace } => {
                 // What's selected in the source isn't what's being read.
@@ -1356,6 +1554,7 @@ impl EditorTab {
                     focus: true,
                 });
             }
+            Command::CloseBars if self.md.block.is_some() => self.finish_block(ctx),
             Command::CloseBars => {
                 // The text field only keeps a selection while focused.
                 if let Some(find) = self.find.take()
@@ -1377,19 +1576,6 @@ impl EditorTab {
             }
             Command::Indent { outdent } => {
                 let text = &buffer.text;
-                if self.is_markdown() {
-                    let action = if outdent {
-                        TableAction::PreviousCell
-                    } else {
-                        TableAction::NextCell
-                    };
-                    let edit = table::apply(text, selection.start, action)
-                        .or_else(|| format::indent_item(text, selection.clone(), outdent));
-                    if let Some(edit) = edit {
-                        self.apply_edit(ctx, edit);
-                        return;
-                    }
-                }
                 let multiline = {
                     let start = ops::char_to_byte(text, selection.start);
                     let end = ops::char_to_byte(text, selection.end);
@@ -1423,12 +1609,6 @@ impl EditorTab {
                 self.focus_text = true;
             }
             Command::Newline => {
-                if self.is_markdown()
-                    && let Some(edit) = format::continue_list(&buffer.text, selection.clone())
-                {
-                    self.apply_edit(ctx, edit);
-                    return;
-                }
                 let indent = ops::indent_at(&buffer.text, selection.start).to_owned();
                 let edit = ops::insert(&buffer.text, selection, &format!("\n{indent}"));
                 self.apply_edit(ctx, edit);
@@ -1472,12 +1652,6 @@ impl EditorTab {
         self.scroll_to_cursor = true;
     }
 
-    /// A command from the toolbar took focus from the text: it goes back.
-    fn apply_format(&mut self, ctx: &Context, edit: Edit) {
-        self.apply_edit(ctx, edit);
-        self.focus_text = true;
-    }
-
     /// Puts what's on the clipboard into the document: copied files, or a
     /// picture, saved beside it. Failing that, the text it came with.
     fn paste_from_clipboard(&mut self, ctx: &Context, text: Option<String>) {
@@ -1504,15 +1678,20 @@ impl EditorTab {
             }
             None => match (text, &self.doc) {
                 // Only a text field can take it, at a cursor.
-                (Some(text), Doc::Ready(buffer)) if self.shown_mode != Mode::Preview => {
+                (Some(text), Doc::Ready(buffer))
+                    if self.shown_mode != Mode::Preview || self.md.block.is_some() =>
+                {
                     let selection = self.selection(ctx);
-                    let edit = ops::insert(&buffer.text, selection, &text);
-                    self.apply_edit(ctx, edit);
+                    let target = self
+                        .md
+                        .block
+                        .as_ref()
+                        .map_or(buffer.text.as_str(), |block| block.draft.as_str());
+                    let edit = ops::insert(target, selection, &text);
+                    self.apply_to_target(ctx, edit);
                     None
                 }
-                (Some(_), _) => {
-                    Some("Text can't be pasted while reading: open the source.".to_owned())
-                }
+                (Some(_), _) => Some("To paste text, double-click where it should go.".to_owned()),
                 (None, _) => Some("The clipboard has no picture or files.".to_owned()),
             },
         };
@@ -1555,6 +1734,56 @@ impl EditorTab {
 
 fn text_id(tab: u64) -> Id {
     Id::new(("editor-text", tab))
+}
+
+fn block_id(tab: u64) -> Id {
+    Id::new(("editor-block", tab))
+}
+
+/// What a command does to markdown text, wherever that's being edited. `None`
+/// when it isn't that kind of command, or has nothing to act on here.
+fn markdown_edit(
+    text: &str,
+    selection: Range<usize>,
+    command: &Command,
+    is_markdown: bool,
+    in_block: bool,
+    indent: Indent,
+) -> Option<Edit> {
+    match command {
+        Command::Inline(style) => Some(format::toggle_inline(text, selection, *style)),
+        Command::Heading(level) => Some(format::set_heading(text, selection, *level)),
+        Command::Lines(kind) => Some(format::toggle_lines(text, selection, *kind)),
+        Command::CodeBlock => Some(format::code_block(text, selection)),
+        Command::Link => Some(format::link(text, selection)),
+        Command::Image => Some(format::image(text, selection)),
+        Command::Rule => Some(format::rule(text, selection)),
+        Command::InsertTable => Some(format::insert_table(text, selection)),
+        Command::Table(action) => table::apply(text, selection.start, *action),
+        Command::PasteUrl(pasted) => Some(
+            format::paste_url(text, selection.clone(), pasted)
+                .unwrap_or_else(|| ops::insert(text, selection, pasted)),
+        ),
+        Command::Indent { outdent } if is_markdown => {
+            let action = if *outdent {
+                TableAction::PreviousCell
+            } else {
+                TableAction::NextCell
+            };
+            table::apply(text, selection.start, action)
+                .or_else(|| format::indent_item(text, selection.clone(), *outdent))
+                .or_else(|| in_block.then(|| ops::insert(text, selection, &indent.text())))
+        }
+        Command::Newline if is_markdown => {
+            format::continue_list(text, selection.clone()).or_else(|| {
+                in_block.then(|| {
+                    let line_indent = ops::indent_at(text, selection.start).to_owned();
+                    ops::insert(text, selection, &format!("\n{line_indent}"))
+                })
+            })
+        }
+        _ => None,
+    }
 }
 
 /// Reads the file on a thread.
@@ -1603,6 +1832,7 @@ fn shortcuts(
     is_markdown: bool,
     lightbox_open: bool,
     takes_paste: bool,
+    editing_block: bool,
 ) -> Vec<Command> {
     use crate::keymap::Command as Global;
     let cmd = Modifiers::COMMAND;
@@ -1666,6 +1896,19 @@ fn shortcuts(
         // Escape closes a picture opened over everything first.
         if !lightbox_open {
             key(Modifiers::NONE, Key::Escape, Command::CloseBars);
+        }
+        if text_focused && editing_block && i.consume_key(Modifiers::COMMAND, Key::Enter) {
+            commands.push(Command::FinishBlock);
+        }
+        // With no text field, undo is for the document's text.
+        if takes_paste && !text_focused {
+            if i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z)
+                || i.consume_key(Modifiers::COMMAND, Key::Y)
+            {
+                commands.push(Command::Undo { redo: true });
+            } else if i.consume_key(Modifiers::COMMAND, Key::Z) {
+                commands.push(Command::Undo { redo: false });
+            }
         }
         // With no text field to take it, it's for the document as a whole.
         if takes_paste && !text_focused && crate::system_clipboard::paste_pressed(i) {
@@ -2149,6 +2392,7 @@ fn status_bar(
     id: u64,
     stats: Option<Stats>,
     source_shown: bool,
+    hint: Option<&str>,
 ) {
     ui.horizontal(|ui| {
         let detected = buffer.detected_syntax;
@@ -2182,6 +2426,9 @@ fn status_bar(
                 stats.words,
                 stats.minutes()
             ));
+        }
+        if let Some(hint) = hint {
+            ui.weak(hint);
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if let Some((line, col, selected)) = buffer.view.status.filter(|_| source_shown) {
@@ -2474,7 +2721,19 @@ fn rendered(
         compact: false,
         hits: rendered.hits,
     };
-    md.view.show(ui, rendered.id, &options, images)
+    let clicks = md
+        .view
+        .show(ui, rendered.id, &options, images, md.block.as_mut());
+    if let Some(block) = &md.block {
+        let pane = ui.max_rect();
+        md.block_done |= ui.input(|i| {
+            i.pointer.any_pressed()
+                && i.pointer
+                    .interact_pos()
+                    .is_some_and(|pos| pane.contains(pos) && !block.rect.contains(pos))
+        });
+    }
+    clicks
 }
 
 /// Where the scrolling keys go from here, if one was pressed.
@@ -3009,6 +3268,227 @@ mod tests {
         assert_eq!(headings.len(), 2);
         assert_eq!(headings[1].slug, "two");
         assert_eq!(h.tab.md.view.stats().words, 3);
+    }
+
+    /// Opens a block as a double-click on it would.
+    fn edit_block(h: &mut Harness, needle: &str) {
+        let text = text_of(h);
+        let at = text.find(needle).unwrap();
+        let source = h
+            .tab
+            .md
+            .view
+            .document()
+            .blocks
+            .iter()
+            .find(|b| b.source.contains(&at))
+            .map(|b| b.source.clone());
+        let ctx = h.ctx.clone();
+        h.tab.clicked(
+            &ctx,
+            Click::EditBlock {
+                source,
+                word: Some((needle.to_owned(), 0)),
+            },
+            &mut Vec::new(),
+        );
+        h.frame(vec![]);
+        h.frame(vec![]);
+        h.frame(vec![]);
+    }
+
+    fn reading(name: &str, source: &str) -> Harness {
+        let mut h = Harness::with_file(name, "a.md", source);
+        h.tab.mode = Mode::Preview;
+        h.frame(vec![]);
+        h.frame(vec![]);
+        h
+    }
+
+    const THREE: &str = "first\n\nsecond  \nline\n\n\nthird\n";
+
+    #[test]
+    fn a_block_edited_in_place_changes_only_itself() {
+        let mut h = reading("block-edit", THREE);
+        edit_block(&mut h, "line");
+        let block = h.tab.md.block.as_ref().expect("editing");
+        assert_eq!(block.draft, "second  \nline");
+        assert!(h.ctx.memory(|m| m.has_focus(block.id)), "ready to type");
+        assert_eq!(text_of(&h), THREE, "nothing yet");
+
+        h.frame(vec![Event::Text("NEW ".into())]);
+        h.frame(vec![]);
+        assert_eq!(h.tab.md.block.as_ref().unwrap().draft, "second  \nNEW line");
+        assert!(h.tab.is_dirty(), "unsaved as soon as it's typed");
+        assert_eq!(text_of(&h), THREE, "the text waits");
+
+        h.frame(vec![press(Key::Escape, Modifiers::NONE)]);
+        h.frame(vec![]);
+        assert!(h.tab.md.block.is_none());
+        assert_eq!(text_of(&h), "first\n\nsecond  \nNEW line\n\n\nthird\n");
+        assert!(h.tab.is_dirty());
+    }
+
+    #[test]
+    fn an_untouched_block_changes_nothing() {
+        let mut h = reading("block-untouched", THREE);
+        edit_block(&mut h, "second");
+        assert!(!h.tab.is_dirty());
+        h.frame(vec![press(Key::Enter, Modifiers::COMMAND)]);
+        h.frame(vec![]);
+        assert!(h.tab.md.block.is_none());
+        assert_eq!(text_of(&h), THREE);
+        assert!(!h.tab.is_dirty());
+    }
+
+    #[test]
+    fn finishing_a_block_is_one_undo_step_and_redoes() {
+        let mut h = reading("block-undo", THREE);
+        edit_block(&mut h, "first");
+        h.frame(vec![Event::Text("x".into())]);
+        h.frame(vec![Event::Text("y".into())]);
+        h.frame(vec![press(Key::Escape, Modifiers::NONE)]);
+        h.frame(vec![]);
+        let edited = text_of(&h);
+        assert!(edited.contains("xyfirst"), "{edited}");
+        h.frame(vec![press(Key::Z, Modifiers::COMMAND)]);
+        h.frame(vec![]);
+        assert_eq!(text_of(&h), THREE);
+        h.frame(vec![press(Key::Z, Modifiers::COMMAND | Modifiers::SHIFT)]);
+        h.frame(vec![]);
+        assert_eq!(text_of(&h), edited);
+    }
+
+    #[test]
+    fn saving_keeps_the_edit_and_the_block_open() {
+        let mut h = reading("block-save", THREE);
+        edit_block(&mut h, "second");
+        h.frame(vec![Event::Text("x".into())]);
+        h.frame(vec![press(Key::S, Modifiers::COMMAND)]);
+        h.frame(vec![]);
+        assert!(disk::read_to_string(&h.path).unwrap().contains("xsecond"));
+        assert!(h.tab.md.block.is_some(), "still editing");
+        assert!(!h.tab.is_dirty());
+        h.frame(vec![Event::Text("y".into())]);
+        h.frame(vec![press(Key::Escape, Modifiers::NONE)]);
+        h.frame(vec![]);
+        assert!(text_of(&h).contains("xysecond"), "{}", text_of(&h));
+        assert_eq!(text_of(&h).matches("second").count(), 1);
+    }
+
+    #[test]
+    fn the_formatting_shortcuts_work_on_the_block() {
+        let mut h = reading("block-format", "one two\n\n- a\n");
+        edit_block(&mut h, "two");
+        h.frame(vec![press(Key::B, Modifiers::COMMAND)]);
+        h.frame(vec![]);
+        assert_eq!(h.tab.md.block.as_ref().unwrap().draft, "one **two**");
+        assert_eq!(text_of(&h), "one two\n\n- a\n", "the text waits");
+        h.frame(vec![press(Key::Escape, Modifiers::NONE)]);
+        h.frame(vec![]);
+        assert_eq!(text_of(&h), "one **two**\n\n- a\n");
+
+        edit_block(&mut h, "a");
+        h.frame(vec![press(Key::End, Modifiers::NONE)]);
+        h.frame(vec![press(Key::Enter, Modifiers::NONE)]);
+        h.frame(vec![]);
+        assert_eq!(
+            h.tab.md.block.as_ref().unwrap().draft,
+            "- a\n- ",
+            "lists continue"
+        );
+    }
+
+    #[test]
+    fn enter_in_a_block_makes_a_new_line() {
+        let mut h = reading("block-enter", "one\n");
+        edit_block(&mut h, "one");
+        h.frame(vec![press(Key::End, Modifiers::NONE)]);
+        h.frame(vec![press(Key::Enter, Modifiers::NONE)]);
+        h.frame(vec![Event::Text("two".into())]);
+        h.frame(vec![press(Key::Escape, Modifiers::NONE)]);
+        h.frame(vec![]);
+        assert_eq!(text_of(&h), "one\ntwo\n");
+    }
+
+    #[test]
+    fn emptying_a_block_removes_it() {
+        let mut h = reading("block-empty", "one\n\ntwo\n");
+        edit_block(&mut h, "one");
+        h.tab.md.block.as_mut().unwrap().draft.clear();
+        h.frame(vec![press(Key::Escape, Modifiers::NONE)]);
+        h.frame(vec![]);
+        assert_eq!(text_of(&h), "two\n");
+    }
+
+    #[test]
+    fn a_new_block_goes_at_the_end() {
+        let mut h = reading("block-new", "one\n");
+        let ctx = h.ctx.clone();
+        h.tab.clicked(
+            &ctx,
+            Click::EditBlock {
+                source: None,
+                word: None,
+            },
+            &mut Vec::new(),
+        );
+        h.frame(vec![]);
+        h.frame(vec![]);
+        h.frame(vec![Event::Text("two".into())]);
+        h.frame(vec![press(Key::Escape, Modifiers::NONE)]);
+        h.frame(vec![]);
+        assert_eq!(text_of(&h), "one\n\ntwo\n");
+    }
+
+    #[test]
+    fn leaving_preview_keeps_the_block() {
+        let mut h = reading("block-mode", THREE);
+        edit_block(&mut h, "first");
+        h.frame(vec![Event::Text("x".into())]);
+        h.tab.mode = Mode::Source;
+        h.frame(vec![]);
+        assert!(h.tab.md.block.is_none());
+        assert!(text_of(&h).contains("xfirst"));
+    }
+
+    #[test]
+    fn a_file_changed_underneath_doesnt_get_overwritten() {
+        let mut h = reading("block-conflict", THREE);
+        edit_block(&mut h, "first");
+        h.tab.md.block.as_mut().unwrap().draft = "mine".to_owned();
+        let Doc::Ready(buffer) = &mut h.tab.doc else {
+            panic!("not loaded");
+        };
+        buffer.text = "theirs entirely\n".to_owned();
+        h.frame(vec![press(Key::Escape, Modifiers::NONE)]);
+        h.frame(vec![]);
+        assert_eq!(text_of(&h), "theirs entirely\n");
+        assert!(matches!(&h.tab.doc, Doc::Ready(b) if b.error.is_some()));
+        assert!(h.tab.md.block.is_none());
+    }
+
+    #[test]
+    fn a_read_only_file_isnt_edited() {
+        let mut h = reading("block-readonly", THREE);
+        let Doc::Ready(buffer) = &mut h.tab.doc else {
+            panic!("not loaded");
+        };
+        buffer.read_only = Some(ReadOnly::Permissions);
+        edit_block(&mut h, "first");
+        assert!(h.tab.md.block.is_none());
+    }
+
+    #[test]
+    fn with_the_source_showing_a_double_click_selects_the_block_there() {
+        let mut h = Harness::with_file("block-split", "a.md", THREE);
+        h.tab.mode = Mode::Split;
+        h.frame(vec![]);
+        h.frame(vec![]);
+        edit_block(&mut h, "third");
+        assert!(h.tab.md.block.is_none());
+        let at = THREE.find("third").unwrap();
+        assert_eq!(h.tab.selection(&h.ctx), at..at + 5);
     }
 
     #[test]

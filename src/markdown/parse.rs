@@ -36,6 +36,7 @@ pub struct Heading {
 #[derive(Debug)]
 pub struct Footnote {
     pub label: String,
+    pub source: Range<usize>,
     pub number: usize,
     pub blocks: Vec<Block>,
 }
@@ -326,9 +327,10 @@ pub fn parse(source: &str) -> Document {
     let mut footnotes: Vec<Footnote> = builder
         .footnote_blocks
         .into_iter()
-        .map(|(label, blocks)| Footnote {
+        .map(|(label, source, blocks)| Footnote {
             number: numbers.get(&label).copied().unwrap_or(usize::MAX),
             label,
+            source,
             blocks,
         })
         .collect();
@@ -368,7 +370,7 @@ struct Builder<'a> {
     /// How many times each slug was used, to make them unique.
     slugs: HashMap<String, usize>,
     footnote_numbers: HashMap<String, usize>,
-    footnote_blocks: Vec<(String, Vec<Block>)>,
+    footnote_blocks: Vec<(String, Range<usize>, Vec<Block>)>,
     document: Document,
 }
 
@@ -494,7 +496,7 @@ impl Builder<'_> {
             Tag::FootnoteDefinition(label) => {
                 let label = label.to_string();
                 let children = self.blocks(Some(TagEnd::FootnoteDefinition), depth + 1);
-                self.footnote_blocks.push((label, children));
+                self.footnote_blocks.push((label, range, children));
                 return;
             }
             // Parts of a container, out of place: not reachable from

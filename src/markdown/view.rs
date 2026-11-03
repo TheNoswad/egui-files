@@ -42,6 +42,27 @@ pub enum Click {
     },
     /// Tick or untick the task.
     Task(Task),
+    /// Double-clicked this block, on this word as it shows on the page and
+    /// how many times it's there before that. `None` is below every block.
+    EditBlock {
+        source: Option<std::ops::Range<usize>>,
+        word: Option<(String, usize)>,
+    },
+}
+
+/// A block of the document being edited in place, as its markdown.
+pub struct BlockEditor {
+    pub id: Id,
+    /// What it covers in the source, and what's there.
+    pub range: std::ops::Range<usize>,
+    pub original: String,
+    pub draft: String,
+    /// As it was last drawn, for the room to make and for clicks outside it.
+    pub height: f32,
+    pub rect: Rect,
+    pub focus: bool,
+    /// Put the cursor here, in chars.
+    pub caret: Option<usize>,
 }
 
 pub struct Options<'a> {
@@ -195,7 +216,14 @@ impl MdView {
         }
     }
 
-    fn update_layout(&mut self, ui: &Ui, width: f32, options: &Options<'_>, images: &mut Images) {
+    fn update_layout(
+        &mut self,
+        ui: &Ui,
+        width: f32,
+        options: &Options<'_>,
+        images: &mut Images,
+        editing: Option<(std::ops::Range<usize>, f32)>,
+    ) {
         let ctx = ui.ctx();
         let mut theme = Theme::new(ui.visuals(), options.code_fg, options.code_bg);
         if options.compact {
@@ -211,6 +239,7 @@ impl MdView {
             code_generation: self.code_generation,
             fold_generation: self.fold_generation,
             allow_remote: options.allow_remote,
+            editing,
         };
         if self.inputs.as_ref() == Some(&inputs) {
             return;
@@ -249,6 +278,7 @@ impl MdView {
         id: Id,
         options: &Options<'_>,
         images: &mut Images,
+        mut editor: Option<&mut BlockEditor>,
     ) -> Vec<Click> {
         self.update_code(ui.ctx(), options.syntax_theme);
         let available = ui.available_width();
@@ -256,10 +286,12 @@ impl MdView {
         let page = (available - MARGIN * 2.0 - scroll_bar)
             .min(Theme::new(ui.visuals(), options.code_fg, options.code_bg).max_width)
             .max(40.0);
-        self.update_layout(ui, page, options, images);
+        let editing = editor.as_ref().map(|e| (e.range.clone(), e.height));
+        self.update_layout(ui, page, options, images, editing);
         let height = self.layout.height + MARGIN * 2.0;
         let mut clicks = Vec::new();
         let mut opened = None;
+        let mut page_origin = Pos2::ZERO;
         let mut scroll = ScrollArea::vertical()
             .id_salt(id.with("scroll"))
             .auto_shrink(false)
@@ -272,6 +304,7 @@ impl MdView {
             let x = ((available - scroll_bar - page) / 2.0).max(MARGIN);
             let origin = ui.max_rect().min + vec2(x, MARGIN);
             let visible = viewport.translate(ui.max_rect().min.to_vec2());
+            page_origin = origin;
             paint(
                 ui,
                 &self.layout.items,
@@ -289,11 +322,15 @@ impl MdView {
                     fold_generation: &mut self.fold_generation,
                     hits: options.hits,
                     opened: Some(&mut opened),
+                    editor: editor.as_deref_mut(),
                 },
             );
         });
         self.offset = output.state.offset.y;
         self.viewport_height = output.inner_rect.height();
+        if options.editable && editor.is_none() && !self.lightbox_is_open() {
+            clicks.extend(self.double_clicked(ui, output.inner_rect, page_origin));
+        }
         if let Some(key) = opened {
             self.lightbox = Some(Lightbox {
                 key,
@@ -316,7 +353,7 @@ impl MdView {
     ) -> Vec<Click> {
         self.update_code(ui.ctx(), options.syntax_theme);
         let width = ui.available_width().max(40.0);
-        self.update_layout(ui, width, options, images);
+        self.update_layout(ui, width, options, images, None);
         let (rect, _) = ui.allocate_exact_size(vec2(width, self.layout.height), Sense::hover());
         let mut clicks = Vec::new();
         paint(
@@ -336,9 +373,36 @@ impl MdView {
                 fold_generation: &mut self.fold_generation,
                 hits: options.hits,
                 opened: None,
+                editor: None,
             },
         );
         clicks
+    }
+
+    /// A double-click on the document, for editing: not on links and the like,
+    /// and not when something's in front of it.
+    fn double_clicked(&self, ui: &Ui, viewport: Rect, origin: Pos2) -> Option<Click> {
+        let pos = ui.input(|i| {
+            i.pointer
+                .button_double_clicked(egui::PointerButton::Primary)
+                .then(|| i.pointer.interact_pos())
+                .flatten()
+        })?;
+        let in_front = ui
+            .ctx()
+            .layer_id_at(pos)
+            .is_some_and(|layer| layer != ui.layer_id());
+        if !viewport.contains(pos) || in_front {
+            return None;
+        }
+        let on_page = pos - origin.to_vec2();
+        if self.layout.is_control_at(on_page) {
+            return None;
+        }
+        Some(Click::EditBlock {
+            source: self.layout.block_at(on_page.y).cloned(),
+            word: self.layout.word_at(on_page),
+        })
     }
 
     /// Shows the picture opened, if there is one: the wheel or a pinch zooms,
@@ -469,6 +533,7 @@ struct Painting<'a> {
     hits: Option<(&'a [Hit], Option<usize>)>,
     /// Takes the picture clicked on, where they can be opened.
     opened: Option<&'a mut Option<String>>,
+    editor: Option<&'a mut BlockEditor>,
 }
 
 /// Draws the items on screen. While text is selected, all of it goes through
@@ -492,6 +557,12 @@ fn paint(
         let on_screen = item.rect().intersects(local_visible);
         let item_id = id.with(index);
         match item {
+            // Even off screen: it has the keyboard's focus to keep.
+            Item::Editor { rect } => {
+                if let Some(editor) = painting.editor.as_deref_mut() {
+                    paint_editor(ui, rect.translate(origin.to_vec2()), editor);
+                }
+            }
             Item::Text(text) if on_screen || selecting => {
                 paint_text(ui, text, origin, item_id, on_screen, painting);
                 if on_screen {
@@ -587,6 +658,39 @@ fn paint(
                 }
             }
         }
+    }
+}
+
+/// The markdown of the block being edited, in its place on the page.
+fn paint_editor(ui: &mut Ui, rect: Rect, editor: &mut BlockEditor) {
+    if let Some(caret) = editor.caret.take() {
+        let mut state =
+            egui::text_edit::TextEditState::load(ui.ctx(), editor.id).unwrap_or_default();
+        let cursor = egui::text::CCursor::new(caret);
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(cursor)));
+        state.store(ui.ctx(), editor.id);
+    }
+    let output = ui
+        .scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+            egui::TextEdit::multiline(&mut editor.draft)
+                .id(editor.id)
+                .code_editor()
+                .desired_width(rect.width())
+                .desired_rows(1)
+                .margin(egui::Margin::same(8))
+                .show(ui)
+        })
+        .inner;
+    if std::mem::take(&mut editor.focus) {
+        output.response.request_focus();
+    }
+    editor.rect = output.response.rect;
+    let height = output.response.rect.height().round();
+    if (height - editor.height).abs() >= 1.0 {
+        editor.height = height;
+        ui.ctx().request_repaint();
     }
 }
 

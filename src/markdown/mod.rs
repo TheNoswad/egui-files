@@ -4,6 +4,7 @@
 //! like ticking a task, is a splice of its bytes.
 
 pub mod assets;
+pub mod block_edit;
 pub mod format;
 pub mod images;
 pub mod layout;
@@ -17,7 +18,7 @@ use serde::{Deserialize, Serialize};
 pub use self::{
     images::Images,
     links::{Target, is_markdown},
-    view::{Click, MdView, Options},
+    view::{BlockEditor, Click, MdView, Options},
 };
 
 /// What to do about pictures in documents that are on other servers.

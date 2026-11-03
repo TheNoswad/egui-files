@@ -287,6 +287,10 @@ pub enum Item {
         content_width: f32,
         items: Vec<Item>,
     },
+    /// The block being edited, as its markdown.
+    Editor {
+        rect: Rect,
+    },
     /// A button to copy a code block, which shows when it's hovered.
     CopyCode {
         rect: Rect,
@@ -305,6 +309,7 @@ impl Item {
             | Item::Stroke { rect, .. }
             | Item::Square { rect, .. }
             | Item::Widget { rect, .. }
+            | Item::Editor { rect }
             | Item::Sideways { rect, .. } => *rect,
             Item::CopyCode { block, .. } => *block,
             Item::Line { from, to, .. } => Rect::from_two_pos(*from, *to).expand(1.0),
@@ -337,6 +342,8 @@ pub struct Inputs {
     pub code_generation: u64,
     pub fold_generation: u64,
     pub allow_remote: bool,
+    /// The source range being edited, and how tall its editor is.
+    pub editing: Option<(Range<usize>, f32)>,
 }
 
 #[derive(Default)]
@@ -347,9 +354,60 @@ pub struct Layout {
     pub anchors: HashMap<String, f32>,
     /// `(source offset, y)` of each block, both increasing.
     pub map: Vec<(usize, f32)>,
+    /// Each block on the page as a whole: its source, and where it starts and
+    /// ends going down. What double-clicking edits.
+    pub blocks: Vec<(Range<usize>, f32, f32)>,
 }
 
 impl Layout {
+    /// The block at this height, or the next one down from a gap. `None` is
+    /// below them all.
+    pub fn block_at(&self, y: f32) -> Option<&Range<usize>> {
+        self.blocks
+            .iter()
+            .find(|(_, _, bottom)| y <= *bottom)
+            .map(|(source, _, _)| source)
+    }
+
+    /// Whether this point is on something that does its own thing when clicked.
+    pub fn is_control_at(&self, pos: egui::Pos2) -> bool {
+        self.items.iter().any(|item| match item {
+            Item::Widget { rect, .. } => rect.contains(pos),
+            Item::Text(text) => text.link_at(pos).is_some(),
+            _ => false,
+        })
+    }
+
+    /// The word at this point, and how many times it shows before there in the
+    /// same text, to find it again in the source.
+    pub fn word_at(&self, pos: egui::Pos2) -> Option<(String, usize)> {
+        self.items.iter().find_map(|item| {
+            let Item::Text(text) = item else {
+                return None;
+            };
+            if !text.rect().contains(pos) {
+                return None;
+            }
+            let chars: Vec<char> = text.galley.text().chars().collect();
+            let at = text.galley.cursor_from_pos(pos - text.pos).index.0;
+            let is_word = |c: &char| c.is_alphanumeric() || *c == '_';
+            let start = chars[..at.min(chars.len())]
+                .iter()
+                .rposition(|c| !is_word(c))
+                .map_or(0, |i| i + 1);
+            let end = chars[start.min(chars.len())..]
+                .iter()
+                .position(|c| !is_word(c))
+                .map_or(chars.len(), |i| start + i);
+            let word: String = chars[start..end].iter().collect();
+            if word.is_empty() {
+                return None;
+            }
+            let before: String = chars[..start].iter().collect();
+            Some((word.clone(), before.matches(word.as_str()).count()))
+        })
+    }
+
     /// How far down the document this source offset shows.
     pub fn y_of_source(&self, offset: usize) -> f32 {
         let next = self.map.partition_point(|&(source, _)| source <= offset);
@@ -520,9 +578,10 @@ pub fn layout(document: &Document, params: Params<'_>) -> Layout {
         out: Layout::default(),
         y: 0.0,
         list_depth: 0,
+        editing: inputs.editing.clone(),
     };
     let width = inputs.width;
-    builder.blocks(&document.blocks, 0.0, width);
+    builder.document_blocks(document, width);
     if !document.footnotes.is_empty() {
         builder.footnotes(document, width);
     }
@@ -555,6 +614,11 @@ struct Builder<'a> {
     y: f32,
     /// How many lists this is inside of, which varies their bullets.
     list_depth: usize,
+    editing: Option<(Range<usize>, f32)>,
+}
+
+fn overlaps(a: &Range<usize>, b: &Range<usize>) -> bool {
+    a.start < b.end && b.start < a.end
 }
 
 /// Inline text laid out: its galley, its links by char, and its images.
@@ -579,6 +643,65 @@ impl Builder<'_> {
             italic: false,
             halign: Align::LEFT,
         }
+    }
+
+    /// The document's own blocks, with the one being edited as its editor:
+    /// in its place, or for a new one after what comes before it.
+    fn document_blocks(&mut self, document: &Document, width: f32) {
+        let editing = self.editing.clone();
+        let in_footnote = editing.as_ref().is_some_and(|(range, _)| {
+            document
+                .footnotes
+                .iter()
+                .any(|f| overlaps(&f.source, range))
+        });
+        let mut placed = in_footnote || editing.is_none();
+        let mut first = true;
+        for block in &document.blocks {
+            let replaced = editing
+                .as_ref()
+                .is_some_and(|(range, _)| overlaps(&block.source, range));
+            let comes_after = editing
+                .as_ref()
+                .is_some_and(|(range, _)| block.source.start >= range.start);
+            if !placed
+                && (replaced || comes_after)
+                && let Some((range, height)) = &editing
+            {
+                if !first {
+                    self.y += self.theme.gap();
+                }
+                first = false;
+                placed = true;
+                self.editor(range, *height, width);
+            }
+            if replaced {
+                continue;
+            }
+            if !first {
+                self.y += self.theme.gap();
+            }
+            first = false;
+            let top = self.y;
+            self.block(block, 0.0, width);
+            self.out.blocks.push((block.source.clone(), top, self.y));
+        }
+        if !placed && let Some((range, height)) = &editing {
+            if !first {
+                self.y += self.theme.gap();
+            }
+            self.editor(range, *height, width);
+        }
+    }
+
+    fn editor(&mut self, range: &Range<usize>, height: f32, width: f32) {
+        let top = self.y;
+        self.out.map.push((range.start, top));
+        self.out.items.push(Item::Editor {
+            rect: Rect::from_min_size(egui::pos2(0.0, top), egui::vec2(width, height)),
+        });
+        self.y += height;
+        self.out.blocks.push((range.clone(), top, self.y));
     }
 
     fn blocks(&mut self, blocks: &[Block], x: f32, width: f32) {
@@ -1166,6 +1289,13 @@ impl Builder<'_> {
             if index > 0 {
                 self.y += self.theme.gap() * 0.5;
             }
+            if let Some((range, height)) = self.editing.clone()
+                && overlaps(&footnote.source, &range)
+            {
+                self.editor(&range, height, width);
+                continue;
+            }
+            let top = self.y;
             self.out
                 .anchors
                 .insert(format!("fn:{}", footnote.label), self.y);
@@ -1208,6 +1338,7 @@ impl Builder<'_> {
                 }));
             }
             self.blocks(&footnote.blocks, gutter, width - gutter - size * 1.5);
+            self.out.blocks.push((footnote.source.clone(), top, self.y));
         }
     }
 
@@ -1524,6 +1655,7 @@ fn offset(item: &mut Item, by: Vec2) {
         Item::Fill { rect, .. }
         | Item::Stroke { rect, .. }
         | Item::Square { rect, .. }
+        | Item::Editor { rect }
         | Item::Widget { rect, .. } => *rect = rect.translate(by),
         Item::Line { from, to, .. } => {
             *from += by;
@@ -1568,6 +1700,7 @@ mod tests {
             code_generation: 0,
             fold_generation: 0,
             allow_remote: false,
+            editing: None,
         }
     }
 
@@ -1743,6 +1876,124 @@ mod tests {
                 .all(|pair| pair[1].min.y >= pair[0].max.y - 0.5)
         );
         assert_eq!(row_rects(&item.galley, &(0..3)).len(), 1);
+    }
+
+    fn run_editing(source: &str, range: Range<usize>, height: f32) -> Layout {
+        let ctx = Context::default();
+        let document = parse(source);
+        let mut cache = GalleyCache::default();
+        let mut result = None;
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let mut inputs = inputs(ui.ctx(), 500.0);
+            inputs.editing = Some((range.clone(), height));
+            result = Some(layout(
+                &document,
+                Params {
+                    ctx: ui.ctx(),
+                    inputs: &inputs,
+                    images: &mut NoImages,
+                    cache: &mut cache,
+                    code_spans: &CodeSpans::new(),
+                    toggled: &HashSet::new(),
+                },
+            ));
+        });
+        output.textures_delta.clear();
+        result.expect("ran a frame")
+    }
+
+    fn editors(layout: &Layout) -> Vec<Rect> {
+        layout
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Editor { rect } => Some(*rect),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_block_being_edited_gives_way_to_its_editor() {
+        let source = "first\n\nsecond\n\nthird\n";
+        let at = source.find("second").unwrap();
+        let layout = run_editing(source, at..at + 6, 100.0);
+        let items = texts(&layout);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].galley.text(), "first");
+        assert_eq!(items[1].galley.text(), "third");
+        let editor = editors(&layout)[0];
+        assert_eq!(editor.height(), 100.0);
+        assert!(editor.min.y > items[0].rect().max.y);
+        assert!(
+            items[1].rect().min.y > editor.max.y,
+            "what's after moves down"
+        );
+    }
+
+    #[test]
+    fn a_new_block_is_edited_after_the_others() {
+        let source = "first\n";
+        let layout = run_editing(source, source.len()..source.len(), 50.0);
+        assert_eq!(texts(&layout).len(), 1);
+        assert!(editors(&layout)[0].min.y > texts(&layout)[0].rect().max.y);
+        let layout = run_editing("", 0..0, 50.0);
+        assert_eq!(editors(&layout).len(), 1, "even with nothing there");
+    }
+
+    #[test]
+    fn a_footnote_being_edited_is_edited_with_the_footnotes() {
+        let source = "text[^n]\n\n[^n]: note\n\nmore\n";
+        let at = source.find("[^n]:").unwrap();
+        let layout = run_editing(source, at..at + 10, 40.0);
+        let found = editors(&layout);
+        assert_eq!(found.len(), 1);
+        let items = texts(&layout);
+        assert!(items.iter().all(|t| t.galley.text() != "note"));
+        assert!(found[0].min.y > items[1].rect().max.y, "below the document");
+    }
+
+    #[test]
+    fn a_click_finds_its_block_and_word() {
+        let source = "first word\n\nsecond word here\n\n- list\n";
+        let layout = run(source, 500.0, &mut NoImages);
+        let items = texts(&layout);
+        let second = items[1];
+        let at = source.find("second").unwrap();
+        assert!(
+            layout
+                .block_at(second.rect().center().y)
+                .unwrap()
+                .contains(&at)
+        );
+        assert!(layout.block_at(layout.height + 50.0).is_none());
+        // In the gap above it: still that one, the next down.
+        assert!(
+            layout
+                .block_at(second.rect().min.y - 1.0)
+                .unwrap()
+                .contains(&at)
+        );
+        let word = second.galley.pos_from_cursor(CCursor::new(9)).center();
+        assert_eq!(
+            layout.word_at(second.pos + word.to_vec2()),
+            Some(("word".to_owned(), 0))
+        );
+    }
+
+    #[test]
+    fn links_and_tasks_are_controls_not_text_to_edit() {
+        let layout = run("[link](x) plain\n\n- [ ] task\n", 500.0, &mut NoImages);
+        let item = texts(&layout)[0];
+        let on_link = item.galley.pos_from_cursor(CCursor::new(1)).center();
+        assert!(layout.is_control_at(item.pos + on_link.to_vec2()));
+        let on_plain = item.galley.pos_from_cursor(CCursor::new(8)).center();
+        assert!(!layout.is_control_at(item.pos + on_plain.to_vec2()));
+        let task = layout.items.iter().find_map(|item| match item {
+            Item::Widget { rect, .. } => Some(*rect),
+            _ => None,
+        });
+        assert!(layout.is_control_at(task.unwrap().center()));
     }
 
     #[test]

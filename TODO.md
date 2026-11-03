@@ -56,8 +56,10 @@
 - [ ] Pasting files and pictures (`system_clipboard.rs`), in the file browser and documents: the whole path only tried on X11, and reading the clipboard on KWin Wayland; check Ctrl+V on Wayland and Windows. Android and the browser can't read it: there, pictures come by dropping or the toolbar's template
 - [ ] Clicking a picture in a rendered document on a touchscreen: the lightbox is only checked with a mouse; pinch-to-zoom in it is untested
 - [ ] Phase 3: math and Mermaid (their source is shown until then)
-- [ ] Phase 4: Live view
-- [ ] Phase 5: WYSIWYG
+- [x] Editing while reading: double-click a block in Preview to edit its markdown in place, with the formatting commands; a double-click below the last one adds a paragraph (`block_edit.rs`). One splice of the source per block, and one undo step
+- [ ] Editing a list or quote is of the whole of it: smaller blocks, down to the item, would jump less
+- [ ] Phase 4: Live view, or does editing while reading cover it?
+- [ ] Phase 5: WYSIWYG, editing the rendered text itself rather than its markdown
 - [ ] Phase 6: updating links in documents when files move in the app
 - [ ] Raw HTML: a subset (img, br, details/summary, kbd, sub/sup, center); shown as written, dimmed, until then
 - [ ] Export (HTML, rich text, PDF)
