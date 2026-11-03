@@ -27,9 +27,10 @@ use egui_phosphor::regular as icon;
 use serde::{Deserialize, Serialize};
 
 use self::{
-    document::{LineEnding, LoadError, Loaded, ReadOnly, Stamp},
+    document::{Encoding, LineEnding, LoadError, Loaded, ReadOnly, Stamp},
     highlight::{Highlighter, LineSpans, ThemeColors},
     ops::{Edit, Indent},
+    table::Table,
 };
 use crate::tab::Shared;
 
@@ -121,6 +122,9 @@ pub struct EditorTab {
     /// Chosen by hand instead of detected.
     #[serde(default)]
     syntax: Option<String>,
+    /// How a table file is shown.
+    #[serde(default)]
+    table_options: table::Options,
 
     #[serde(skip)]
     doc: Doc,
@@ -169,6 +173,11 @@ struct Buffer {
     dirty_version: u64,
     line_ending: LineEnding,
     bom: bool,
+    encoding: Encoding,
+    /// Saving was refused for this character, which the encoding can't store.
+    unrepresentable: Option<char>,
+    /// The user asked to save, from the banner.
+    save_requested: bool,
     read_only: Option<ReadOnly>,
     stamp: Option<Stamp>,
     disk: Disk,
@@ -177,6 +186,8 @@ struct Buffer {
     detected_syntax: &'static str,
     error: Option<String>,
     view: View,
+    /// Made the first time a table file is shown as a table.
+    table: Option<Box<Table>>,
 }
 
 impl Buffer {
@@ -191,25 +202,34 @@ impl Buffer {
             dirty_version: 0,
             line_ending: loaded.line_ending,
             bom: loaded.bom,
+            encoding: loaded.encoding,
+            unrepresentable: None,
+            save_requested: false,
             read_only: loaded.read_only,
             stamp: loaded.stamp,
             disk: Disk::InSync,
             reload: None,
             error: None,
             view: View::default(),
+            table: None,
         }
     }
 
-    fn reloaded(&mut self, loaded: Loaded) {
+    fn reloaded(&mut self, loaded: Loaded, path: &Path, options: &table::Options) {
         self.saved = loaded.text.clone();
         self.text = loaded.text;
         self.line_ending = loaded.line_ending;
         self.bom = loaded.bom;
+        self.encoding = loaded.encoding;
+        self.unrepresentable = None;
         self.read_only = loaded.read_only;
         self.stamp = loaded.stamp;
         self.disk = Disk::InSync;
         self.dirty = false;
         self.error = None;
+        if let Some(table) = &mut self.table {
+            table.text_replaced(&self.text, path, options);
+        }
     }
 }
 
@@ -429,6 +449,7 @@ impl EditorTab {
             edit: path,
             wrap: false,
             syntax: None,
+            table_options: table::Options::default(),
             doc: Doc::Unloaded,
             find: None,
             goto: None,
@@ -443,11 +464,22 @@ impl EditorTab {
     pub fn title(&self) -> String {
         let name = crate::fs::display_name(&self.edit);
         let dirty = if self.is_dirty() { " ●" } else { "" };
-        format!("{} {name}{dirty}", icon::NOTE_PENCIL)
+        let glyph = if self.shows_table() {
+            icon::TABLE
+        } else {
+            icon::NOTE_PENCIL
+        };
+        format!("{glyph} {name}{dirty}")
     }
 
     pub fn is_dirty(&self) -> bool {
-        matches!(&self.doc, Doc::Ready(buffer) if buffer.dirty)
+        matches!(&self.doc, Doc::Ready(buffer) if buffer.dirty
+            || buffer.table.as_ref().is_some_and(|t| t.has_uncommitted_edit()))
+    }
+
+    /// Whether the file is shown as a table rather than as text.
+    fn shows_table(&self) -> bool {
+        table::is_table_file(&self.edit) && !self.table_options.text
     }
 
     pub fn dir(&self) -> Option<PathBuf> {
@@ -473,13 +505,31 @@ impl EditorTab {
         if buffer.read_only.is_some() {
             return Err("The file is read-only.".into());
         }
-        match document::save(&self.edit, &buffer.text, buffer.line_ending, buffer.bom) {
+        if let Some(table) = &mut buffer.table {
+            table.commit_pending(&mut buffer.text);
+        }
+        if let Some(c) = document::unrepresentable(&buffer.text, buffer.encoding) {
+            buffer.unrepresentable = Some(c);
+            let message = format!(
+                "Could not save: {} can't store “{c}”.",
+                buffer.encoding.label(buffer.bom)
+            );
+            return Err(message);
+        }
+        match document::save(
+            &self.edit,
+            &buffer.text,
+            buffer.line_ending,
+            buffer.bom,
+            buffer.encoding,
+        ) {
             Ok(stamp) => {
                 buffer.saved = buffer.text.clone();
                 buffer.dirty = false;
                 buffer.stamp = Some(stamp);
                 buffer.disk = Disk::InSync;
                 buffer.error = None;
+                buffer.unrepresentable = None;
                 Ok(())
             }
             Err(err) => {
@@ -515,7 +565,7 @@ impl EditorTab {
                 match result {
                     Ok(loaded) => {
                         let chars = loaded.text.chars().count();
-                        buffer.reloaded(loaded);
+                        buffer.reloaded(loaded, &self.edit, &self.table_options);
                         // Keep the cursor where it was, if it still fits.
                         if let Some(mut state) = TextEditState::load(ctx, text_id(self.id))
                             && let Some(range) = state.cursor.char_range()
@@ -593,6 +643,16 @@ impl EditorTab {
             }
             Doc::Ready(buffer) => buffer,
         };
+        if std::mem::take(&mut buffer.save_requested) {
+            let _ = self.save();
+        }
+        if self.shows_table() {
+            self.table_ui(ui, shared);
+            return;
+        }
+        let Doc::Ready(buffer) = &mut self.doc else {
+            return;
+        };
 
         let theme = shared.editor.theme(ui).to_owned();
         let syntax = self.syntax.as_deref().unwrap_or(buffer.detected_syntax);
@@ -614,8 +674,16 @@ impl EditorTab {
             return;
         };
         let mut commands = Vec::new();
+        let mut show_table = false;
         Panel::top(Id::new(("editor-toolbar", self.id))).show(ui, |ui| {
-            toolbar(ui, buffer, &self.edit, &mut self.wrap, &mut commands)
+            toolbar(
+                ui,
+                buffer,
+                &self.edit,
+                &mut self.wrap,
+                &mut show_table,
+                &mut commands,
+            )
         });
         let mut reload = false;
         if buffer.disk != Disk::InSync || buffer.error.is_some() || buffer.read_only.is_some() {
@@ -645,6 +713,13 @@ impl EditorTab {
         let Doc::Ready(buffer) = &mut self.doc else {
             return;
         };
+        if show_table {
+            self.table_options.text = false;
+            if let Some(table) = &mut buffer.table {
+                table.returning(&buffer.text, &self.edit, &self.table_options);
+            }
+            ctx.request_repaint();
+        }
         let colors = ThemeColors::of(&theme, ui.visuals());
         CentralPanel::default()
             .frame(egui::Frame::NONE.fill(colors.background))
@@ -715,6 +790,130 @@ impl EditorTab {
         }
         if std::mem::take(&mut self.pending_find_next) {
             self.find_next(&ctx, false);
+        }
+    }
+
+    /// A table file shown as a table: the table is drawn from the buffer's
+    /// text, and shares its saving, reloading and warnings with the text view.
+    fn table_ui(&mut self, ui: &mut Ui, shared: &mut Shared) {
+        let ctx = ui.ctx().clone();
+        let focused = shared.focused_tab == Some(self.id);
+        let table_id = Id::new(("editor-table", self.id));
+        let path = self.edit.clone();
+        let options = &mut self.table_options;
+        let Doc::Ready(buffer) = &mut self.doc else {
+            return;
+        };
+        let editable = buffer.read_only.is_none();
+        let mut table = buffer
+            .table
+            .take()
+            .unwrap_or_else(|| Box::new(Table::new(&buffer.text, &path, options)));
+
+        let mut save = false;
+        if focused {
+            let cmd = Modifiers::COMMAND;
+            ctx.input_mut(|i| {
+                save = i.consume_key(cmd, Key::S);
+                if i.consume_key(cmd, Key::F) {
+                    table.open_find();
+                }
+                if i.consume_key(Modifiers::SHIFT, Key::F3) {
+                    table.find_next(true);
+                }
+                if i.consume_key(Modifiers::NONE, Key::F3) {
+                    table.find_next(false);
+                }
+            });
+        }
+
+        let mut show_text = false;
+        let mut bar = table::Bar::default();
+        Panel::top(Id::new(("editor-toolbar", self.id))).show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .add_enabled(
+                        editable && (buffer.dirty || table.has_uncommitted_edit()),
+                        Button::new(RichText::new(icon::FLOPPY_DISK).size(16.0)),
+                    )
+                    .on_hover_text("Save (Ctrl+S)")
+                    .clicked()
+                {
+                    save = true;
+                }
+                bar = table.toolbar(ui, editable, options);
+                ui.separator();
+                let mut text = false;
+                if table::mode_switch(ui, &mut text) {
+                    show_text = text;
+                }
+            });
+        });
+        if bar.find {
+            table.open_find();
+        }
+        if bar.reconfigure {
+            table.commit_pending(&mut buffer.text);
+            buffer.dirty = buffer.text != buffer.saved;
+            table.configure(&buffer.text, &path, options);
+        }
+
+        let mut reload = false;
+        if buffer.disk != Disk::InSync
+            || buffer.error.is_some()
+            || buffer.read_only.is_some()
+            || buffer.unrepresentable.is_some()
+            || table.has_warnings()
+        {
+            Panel::top(Id::new(("editor-banner", self.id))).show(ui, |ui| {
+                reload = banner(ui, buffer, &path);
+                table.warnings(ui);
+            });
+        }
+        if table.find.is_some() {
+            Panel::top(Id::new(("editor-find", self.id))).show(ui, |ui| {
+                table.find_bar(ui, &buffer.text);
+            });
+        }
+        Panel::bottom(Id::new(("editor-status", self.id))).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                table.status(ui);
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.weak(buffer.line_ending.label());
+                    ui.weak(buffer.encoding.label(buffer.bom));
+                });
+            });
+        });
+        if reload {
+            buffer.reload = Some(load(&path, &ctx));
+        }
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE.fill(ui.visuals().panel_fill))
+            .show(ui, |ui| {
+                if table.body(ui, table_id, &mut buffer.text, editable, focused) {
+                    buffer.dirty = buffer.text != buffer.saved;
+                    buffer.unrepresentable = None;
+                }
+            });
+        if show_text {
+            let stale_undo = table.leaving(&mut buffer.text);
+            buffer.dirty = buffer.text != buffer.saved;
+            options.text = true;
+            self.focus_text = true;
+            // Its undo history is of a text the table has changed, and its
+            // cursor may be past the end of the new one.
+            if stale_undo {
+                let id = text_id(self.id);
+                let mut state = TextEditState::load(&ctx, id).unwrap_or_default();
+                state.clear_undoer();
+                state.cursor.set_char_range(None);
+                state.store(&ctx, id);
+            }
+            ctx.request_repaint();
+        }
+        buffer.table = Some(table);
+        if save {
+            let _ = self.save();
         }
     }
 
@@ -1018,6 +1217,7 @@ fn toolbar(
     buffer: &Buffer,
     path: &Path,
     wrap: &mut bool,
+    show_table: &mut bool,
     commands: &mut Vec<Command>,
 ) {
     ui.horizontal(|ui| {
@@ -1048,6 +1248,13 @@ fn toolbar(
         ui.separator();
         ui.toggle_value(wrap, RichText::new(icon::TEXT_ALIGN_LEFT).size(16.0))
             .on_hover_text("Wrap long lines (Alt+Z)");
+        if table::is_table_file(path) {
+            ui.separator();
+            let mut text = true;
+            if table::mode_switch(ui, &mut text) {
+                *show_table = !text;
+            }
+        }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.add(egui::Label::new(RichText::new(path.display().to_string()).weak()).truncate());
         });
@@ -1058,6 +1265,23 @@ fn toolbar(
 fn banner(ui: &mut Ui, buffer: &mut Buffer, path: &Path) -> bool {
     let mut reload = false;
     let warn = ui.visuals().warn_fg_color;
+    if let Some(c) = buffer.unrepresentable {
+        ui.horizontal_wrapped(|ui| {
+            ui.colored_label(
+                warn,
+                format!(
+                    "{} Not saved: {} can't store “{c}”.",
+                    icon::WARNING,
+                    buffer.encoding.label(buffer.bom)
+                ),
+            );
+            if ui.button("Save as UTF-8").clicked() {
+                buffer.encoding = Encoding::Utf8;
+                buffer.unrepresentable = None;
+                buffer.save_requested = true;
+            }
+        });
+    }
     if let Some(error) = &buffer.error {
         let mut dismiss = false;
         ui.horizontal(|ui| {
@@ -1106,10 +1330,11 @@ fn banner(ui: &mut Ui, buffer: &mut Buffer, path: &Path) -> bool {
                 icon::LOCK
             ));
         }
-        Some(ReadOnly::NotUtf8) => {
+        Some(ReadOnly::Lossy) => {
             ui.weak(format!(
-                "{} Read-only: the file isn't UTF-8 text, so invalid bytes are shown as �.",
-                icon::LOCK
+                "{} Read-only: the file isn't valid {} text, so invalid bytes are shown as �.",
+                icon::LOCK,
+                buffer.encoding.label(false),
             ));
         }
     }
@@ -1244,11 +1469,7 @@ fn status_bar(ui: &mut Ui, buffer: &Buffer, syntax: &mut Option<String>, id: u64
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if let Some((line, col, selected)) = buffer.view.status {
                 ui.weak(buffer.line_ending.label());
-                ui.weak(if buffer.bom {
-                    "UTF-8 with BOM"
-                } else {
-                    "UTF-8"
-                });
+                ui.weak(buffer.encoding.label(buffer.bom));
                 ui.weak(buffer.indent.label());
                 if selected > 0 {
                     ui.weak(format!("({selected} selected)"));
@@ -1457,15 +1678,21 @@ mod tests {
         tab: EditorTab,
         path: PathBuf,
         dir: PathBuf,
+        /// What was last put on the clipboard.
+        copied: Option<String>,
     }
 
     impl Harness {
         fn new(name: &str, contents: &str) -> Self {
+            Self::with_file(name, "main.rs", contents.as_bytes())
+        }
+
+        fn with_file(name: &str, file: &str, contents: &[u8]) -> Self {
             let dir = std::env::temp_dir()
                 .join(format!("egui-files-editor-{name}-{}", std::process::id()));
             let _ = disk::remove_dir_all(&dir);
             disk::create_dir_all(&dir).unwrap();
-            let path = dir.join("main.rs");
+            let path = dir.join(file);
             disk::write(&path, contents).unwrap();
             let ctx = Context::default();
             let shared = Shared {
@@ -1493,6 +1720,7 @@ mod tests {
                 tab: EditorTab::new(1, path.clone()),
                 path,
                 dir,
+                copied: None,
             };
             harness.until(|h| matches!(h.tab.doc, Doc::Ready(_)));
             harness
@@ -1508,6 +1736,11 @@ mod tests {
                 .ctx
                 .run_ui(input, |ui| self.tab.ui(ui, &mut self.shared));
             output.textures_delta.clear();
+            for command in output.platform_output.commands {
+                if let egui::OutputCommand::CopyText(text) = command {
+                    self.copied = Some(text);
+                }
+            }
         }
 
         /// Runs frames until `done`. Waits by the clock, not a count of
@@ -1555,6 +1788,414 @@ mod tests {
 
         fn text(&self) -> &str {
             &self.buffer().text
+        }
+
+        fn table(&self) -> &Table {
+            self.buffer().table.as_ref().expect("shown as a table")
+        }
+
+        /// A press and release of the left button at a point.
+        fn click(&mut self, pos: egui::Pos2) {
+            let button = |pressed| Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: Modifiers::NONE,
+            };
+            self.frame(vec![Event::PointerMoved(pos)]);
+            self.frame(vec![button(true)]);
+            self.frame(vec![button(false)]);
+            self.frame(Vec::new());
+        }
+    }
+
+    const BUDGET: &str = "Month,Rent,Note\nJan,950,\"a,b\"\nFeb,20,x\nMar,300,\n";
+
+    fn table_harness(name: &str, contents: &str) -> Harness {
+        let mut h = Harness::with_file(name, "budget.csv", contents.as_bytes());
+        h.frame(Vec::new());
+        h.frame(Vec::new());
+        h
+    }
+
+    #[test]
+    fn typing_in_a_cell_changes_only_it_and_saves() {
+        // Line endings, and how the other cells are written, are kept.
+        let contents = "Month ,\"Rent\"\r\n\"Jan\",950\r\nFeb,  20 \r\n";
+        let mut h = table_harness("table-type", contents);
+        assert!(h.table().header_shown());
+        assert_eq!(h.table().cursor(), (0, 0));
+
+        // Typing starts an edit, Enter finishes it and moves down.
+        h.key(Modifiers::NONE, Key::ArrowRight);
+        h.type_text("7");
+        h.type_text("5");
+        assert!(h.tab.is_dirty());
+        assert!(h.tab.title().ends_with('●'));
+        h.key(Modifiers::NONE, Key::Enter);
+        assert_eq!(h.table().cursor(), (1, 1));
+        assert_eq!(h.text(), "Month ,\"Rent\"\n\"Jan\",75\nFeb,  20 \n");
+
+        h.key(Modifiers::COMMAND, Key::S);
+        assert!(!h.tab.is_dirty());
+        assert_eq!(
+            disk::read(&h.path).unwrap(),
+            b"Month ,\"Rent\"\r\n\"Jan\",75\r\nFeb,  20 \r\n"
+        );
+    }
+
+    #[test]
+    fn saving_takes_the_cell_being_edited() {
+        let mut h = table_harness("table-save-edit", BUDGET);
+        h.type_text("Dec");
+        assert!(h.tab.is_dirty());
+        h.key(Modifiers::COMMAND, Key::S);
+        assert!(!h.tab.is_dirty());
+        assert!(
+            disk::read_to_string(&h.path)
+                .unwrap()
+                .contains("\nDec,950,")
+        );
+    }
+
+    #[test]
+    fn escape_cancels_an_edit_and_tab_moves_on() {
+        let mut h = table_harness("table-keys", BUDGET);
+        h.type_text("zzz");
+        h.key(Modifiers::NONE, Key::Escape);
+        assert_eq!(h.text(), BUDGET);
+        assert!(!h.tab.is_dirty());
+
+        h.type_text("Q");
+        h.key(Modifiers::NONE, Key::Tab);
+        assert_eq!(h.table().cursor(), (0, 1));
+        assert!(h.text().contains("\nQ,950,"));
+        h.key(Modifiers::SHIFT, Key::Tab);
+        assert_eq!(h.table().cursor(), (0, 0));
+    }
+
+    #[test]
+    fn undo_and_redo_cover_cells_and_structure() {
+        let mut h = table_harness("table-undo", BUDGET);
+        h.type_text("Q");
+        h.key(Modifiers::NONE, Key::Enter);
+        let edited = h.text().to_owned();
+        assert_ne!(edited, BUDGET);
+
+        h.tab_table().queue_delete_rows();
+        h.frame(Vec::new());
+        assert_eq!(h.text().lines().count(), 3);
+
+        h.key(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.text(), edited);
+        h.key(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.text(), BUDGET);
+        assert!(!h.tab.is_dirty(), "undone back to what's on disk");
+        h.key(Modifiers::COMMAND, Key::Y);
+        assert_eq!(h.text(), edited);
+        h.key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z);
+        assert_eq!(h.text().lines().count(), 3);
+    }
+
+    #[test]
+    fn sorting_shows_rows_in_order_without_changing_the_file() {
+        let mut h = table_harness("table-sort", BUDGET);
+        // The Rent column's header: past the row numbers and the first column.
+        let header = h.table().header_center(1);
+        h.click(header);
+        assert_eq!(h.table().shown_rows(), [2, 3, 1]);
+        assert_eq!(h.text(), BUDGET);
+        assert!(!h.tab.is_dirty());
+
+        h.click(header);
+        assert_eq!(h.table().shown_rows(), [1, 3, 2]);
+        h.click(header);
+        assert_eq!(h.table().shown_rows(), [1, 2, 3]);
+
+        // Editing goes to the row under the cursor, not the row at that place
+        // in the file, and doesn't move it.
+        h.click(header);
+        h.type_text("Z");
+        h.key(Modifiers::NONE, Key::Enter);
+        assert!(h.text().contains("\nZ,20,x\n"), "{}", h.text());
+
+        // Applying it rewrites the rows, as one undo step.
+        h.tab_table().queue_apply_sort();
+        h.frame(Vec::new());
+        assert_eq!(
+            h.text(),
+            "Month,Rent,Note\nZ,20,x\nMar,300,\nJan,950,\"a,b\"\n"
+        );
+        assert_eq!(h.table().shown_rows(), [1, 2, 3]);
+        h.key(Modifiers::COMMAND, Key::Z);
+        assert!(h.text().ends_with("Jan,950,\"a,b\"\nZ,20,x\nMar,300,\n"));
+    }
+
+    #[test]
+    fn clicking_selects_and_double_clicking_edits() {
+        let mut h = table_harness("table-click", BUDGET);
+        let cell = h.table().cell_center(2, 1);
+        h.click(cell);
+        assert_eq!(h.table().cursor(), (2, 1));
+        h.click(cell);
+        h.frame(Vec::new());
+        // Two clicks in a row at one place.
+        assert!(h.table().is_editing());
+        h.type_text("5");
+        h.key(Modifiers::NONE, Key::Enter);
+        assert!(h.text().contains("\nMar,3005,\n"), "{}", h.text());
+    }
+
+    #[test]
+    fn copies_and_pastes_ranges() {
+        let mut h = table_harness("table-clipboard", BUDGET);
+        h.key(Modifiers::SHIFT, Key::ArrowRight);
+        h.key(Modifiers::SHIFT, Key::ArrowDown);
+        h.frame(vec![Event::Copy]);
+        assert_eq!(h.copied.as_deref(), Some("Jan\t950\nFeb\t20"));
+
+        // Pasting past the end of the file adds rows.
+        h.key(Modifiers::COMMAND, Key::End);
+        h.frame(vec![Event::Paste("p\tq\nr\ts".to_owned())]);
+        h.frame(Vec::new());
+        assert_eq!(
+            h.text(),
+            "Month,Rent,Note\nJan,950,\"a,b\"\nFeb,20,x\nMar,300,p,q\n,,r,s\n"
+        );
+        h.key(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.text(), BUDGET);
+    }
+
+    #[test]
+    fn one_value_fills_the_selection_and_delete_clears_it() {
+        let mut h = table_harness("table-fill", BUDGET);
+        h.key(Modifiers::NONE, Key::ArrowRight);
+        h.key(Modifiers::SHIFT, Key::ArrowDown);
+        h.frame(vec![Event::Paste("0".to_owned())]);
+        h.frame(Vec::new());
+        assert!(h.text().contains("Jan,0,"));
+        assert!(h.text().contains("Feb,0,x"));
+        assert!(h.text().contains("Mar,300,"));
+        h.key(Modifiers::NONE, Key::Delete);
+        assert!(h.text().contains("Jan,,"));
+        assert!(h.text().contains("Feb,,x"));
+
+        // Cutting copies, then clears.
+        h.key(Modifiers::NONE, Key::ArrowDown);
+        h.key(Modifiers::NONE, Key::ArrowDown);
+        h.frame(vec![Event::Cut]);
+        h.frame(Vec::new());
+        assert_eq!(h.copied.as_deref(), Some("300"));
+        assert!(h.text().contains("Mar,,"));
+    }
+
+    #[test]
+    fn editing_the_cell_with_an_unclosed_quote_repairs_the_file() {
+        let contents = "a,b\n\"open,x\nc,d\n";
+        let mut h = table_harness("table-repair", contents);
+        assert!(h.table().has_warnings());
+        assert_eq!(h.table().shown_rows().len(), 2);
+        let other = h.table().cell_center(0, 1);
+        h.key(Modifiers::NONE, Key::ArrowDown);
+        h.key(Modifiers::NONE, Key::F2);
+        h.frame(Vec::new());
+        h.tab_table().set_edit_text("plain");
+        // Finished by clicking elsewhere, which also selects there.
+        h.click(other);
+        assert!(!h.table().is_editing());
+        assert_eq!(h.table().cursor(), (0, 1));
+        assert!(!h.table().has_warnings());
+        assert_eq!(h.text(), "a,b\n\"plain\"");
+    }
+
+    #[test]
+    fn find_filters_and_steps_through_cells() {
+        let mut h = table_harness("table-find", BUDGET);
+        h.key(Modifiers::COMMAND, Key::F);
+        h.type_text("a");
+        h.frame(Vec::new());
+        // "Jan", "a,b", "Mar", in the rows' order; not the header.
+        assert_eq!(h.table().match_count(), 3);
+        assert_eq!(h.table().cursor(), (0, 0));
+        h.key(Modifiers::NONE, Key::F3);
+        assert_eq!(h.table().cursor(), (0, 2));
+        h.key(Modifiers::NONE, Key::F3);
+        assert_eq!(h.table().cursor(), (2, 0));
+        h.key(Modifiers::SHIFT, Key::F3);
+        assert_eq!(h.table().cursor(), (0, 2));
+
+        h.tab_table().find.as_mut().unwrap().filter = true;
+        h.frame(Vec::new());
+        assert_eq!(h.table().shown_rows(), [1, 3]);
+        assert_eq!(h.text(), BUDGET);
+
+        // Closing it shows them all again.
+        h.key(Modifiers::NONE, Key::Escape);
+        h.key(Modifiers::NONE, Key::Escape);
+        assert!(h.table().find.is_none());
+        assert_eq!(h.table().shown_rows(), [1, 2, 3]);
+    }
+
+    #[test]
+    fn switching_to_text_and_back_shares_the_document() {
+        let mut h = table_harness("table-switch", BUDGET);
+        h.type_text("Q");
+        h.key(Modifiers::NONE, Key::Enter);
+        let (table, text) = h.table_and_text();
+        table.leaving(text);
+        h.tab.table_options.text = true;
+        h.frame(Vec::new());
+        h.frame(Vec::new());
+        assert!(!h.tab.shows_table());
+        assert!(h.buffer().view.shown.contains("Q,950"));
+
+        // An edit as text is seen by the table, and ends its undo history.
+        h.select(0..0);
+        h.type_text("My ");
+        assert!(h.text().starts_with("My Month"));
+        h.tab.table_options.text = false;
+        let path = h.path.clone();
+        let options = h.tab.table_options.clone();
+        let (table, text) = h.table_and_text();
+        table.returning(text, &path, &options);
+        h.frame(Vec::new());
+        assert_eq!(h.table().header_value(h.text(), 0), "My Month");
+        let before = h.text().to_owned();
+        h.key(Modifiers::COMMAND, Key::Z);
+        assert_eq!(h.text(), before);
+    }
+
+    #[test]
+    fn delimiter_and_header_can_be_chosen() {
+        let mut h = Harness::with_file("table-options", "a.csv", b"1;2\n3;4\n");
+        h.frame(Vec::new());
+        assert_eq!(h.table().column_count(), 2);
+        assert!(!h.table().header_shown());
+        assert_eq!(h.table().shown_rows(), [0, 1]);
+
+        h.tab.table_options.header = Some(true);
+        h.tab.table_options.delimiter = Some(',');
+        let path = h.path.clone();
+        let options = h.tab.table_options.clone();
+        let (table, text) = h.table_and_text();
+        table.configure(text, &path, &options);
+        h.frame(Vec::new());
+        assert_eq!(h.table().column_count(), 1);
+        assert_eq!(h.table().shown_rows(), [1]);
+        assert_eq!(h.text(), "1;2\n3;4\n");
+        assert!(!h.tab.is_dirty());
+    }
+
+    #[test]
+    fn a_windows_1252_file_keeps_its_encoding_or_asks() {
+        let mut h = Harness::with_file("table-1252", "a.csv", b"caf\xe9,b\n");
+        h.frame(Vec::new());
+        assert_eq!(h.buffer().encoding, Encoding::Windows1252);
+        assert!(h.buffer().read_only.is_none());
+        assert_eq!(h.table().cell_value(h.text(), 0, 0), "café");
+
+        h.key(Modifiers::NONE, Key::ArrowRight);
+        h.type_text("é");
+        h.key(Modifiers::NONE, Key::Enter);
+        h.key(Modifiers::COMMAND, Key::S);
+        assert_eq!(disk::read(&h.path).unwrap(), b"caf\xe9,\xe9\n");
+
+        // What it can't store isn't saved, nor the file harmed.
+        h.type_text("日");
+        h.key(Modifiers::NONE, Key::Enter);
+        h.key(Modifiers::COMMAND, Key::S);
+        assert_eq!(h.buffer().unrepresentable, Some('日'));
+        assert!(h.tab.is_dirty());
+        assert_eq!(disk::read(&h.path).unwrap(), b"caf\xe9,\xe9\n");
+
+        // Until asked to save as UTF-8.
+        let Doc::Ready(buffer) = &mut h.tab.doc else {
+            panic!("not loaded");
+        };
+        buffer.encoding = Encoding::Utf8;
+        buffer.unrepresentable = None;
+        buffer.save_requested = true;
+        h.frame(Vec::new());
+        assert!(!h.tab.is_dirty());
+        assert_eq!(disk::read_to_string(&h.path).unwrap(), "café,日\n");
+    }
+
+    #[test]
+    fn read_only_tables_can_be_looked_at_but_not_edited() {
+        // Half a UTF-16 character: it can't be written back.
+        let mut h = Harness::with_file("table-readonly", "a.csv", b"\xff\xfea\0,\0b\0x");
+        h.frame(Vec::new());
+        assert!(h.buffer().read_only.is_some());
+        let before = h.text().to_owned();
+        h.type_text("z");
+        h.frame(vec![Event::Paste("q".to_owned())]);
+        h.key(Modifiers::NONE, Key::Delete);
+        assert!(!h.table().is_editing());
+        assert_eq!(h.text(), before);
+    }
+
+    #[test]
+    fn external_changes_reload_the_table() {
+        let mut h = table_harness("table-reload", BUDGET);
+        std::thread::sleep(Duration::from_millis(20));
+        disk::write(&h.path, "A,B\n1,2\n").unwrap();
+        h.tab.mark_stale();
+        h.until(|h| h.text() == "A,B\n1,2\n");
+        h.frame(Vec::new());
+        assert_eq!(h.table().column_count(), 2);
+        assert_eq!(h.table().shown_rows(), [1]);
+
+        // With unsaved edits it asks instead.
+        h.type_text("Q");
+        h.key(Modifiers::NONE, Key::Enter);
+        std::thread::sleep(Duration::from_millis(20));
+        disk::write(&h.path, "other\n").unwrap();
+        h.tab.mark_stale();
+        h.frame(Vec::new());
+        assert!(h.buffer().disk == Disk::Changed);
+        assert!(h.text().starts_with("A,B\nQ,2"));
+    }
+
+    #[test]
+    fn other_files_stay_plain_text() {
+        let mut h = Harness::new("table-not", "a,b\n");
+        h.frame(Vec::new());
+        assert!(!h.tab.shows_table());
+        assert!(h.buffer().table.is_none());
+    }
+
+    #[test]
+    fn a_big_table_only_draws_what_is_on_screen() {
+        let mut contents = String::from("id,name\n");
+        for row in 0..200_000 {
+            contents.push_str(&format!("{row},name {row}\n"));
+        }
+        let mut h = table_harness("table-big", &contents);
+        assert_eq!(h.table().shown_rows().len(), 200_000);
+        h.key(Modifiers::COMMAND, Key::End);
+        h.frame(Vec::new());
+        assert_eq!(h.table().cursor(), (199_999, 1));
+        h.type_text("x");
+        h.key(Modifiers::NONE, Key::Enter);
+        assert!(h.text().ends_with("199999,x\n"));
+    }
+
+    impl Harness {
+        fn tab_table(&mut self) -> &mut Table {
+            let Doc::Ready(buffer) = &mut self.tab.doc else {
+                panic!("not loaded");
+            };
+            buffer.table.as_mut().expect("shown as a table")
+        }
+
+        fn table_and_text(&mut self) -> (&mut Table, &mut String) {
+            let Doc::Ready(buffer) = &mut self.tab.doc else {
+                panic!("not loaded");
+            };
+            (
+                buffer.table.as_mut().expect("shown as a table"),
+                &mut buffer.text,
+            )
         }
     }
 
