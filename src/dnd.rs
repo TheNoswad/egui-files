@@ -10,6 +10,7 @@ use egui::{Context, DragAndDrop, Id, Modifiers, Rect, Response, Stroke, StrokeKi
 use crate::{
     archive::{ExtractJob, ExtractMode, Selection},
     fs,
+    haptics::Haptic,
     jobs::JobKind,
 };
 
@@ -123,12 +124,14 @@ pub fn target(response: &Response, target: DropTarget) -> Option<JobKind> {
         let mut job = ExtractJob::new(drag.archive.clone(), dest.clone(), ExtractMode::Into, false);
         job.selection = Some(drag.selection.clone());
         job.password = drag.password.clone();
+        crate::haptics::play(Haptic::Confirm);
         return Some(JobKind::Extract(job));
     }
     let paths = payload.paths.clone();
     if paths.is_empty() {
         return None;
     }
+    crate::haptics::play(Haptic::Confirm);
     Some(match target {
         DropTarget::Trash => JobKind::Trash { paths },
         DropTarget::Folder(dest) => {
@@ -194,6 +197,7 @@ pub fn new_tab_target(ctx: &Context, rect: Rect) -> Option<Vec<PathBuf>> {
         return None;
     }
     let payload = DragAndDrop::take_payload::<FileDrag>(ctx)?;
+    crate::haptics::play(Haptic::Confirm);
     Some(
         payload
             .paths

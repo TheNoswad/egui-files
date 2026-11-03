@@ -16,6 +16,7 @@ mod editor;
 #[cfg(windows)]
 mod file_clipboard;
 mod fs;
+mod haptics;
 mod images;
 mod jobs;
 mod keymap;

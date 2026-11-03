@@ -14,6 +14,8 @@ use std::{
 
 use egui::{Event, Id, PointerButton, Pos2, RawInput, scroll_area::ScrollSource, style::Style};
 
+use crate::haptics::Haptic;
+
 /// How long to hold still for a long press.
 pub const LONG_PRESS: Duration = Duration::from_millis(500);
 /// How far the pointer may wander and still be held still; egui's own
@@ -150,6 +152,7 @@ impl LongPress {
             if !press.long && !press.moved && now - press.since >= LONG_PRESS {
                 press.long = true;
                 state.started = true;
+                crate::haptics::play(Haptic::LongPress);
             }
             state.holding |= press.long;
         }
@@ -252,6 +255,9 @@ pub fn pinch(ui: &egui::Ui, rect: egui::Rect, value: &mut f32, range: RangeInclu
     }
     let scaled = (*value * zoom).clamp(*range.start(), *range.end());
     let changed = scaled != *value;
+    if changed && (scaled == *range.start() || scaled == *range.end()) {
+        crate::haptics::play(Haptic::Limit);
+    }
     *value = scaled;
     changed
 }

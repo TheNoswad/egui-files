@@ -124,6 +124,16 @@ pub(crate) fn update<R>(
         _ => (layout.hits)(rect.translate(-layout.content_origin.to_vec2())),
     };
     if state.hits.as_ref() != Some(&hits) {
+        // A tick as the drag takes in, or gives back, an item; the long
+        // press that began it has buzzed already.
+        if touch
+            && state
+                .hits
+                .as_ref()
+                .is_some_and(|old| old.len() != hits.len())
+        {
+            crate::haptics::play(crate::haptics::Haptic::Tick);
+        }
         let mut selection = (*state.base).clone();
         for &index in &hits {
             let Some(&entry) = visible.get(index) else {

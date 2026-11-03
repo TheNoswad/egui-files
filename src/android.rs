@@ -517,3 +517,54 @@ fn mime_from_extension(env: &mut Env, path: &str) -> jni::errors::Result<String>
     env.cast_local::<jni::objects::JString>(mime)?
         .try_to_string(env)
 }
+
+/// Plays `haptic` through the window's view (`performHapticFeedback`).
+pub fn haptic(haptic: crate::haptics::Haptic) {
+    use crate::haptics::Haptic;
+    // The constant to play, and one from Android 11 (the oldest the app
+    // runs on) for when the first is newer than the phone.
+    let (name, fallback) = match haptic {
+        Haptic::LongPress => (jni_str!("LONG_PRESS"), jni_str!("LONG_PRESS")),
+        // Android 14.
+        Haptic::Tick => (jni_str!("SEGMENT_TICK"), jni_str!("CLOCK_TICK")),
+        Haptic::Limit => (
+            jni_str!("GESTURE_THRESHOLD_ACTIVATE"),
+            jni_str!("CLOCK_TICK"),
+        ),
+        Haptic::Confirm => (jni_str!("CONFIRM"), jni_str!("CONFIRM")),
+    };
+    let _ = with_activity("play haptic feedback", |env, activity| {
+        let class = jni_str!("android/view/HapticFeedbackConstants");
+        let constant = match env.get_static_field(class, name, jni_sig!("I")) {
+            Ok(value) => value.i()?,
+            Err(_) => {
+                // NoSuchFieldError on an older Android.
+                env.exception_clear();
+                env.get_static_field(class, fallback, jni_sig!("I"))?.i()?
+            }
+        };
+        let window = env
+            .call_method(
+                activity,
+                jni_str!("getWindow"),
+                jni_sig!("()Landroid/view/Window;"),
+                &[],
+            )?
+            .l()?;
+        let decor = env
+            .call_method(
+                &window,
+                jni_str!("getDecorView"),
+                jni_sig!("()Landroid/view/View;"),
+                &[],
+            )?
+            .l()?;
+        env.call_method(
+            &decor,
+            jni_str!("performHapticFeedback"),
+            jni_sig!("(I)Z"),
+            &[JValue::Int(constant)],
+        )?;
+        Ok(())
+    });
+}
