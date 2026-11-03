@@ -35,8 +35,11 @@ mod imp {
         item.mode = Some(meta.mode() & 0o7777);
         item.uid = Some(meta.uid());
         item.gid = Some(meta.gid());
-        item.owner = user_name(meta.uid());
-        item.group = group_name(meta.gid());
+        // A server's ids name its users, not this computer's.
+        if !meta.is_remote() {
+            item.owner = user_name(meta.uid());
+            item.group = group_name(meta.gid());
+        }
         item.inode = Some(meta.ino());
         item.links = Some(meta.nlink());
         item.device = Some(meta.dev());
@@ -195,6 +198,12 @@ mod imp {
         _account: Option<&str>,
         follow: bool,
     ) -> io::Result<()> {
+        if crate::remote::is_remote(path) {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "a server's files can't change owner from here",
+            ));
+        }
         if follow {
             std::os::unix::fs::chown(path, uid, gid)
         } else {

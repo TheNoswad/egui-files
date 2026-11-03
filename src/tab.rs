@@ -213,6 +213,9 @@ pub struct BrowserTab {
     /// before, if anything.
     #[serde(skip)]
     loading: bool,
+    /// Items on a server to delete for good, once the user says so.
+    #[serde(skip)]
+    confirm_delete: Option<Vec<PathBuf>>,
     #[serde(skip)]
     pub selection: HashSet<PathBuf>,
     /// Selecting by touch, after a long press: taps add and remove items
@@ -274,6 +277,7 @@ impl BrowserTab {
             stale: false,
             error: None,
             loading: false,
+            confirm_delete: None,
             selection: HashSet::new(),
             toolbar_height: 0.0,
             selecting: false,
@@ -639,6 +643,7 @@ impl BrowserTab {
                 background.context_menu(|ui| self.background_menu(ui, shared, &mut actions));
             });
         self.rename_modal(ui.ctx(), &mut actions);
+        self.delete_modal(ui.ctx(), shared);
         self.archive_dialogs(ui.ctx(), shared);
         self.scroll_to = None;
 
@@ -1366,6 +1371,45 @@ impl BrowserTab {
         }
     }
 
+    /// Asks before deleting a server's files, which can't be put back.
+    fn delete_modal(&mut self, ctx: &Context, shared: &mut Shared) {
+        let Some(paths) = &self.confirm_delete else {
+            return;
+        };
+        let what = match paths.as_slice() {
+            [one] => format!("“{}”", fs::display_name(one)),
+            many => format!("{} items", many.len()),
+        };
+        let mut answer = None;
+        let modal = egui::Modal::new(Id::new(("confirm_delete", self.id))).show(ctx, |ui| {
+            ui.set_max_width(crate::widgets::modal_width(ui, 420.0));
+            ui.heading(format!("Delete {what} permanently?"));
+            ui.label("Servers have no trash: once deleted, it can't be put back.");
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button(format!("{} Delete", icon::TRASH)).clicked()
+                    || ui.input(|i| i.key_pressed(Key::Enter))
+                {
+                    answer = Some(true);
+                }
+                if ui.button("Cancel").clicked() {
+                    answer = Some(false);
+                }
+            });
+        });
+        if modal.should_close() {
+            answer.get_or_insert(false);
+        }
+        match answer {
+            Some(true) => {
+                let paths = self.confirm_delete.take().unwrap_or_default();
+                shared.jobs.start(JobKind::Delete { paths });
+            }
+            Some(false) => self.confirm_delete = None,
+            None => {}
+        }
+    }
+
     fn archive_dialogs(&mut self, ctx: &Context, shared: &mut Shared) {
         use archive::DialogResult;
         let result = if let Some(dialog) = &mut self.compress {
@@ -1621,7 +1665,12 @@ impl BrowserTab {
                 if paths.is_empty() {
                     return;
                 }
-                shared.jobs.start(JobKind::Trash { paths });
+                // Servers have no trash: ask first.
+                if paths.iter().any(|p| remote::is_remote(p)) {
+                    self.confirm_delete = Some(paths);
+                } else {
+                    shared.jobs.start(JobKind::Trash { paths });
+                }
             }
             Action::Copy | Action::Cut => {
                 let paths = self.selected_paths();
