@@ -44,13 +44,20 @@
 - [x] Builds and starts in the browser; the terminal, video, libmpv, RAR and zstd say they need the desktop app
 - [x] Files in memory, with a demo home: browsing, thumbnails, previews with highlighting, archives, copy/move/trash/restore, extracting
 - [x] "Open" shows pictures, text, PDFs, audio and video in a browser tab, and saves anything else
-- [x] A landing page with the demo embedded: a screenshot until "Start the demo" loads it in an iframe, with a progress bar
+- [x] A landing page with the demo embedded: it loads with the page behind a light or dark screenshot, with its progress, then fades in and grows to most of the window
+- [x] Starts fresh in the home folder on every load; the mobile layout on a phone-sized page
 - [ ] Publishing (GitHub Pages or Cloudflare Pages), from CI; the site is static, with relative URLs
 - [ ] Jobs run in one go on the UI thread: no progress or cancelling while they run, and a big one freezes the page. Conflicts keep both and password prompts cancel, since nothing can wait for an answer (`Progress::ask`)
 - [ ] Bring files in (drop them on the page, or a file picker) and save files out
 - [ ] Keep changes across reloads (IndexedDB), or say clearly that they're lost
 - [ ] Size: 18 MB of wasm (Cloudflare Pages takes up to 25 MB a file); the syntaxes and license texts are likely most of it
 - [ ] About's credits list the native build's crates (unrar, alacritty_terminal), not the web build's
+- [ ] Links on the landing page to the source and downloads, once the repo has a remote
+- [ ] Fetch the demo's files instead of building them in (`web/demo-files/` packed into a tar by `web/build.sh`, unpacked into memory at startup), so real photos and such can go in without a rebuild. Saves little size: they're about 100 KB of the wasm now
+- [ ] Remember settings across reloads (theme, view), now that saved state is ignored there so it starts in the home folder
+- [ ] Try the demo on real phones: touch (only checked with a mouse), whether the keyboard opens for rename and the path bar, and that Firefox's `devicePixelContentBoxSize` workaround in `web/demo/index.html` stays out of the way (checked only in emulation)
+- [ ] Try in the browser what hasn't been: other browsers (only Firefox so far), disk usage (its scan needs threads, and may just never finish), compressing (zip, 7z, tar.xz), and the editor's tabs. "Open with" icons still `.expect` a thread (`open_with::icon_texture`), if anything ever asks for one there
+- [ ] Check the file list's background on the Pixel: the mobile layout's middle had no fill, which showed nearly black in the browser (fixed there; not looked at on Android)
 
 ## Proton Drive
 
