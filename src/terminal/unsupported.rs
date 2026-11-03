@@ -32,8 +32,6 @@ impl Terminal {
         }
     }
 
-    pub fn remember_dir(&mut self) {}
-
     pub fn widget_id(&self) -> Id {
         Id::new(("terminal", self.id))
     }

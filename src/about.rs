@@ -107,7 +107,7 @@ enum Selected {
 /// Known when the window is created.
 struct Startup {
     windowing: &'static str,
-    gpu: Option<eframe::wgpu::AdapterInfo>,
+    gpu: Vec<(&'static str, String)>,
 }
 
 /// Found on a background thread the first time the window opens, since it
@@ -166,10 +166,7 @@ impl About {
             details_open: false,
             startup: Startup {
                 windowing,
-                gpu: cc
-                    .wgpu_render_state
-                    .as_ref()
-                    .map(|state| state.adapter.get_info()),
+                gpu: gpu_rows(cc),
             },
             probed: None,
         }
@@ -285,27 +282,7 @@ impl About {
             ));
         }
 
-        let gpu = match &self.startup.gpu {
-            Some(info) => {
-                let mut rows = vec![
-                    ("Adapter", info.name.clone()),
-                    ("Type", format!("{:?}", info.device_type)),
-                    ("Backend", format!("{:?}", info.backend)),
-                    (
-                        "Vendor / device",
-                        format!("{:04x}:{:04x}", info.vendor, info.device),
-                    ),
-                ];
-                if !info.driver.is_empty() {
-                    rows.push(("Driver", info.driver.clone()));
-                }
-                if !info.driver_info.is_empty() {
-                    rows.push(("Driver info", info.driver_info.clone()));
-                }
-                rows
-            }
-            None => vec![("Adapter", "unknown".into())],
-        };
+        let gpu = self.startup.gpu.clone();
 
         let mut sections = vec![("System", system), ("Graphics", gpu)];
         if let Some(p) = probed {
@@ -460,6 +437,48 @@ const NAME_FOR_START: &str = "egui";
 
 fn crate_index(name: &str) -> Option<usize> {
     CRATES.iter().position(|c| c.name == name)
+}
+
+/// What the System page says of the GPU, known when the window is created.
+#[cfg(not(target_arch = "wasm32"))]
+fn gpu_rows(cc: &eframe::CreationContext<'_>) -> Vec<(&'static str, String)> {
+    let Some(state) = &cc.wgpu_render_state else {
+        return vec![("Adapter", "unknown".into())];
+    };
+    let info = state.adapter.get_info();
+    let mut rows = vec![
+        ("Adapter", info.name),
+        ("Type", format!("{:?}", info.device_type)),
+        ("Backend", format!("{:?}", info.backend)),
+        (
+            "Vendor / device",
+            format!("{:04x}:{:04x}", info.vendor, info.device),
+        ),
+    ];
+    if !info.driver.is_empty() {
+        rows.push(("Driver", info.driver));
+    }
+    if !info.driver_info.is_empty() {
+        rows.push(("Driver info", info.driver_info));
+    }
+    rows
+}
+
+/// What the System page says of the GPU: the browser only tells WebGL's name.
+#[cfg(target_arch = "wasm32")]
+fn gpu_rows(cc: &eframe::CreationContext<'_>) -> Vec<(&'static str, String)> {
+    use eframe::glow::HasContext as _;
+    let Some(gl) = &cc.gl else {
+        return vec![("Adapter", "unknown".into())];
+    };
+    // SAFETY: only reads a string, on the thread with the context.
+    let (renderer, version) = unsafe {
+        (
+            gl.get_parameter_string(eframe::glow::RENDERER),
+            gl.get_parameter_string(eframe::glow::VERSION),
+        )
+    };
+    vec![("Adapter", renderer), ("Backend", version)]
 }
 
 fn crate_version(name: &str) -> &'static str {
@@ -915,7 +934,7 @@ mod tests {
             details_open: false,
             startup: Startup {
                 windowing: "test",
-                gpu: None,
+                gpu: Vec::new(),
             },
             probed: Some(Arc::new(OnceLock::from(probe()))),
         };

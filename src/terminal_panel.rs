@@ -82,6 +82,7 @@ impl TerminalPanel {
     }
 
     /// Records where each shell is, ahead of saving the layout.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn remember_dirs(&mut self) {
         for (_, terminal) in self.dock.iter_all_tabs_mut() {
             terminal.remember_dir();

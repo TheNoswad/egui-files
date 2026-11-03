@@ -441,6 +441,7 @@ impl Videos {
     }
 
     /// Volume in percent for players with sound.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn volume(&self) -> f64 {
         f64::from_bits(self.volume.load(Ordering::Relaxed))
     }

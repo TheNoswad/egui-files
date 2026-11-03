@@ -18,7 +18,9 @@ use egui_dock::{
     tab_viewer::OnCloseResponse,
 };
 use egui_phosphor::regular as icon;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+#[cfg(not(target_arch = "wasm32"))]
+use serde::Serialize;
 
 use crate::{
     about::About,
@@ -138,6 +140,7 @@ fn default_volume() -> f64 {
     crate::video::DEFAULT_VOLUME
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Serialize)]
 struct PersistedRef<'a> {
     dock: &'a DockState<DockTab>,
@@ -443,12 +446,14 @@ impl FilesApp {
         egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
         cc.egui_ctx.set_fonts(fonts);
 
-        // The web demo's files are made up afresh on each load, so it starts
-        // afresh too, in the home folder.
+        #[cfg(not(target_arch = "wasm32"))]
         let persisted: Option<Persisted> = cc
             .storage
-            .filter(|_| !cfg!(target_arch = "wasm32"))
             .and_then(|s| eframe::get_value(s, eframe::APP_KEY));
+        // The web demo's files are made up afresh on each load, so it starts
+        // afresh too, in the home folder.
+        #[cfg(target_arch = "wasm32")]
+        let persisted: Option<Persisted> = None;
         let persisted = persisted
             .filter(|p| p.dock.iter_all_tabs().next().is_some())
             .unwrap_or_else(|| Persisted {
@@ -2848,6 +2853,11 @@ impl FilesApp {
         );
     }
 
+    /// Nothing's kept in the browser: a reload starts over.
+    #[cfg(target_arch = "wasm32")]
+    fn save_state(&mut self, _storage: &mut dyn eframe::Storage) {}
+
+    #[cfg(not(target_arch = "wasm32"))]
     fn save_state(&mut self, storage: &mut dyn eframe::Storage) {
         self.terminal.remember_dirs();
         let keymap = crate::keymap::get(&self.ctx);

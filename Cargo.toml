@@ -14,7 +14,7 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 directories = "6.0.0"
 # Files and folders: std's, or in the browser kept in memory.
 disk = { package = "egui-files-disk", path = "disk" }
-eframe = { version = "0.36", default-features = false, features = ["wgpu", "default_fonts", "persistence", "wayland", "x11"] }
+eframe = { version = "0.36", default-features = false, features = ["default_fonts"] }
 egui = "0.36"
 egui-phosphor = "0.14"
 egui_dock = { version = "0.21", features = ["serde"] }
@@ -47,6 +47,14 @@ toml = "1"
 fontdb = "0.24"
 
 # Image decoding is painfully slow unoptimized; optimize dependencies even in dev builds.
+# The web demo's build (see web/build.sh): every visitor downloads it, so it's
+# built for size, and slowly.
+[profile.web]
+inherits = "release"
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+
 [profile.dev.package."*"]
 opt-level = 2
 
@@ -61,6 +69,7 @@ trash = "5.2.9"
 # Everything a browser can't run: C libraries (wasm32-unknown-unknown has no
 # libc to build them against), loading libraries, a terminal, and other apps.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+eframe = { version = "0.36", default-features = false, features = ["wgpu", "persistence", "wayland", "x11"] }
 alacritty_terminal = { version = "0.26", default-features = false }
 libloading = "0.8"
 open = "5.4.5"
@@ -71,6 +80,9 @@ zstd = { version = "0.14", features = ["zstdmt"] }
 
 # The web demo (see web/).
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+# WebGL through glow: much smaller than wgpu, and nothing here needs more. No
+# "persistence": a reload starts over.
+eframe = { version = "0.36", default-features = false, features = ["glow"] }
 # Oniguruma is C; fancy-regex is pure Rust (a few syntaxes go without).
 two-face = { version = "0.5.2", default-features = false, features = ["syntect-fancy"] }
 # The clock from JavaScript's Date: std's panics in the browser.
