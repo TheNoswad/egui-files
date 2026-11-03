@@ -59,6 +59,8 @@
 - [ ] Phase 6: updating links in documents when files move in the app
 - [ ] Raw HTML: a subset (img, br, details/summary, kbd, sub/sup, center); shown as written, dimmed, until then
 - [ ] Export (HTML, rich text, PDF)
+- [ ] Scripts without a bundled font show as boxes (Chinese, Japanese, Korean, Hebrew, Arabic), and right-to-left text isn't ordered; the app's other text has the same gap. Emoji are monochrome, and flags don't work. See "Characters" in `samples/markdown/showcase.md`
+- [ ] Bare email addresses aren't linked (`<a@b.c>` is)
 - [ ] Text selection in rendered documents on touchscreens (dragging scrolls there)
 - [ ] Check on a real Android device: links opening through `android::open_url` (compiled, never run), and touch in rendered documents (checked with a mouse in the mobile layout)
 

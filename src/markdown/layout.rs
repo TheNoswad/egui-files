@@ -439,6 +439,7 @@ pub fn layout(document: &Document, params: Params<'_>) -> Layout {
         toggled,
         out: Layout::default(),
         y: 0.0,
+        list_depth: 0,
     };
     let width = inputs.width;
     builder.blocks(&document.blocks, 0.0, width);
@@ -472,6 +473,8 @@ struct Builder<'a> {
     toggled: &'a HashSet<usize>,
     out: Layout,
     y: f32,
+    /// How many lists this is inside of, which varies their bullets.
+    list_depth: usize,
 }
 
 /// Inline text laid out: its galley, its links by char, and its images.
@@ -725,7 +728,8 @@ impl Builder<'_> {
     }
 
     fn list(&mut self, start: Option<u64>, items: &[super::parse::ListItem], x: f32, width: f32) {
-        let depth = self.list_depth(x);
+        let depth = self.list_depth;
+        self.list_depth += 1;
         let size = self.theme.size;
         let line = self.theme.line_height(size);
         // Wide enough for the longest number.
@@ -806,12 +810,7 @@ impl Builder<'_> {
                 self.y = top + line;
             }
         }
-    }
-
-    /// How many lists are around this x, by how far in it is. Only used to
-    /// vary the bullets, so it needn't be exact.
-    fn list_depth(&self, x: f32) -> usize {
-        (x / (self.theme.size * 1.4)).round() as usize
+        self.list_depth = depth;
     }
 
     fn code(&mut self, lang: Option<&str>, code: &str, x: f32, width: f32) {
@@ -1334,7 +1333,11 @@ impl Builder<'_> {
         let placed = placed
             .into_iter()
             .map(|(char, index, size)| {
-                let at = galley.pos_from_cursor(CCursor::new(char));
+                // An image starting a row belongs to that row, not the end of
+                // the one before.
+                let mut cursor = CCursor::new(char);
+                cursor.prefer_next_row = true;
+                let at = galley.pos_from_cursor(cursor);
                 let image = &inlines.images[index];
                 PlacedImage {
                     rect: Rect::from_min_size(egui::pos2(at.min.x, at.max.y - size.y), size),
@@ -1589,6 +1592,34 @@ mod tests {
         assert_eq!(images.len(), 2);
         assert!(images[1].rect.min.x >= images[0].rect.max.x, "side by side");
         assert_eq!(images[0].rect.min.y, images[1].rect.min.y);
+    }
+
+    #[test]
+    fn images_that_wrap_start_their_row_and_stay_on_the_page() {
+        let mut badge = Pictures(egui::vec2(90.0, 20.0));
+        let source = "![a](a.svg) ".repeat(10);
+        let layout = run(&source, 400.0, &mut badge);
+        let item = texts(&layout)[0];
+        assert_eq!(item.images.len(), 10);
+        let rows: Vec<f32> = item.images.iter().map(|image| image.rect.min.x).collect();
+        assert!(rows.iter().filter(|&&x| x < 1.0).count() >= 3, "{rows:?}");
+        for image in &item.images {
+            assert!(image.rect.max.x <= 400.5, "{:?}", image.rect);
+        }
+        for pair in item.images.windows(2) {
+            let (a, b) = (pair[0].rect, pair[1].rect);
+            assert!(b.min.x >= a.max.x || b.min.y >= a.max.y, "{a:?} {b:?}");
+        }
+    }
+
+    #[test]
+    fn the_sample_document_lays_out_at_any_width() {
+        let source = include_str!("../../samples/markdown/showcase.md");
+        for width in [60.0, 320.0, 800.0] {
+            let layout = run(source, width, &mut Pictures(egui::vec2(90.0, 20.0)));
+            assert!(layout.height > 0.0);
+            assert!(layout.anchors.contains_key("stress"));
+        }
     }
 
     #[test]

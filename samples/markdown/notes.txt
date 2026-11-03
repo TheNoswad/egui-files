@@ -1,0 +1,1 @@
+A plain text file, opened by a link from the markdown showcase with its usual app.

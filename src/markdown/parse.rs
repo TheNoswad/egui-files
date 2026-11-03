@@ -309,7 +309,7 @@ impl Builder<'_> {
                     // Not expected, but never a reason to stop or to loop.
                     self.events.next();
                 }
-                Event::Start(tag) => {
+                Event::Start(tag) if is_block(&tag) => {
                     self.events.next();
                     if depth >= MAX_DEPTH
                         && let Some(end) = container_end(&tag)
@@ -327,7 +327,8 @@ impl Builder<'_> {
                     });
                 }
                 // Inline content straight in a container: a tight list's items.
-                Event::Text(_)
+                Event::Start(_)
+                | Event::Text(_)
                 | Event::Code(_)
                 | Event::InlineMath(_)
                 | Event::DisplayMath(_)
@@ -863,7 +864,8 @@ fn extras(inlines: &mut Inlines) {
         !run.style.code && !run.style.math && !run.style.html && !run.style.footnote_ref
     };
     if !inlines.runs.iter().any(|run| {
-        is_plain(run) && inlines.text[run.range.clone()].contains(['=', '#', ':', '^', '~'])
+        is_plain(run)
+            && inlines.text[run.range.clone()].contains(['=', '#', ':', '^', '~', 'w', 'W'])
     }) {
         return;
     }
@@ -915,7 +917,21 @@ fn extras(inlines: &mut Inlines) {
                 image.at = out.text.len();
                 out.images.push(image);
             }
-            if let Some(len) = tag_len(rest, before) {
+            if let Some(len) = bare_url_len(rest, before).filter(|_| run.link.is_none()) {
+                let url = &rest[..len];
+                let scheme = if url.to_ascii_lowercase().starts_with("www.") {
+                    "https://"
+                } else {
+                    ""
+                };
+                let bare = Link {
+                    url: format!("{scheme}{url}"),
+                    title: String::new(),
+                    wiki: false,
+                };
+                out.push(url, run.source.clone(), style, Some(&bare));
+                at += len;
+            } else if let Some(len) = tag_len(rest, before) {
                 let style = Style { tag: true, ..style };
                 out.push(&rest[..len], run.source.clone(), style, link);
                 at += len;
@@ -974,6 +990,39 @@ fn highlight_marks(inlines: &Inlines, is_plain: &impl Fn(&Run) -> bool) -> Vec<u
         }
     }
     marks
+}
+
+/// How long a web address written as plain text at the start of `text` is, as
+/// GitHub finds them: pulldown-cmark only takes `<these>`. Punctuation at its
+/// end is left out, and so is a `)` it didn't open.
+fn bare_url_len(text: &str, before: Option<char>) -> Option<usize> {
+    if before.is_some_and(char::is_alphanumeric) {
+        return None;
+    }
+    let lower = text.get(..8).unwrap_or(text).to_ascii_lowercase();
+    let prefix = ["https://", "http://", "www."]
+        .into_iter()
+        .find(|prefix| lower.starts_with(prefix))?;
+    let end = text
+        .find(|c: char| c.is_whitespace() || c == '<' || c == IMAGE_CHAR)
+        .unwrap_or(text.len());
+    let mut url = &text[..end];
+    loop {
+        let trimmed =
+            url.trim_end_matches(['.', ',', ':', ';', '!', '?', '\'', '"', '*', '_', '~']);
+        let unopened =
+            trimmed.ends_with(')') && trimmed.matches(')').count() > trimmed.matches('(').count();
+        let shorter = if unopened {
+            &trimmed[..trimmed.len() - 1]
+        } else {
+            trimmed
+        };
+        if shorter.len() == url.len() {
+            break;
+        }
+        url = shorter;
+    }
+    (url.len() > prefix.len()).then_some(url.len())
 }
 
 /// How long a `#tag` at the start of `text` is. A tag follows a space or
@@ -1063,6 +1112,86 @@ mod tests {
         assert_eq!(inlines.text, "a b H2O x2 but not a~b c~d or 2^3 4^5");
         assert_eq!(styled(inlines, |s| s.sub), ["a", "2"]);
         assert_eq!(styled(inlines, |s| s.sup), ["b", "2"]);
+    }
+
+    #[test]
+    fn tight_list_items_keep_what_they_start_with() {
+        let doc = parse(
+            "- [a link](x.md) then\n- **bold** then\n- *it* then\n- ![pic](p.png) then\n- ~~s~~\n",
+        );
+        let BlockKind::List { items, .. } = &doc.blocks[0].kind else {
+            panic!("expected a list");
+        };
+        let first = |index: usize| match &items[index].children[..] {
+            [
+                Block {
+                    kind: BlockKind::Paragraph(inlines),
+                    ..
+                },
+            ] => inlines,
+            other => panic!("expected one paragraph, got {other:?}"),
+        };
+        assert_eq!(first(0).runs[0].link.as_ref().unwrap().url, "x.md");
+        assert_eq!(first(0).text, "a link then");
+        assert_eq!(styled(first(1), |s| s.bold), ["bold"]);
+        assert_eq!(styled(first(2), |s| s.italic), ["it"]);
+        assert_eq!(first(3).images.len(), 1);
+        assert_eq!(styled(first(4), |s| s.strike), ["s"]);
+        let doc = parse("- [ ] **bold task** then\n");
+        let BlockKind::List { items, .. } = &doc.blocks[0].kind else {
+            panic!("expected a list");
+        };
+        assert!(items[0].task.is_some());
+    }
+
+    #[test]
+    fn bare_addresses_become_links() {
+        let links = |source: &str| -> Vec<(String, String)> {
+            let doc = parse(source);
+            let inlines = paragraph(&doc);
+            inlines
+                .runs
+                .iter()
+                .filter_map(|run| {
+                    let link = run.link.as_ref()?;
+                    Some((inlines.text[run.range.clone()].to_owned(), link.url.clone()))
+                })
+                .collect()
+        };
+        let pair = |text: &str, url: &str| (text.to_owned(), url.to_owned());
+        assert_eq!(
+            links("See https://a.com/b, (http://c.com/d) and www.e.com."),
+            [
+                pair("https://a.com/b", "https://a.com/b"),
+                pair("http://c.com/d", "http://c.com/d"),
+                pair("www.e.com", "https://www.e.com"),
+            ]
+        );
+        assert_eq!(
+            links("https://en.wikipedia.org/wiki/A_(b) ok"),
+            [pair(
+                "https://en.wikipedia.org/wiki/A_(b)",
+                "https://en.wikipedia.org/wiki/A_(b)"
+            )]
+        );
+        // Not addresses, or already something else.
+        for source in [
+            "xhttps://a.com",
+            "www.",
+            "https://",
+            "`https://a.com`",
+            "wow www",
+        ] {
+            assert_eq!(links(source), [], "{source}");
+        }
+        assert_eq!(
+            links("[t](https://a.com/x) text"),
+            [pair("t", "https://a.com/x")]
+        );
+        assert_eq!(
+            links("[https://shown.com](https://b.com)"),
+            [pair("https://shown.com", "https://b.com")]
+        );
     }
 
     #[test]
