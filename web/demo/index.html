@@ -8,6 +8,33 @@
          loading.js for the progress bar. -->
     <link data-trunk rel="rust" href="../../Cargo.toml" data-bin="egui-files" data-wasm-opt="z"
           data-initializer="loading.js">
+    <script>
+        // Firefox's phone emulation (responsive design mode) reports
+        // devicePixelContentBoxSize in CSS pixels, not the device's. eframe
+        // sizes the canvas by it, so the app would draw at a fraction of the
+        // resolution, laid out as if the screen were that much smaller. Where
+        // it disagrees with the pixel ratio, it's taken away, and eframe works
+        // the size out from the CSS size instead. Long done before eframe
+        // starts: the app is a big download.
+        (() => {
+            if (!window.ResizeObserverEntry
+                || !("devicePixelContentBoxSize" in ResizeObserverEntry.prototype)) {
+                return;
+            }
+            const probe = document.createElement("div");
+            probe.style.cssText = "position:fixed;top:0;left:0;width:100px;height:1px;visibility:hidden";
+            const observer = new ResizeObserver(([entry]) => {
+                observer.disconnect();
+                probe.remove();
+                const device = entry.devicePixelContentBoxSize?.[0]?.inlineSize;
+                if (device !== undefined && Math.abs(device - 100 * devicePixelRatio) > 1) {
+                    delete ResizeObserverEntry.prototype.devicePixelContentBoxSize;
+                }
+            });
+            observer.observe(probe);
+            document.documentElement.append(probe);
+        })();
+    </script>
     <style>
         :root {
             color-scheme: light dark;
