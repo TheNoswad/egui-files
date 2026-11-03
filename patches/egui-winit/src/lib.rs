@@ -1029,9 +1029,11 @@ impl State {
                         let contents = contents.replace("\r\n", "\n");
                         if !contents.is_empty() {
                             self.egui_input.events.push(egui::Event::Paste(contents));
+                            return;
                         }
                     }
-                    return;
+                    // No text: the key press goes through below, so the app
+                    // can look for a picture or files on the clipboard.
                 }
             }
 

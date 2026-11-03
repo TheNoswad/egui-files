@@ -175,6 +175,89 @@ pub struct InlineImage {
     pub at: usize,
 }
 
+/// How much there is to read.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Stats {
+    pub words: usize,
+    pub chars: usize,
+}
+
+impl Stats {
+    /// At 200 words a minute, and at least a minute.
+    pub fn minutes(self) -> usize {
+        self.words.div_ceil(200).max(1)
+    }
+
+    fn add(&mut self, text: &str) {
+        self.chars += text
+            .chars()
+            .filter(|c| !c.is_whitespace() && *c != IMAGE_CHAR)
+            .count();
+        let mut in_word = false;
+        for c in text.chars() {
+            // These scripts don't put spaces between words: count characters.
+            let wide = matches!(u32::from(c), 0x3040..=0x30FF | 0x3400..=0x9FFF | 0xF900..=0xFAFF);
+            if wide {
+                self.words += 1;
+                in_word = false;
+            } else if c.is_alphanumeric() {
+                self.words += usize::from(!in_word);
+                in_word = true;
+            } else if !matches!(c, '\'' | '\u{2019}' | '-') {
+                in_word = false;
+            }
+        }
+    }
+
+    fn add_blocks(&mut self, blocks: &[Block]) {
+        for block in blocks {
+            match &block.kind {
+                BlockKind::Paragraph(text) | BlockKind::Heading { text, .. } => {
+                    self.add(&text.text)
+                }
+                BlockKind::Code { code, .. } => self.add(code),
+                BlockKind::Quote { callout, children } => {
+                    if let Some(callout) = callout {
+                        self.add(&callout.title);
+                    }
+                    self.add_blocks(children);
+                }
+                BlockKind::List { items, .. } => {
+                    for item in items {
+                        self.add_blocks(&item.children);
+                    }
+                }
+                BlockKind::Definitions(definitions) => {
+                    for definition in definitions {
+                        self.add(&definition.term.text);
+                        for detail in &definition.details {
+                            self.add_blocks(detail);
+                        }
+                    }
+                }
+                BlockKind::Table { head, rows, .. } => {
+                    for cell in head.iter().chain(rows.iter().flatten()) {
+                        self.add(&cell.text);
+                    }
+                }
+                BlockKind::Math(text) | BlockKind::Html(text) => self.add(text),
+                BlockKind::Rule | BlockKind::Frontmatter(_) => {}
+            }
+        }
+    }
+}
+
+impl Document {
+    pub fn stats(&self) -> Stats {
+        let mut stats = Stats::default();
+        stats.add_blocks(&self.blocks);
+        for footnote in &self.footnotes {
+            stats.add_blocks(&footnote.blocks);
+        }
+        stats
+    }
+}
+
 impl Inlines {
     pub fn is_empty(&self) -> bool {
         self.text.trim().is_empty() && self.images.is_empty()
@@ -1103,6 +1186,40 @@ mod tests {
         assert_eq!(styled(inlines, |s| s.code), ["e"]);
         assert_eq!(styled(inlines, |s| s.sub), ["2"]);
         assert_eq!(styled(inlines, |s| s.sup), ["2"]);
+    }
+
+    #[test]
+    fn words_are_counted_in_what_is_read() {
+        let stats = |source: &str| parse(source).stats().words;
+        assert_eq!(stats(""), 0);
+        assert_eq!(stats("one two, three-four don't"), 4);
+        assert_eq!(
+            stats("**bold** [link text](http://x.y/z/w)"),
+            3,
+            "not the address"
+        );
+        assert_eq!(stats("---\ntitle: skipped words\n---\n\nbody"), 1);
+        assert_eq!(
+            stats("# Head\n\n- a\n- b\n\n| c | d |\n|---|---|\n| e | f |\n"),
+            7
+        );
+        assert_eq!(stats("> [!note] Title here\n> body"), 3);
+        assert_eq!(
+            stats("text[^n]\n\n[^n]: in a note"),
+            4,
+            "the reference isn't a word"
+        );
+        assert_eq!(stats("日本語 中文"), 5, "no spaces between words there");
+        assert_eq!(stats("![alt words](p.png)"), 0);
+        assert_eq!(parse("ab cd").stats().chars, 4);
+    }
+
+    #[test]
+    fn reading_time_rounds_up() {
+        let minutes = |words| Stats { words, chars: 0 }.minutes();
+        assert_eq!(minutes(0), 1);
+        assert_eq!(minutes(200), 1);
+        assert_eq!(minutes(201), 2);
     }
 
     #[test]

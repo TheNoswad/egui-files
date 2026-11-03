@@ -208,6 +208,45 @@ pub fn new_tab_target(ctx: &Context, rect: Rect) -> Option<Vec<PathBuf>> {
     )
 }
 
+/// Makes `rect` a drop target for files to be used, not moved: a document
+/// taking pictures. Returns them on the drop.
+pub fn files_dropped_on(ctx: &Context, rect: Rect) -> Option<Vec<PathBuf>> {
+    let payload = DragAndDrop::payload::<FileDrag>(ctx)?;
+    let over = ctx
+        .pointer_latest_pos()
+        .is_some_and(|pos| rect.contains(pos));
+    // Other apps may only say what they're dragging on the drop.
+    let unknown = payload.external && payload.paths.is_empty();
+    if !over
+        || claimed(ctx)
+        || payload.archive.is_some()
+        || payload.link_only
+        || !unknown && payload.paths.iter().all(disk::is_dir)
+    {
+        return None;
+    }
+    claim(ctx);
+
+    let stroke = Stroke::new(2.0, crate::theme::colors(ctx).files.drop_target);
+    let layer = egui::LayerId::new(egui::Order::Foreground, Id::new("document-target"));
+    ctx.layer_painter(layer)
+        .rect_stroke(rect, 3.0, stroke, StrokeKind::Inside);
+
+    if !ctx.input(|i| i.pointer.any_released()) {
+        return None;
+    }
+    let payload = DragAndDrop::take_payload::<FileDrag>(ctx)?;
+    crate::haptics::play(Haptic::Confirm);
+    Some(
+        payload
+            .paths
+            .iter()
+            .filter(|p| !disk::is_dir(p))
+            .cloned()
+            .collect(),
+    )
+}
+
 /// The sidebar place being dragged over `rect`, unless something else took
 /// it, and whether it was dropped this frame (which ends the drag).
 pub fn place_over(ctx: &Context, rect: Rect) -> Option<(PathBuf, bool)> {

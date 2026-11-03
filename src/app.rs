@@ -2825,10 +2825,19 @@ impl FilesApp {
         if !self.os_dropped.is_empty() {
             // winit reports no drop position, so use the focused folder.
             let sources = std::mem::take(&mut self.os_dropped);
-            let dest = self.focused_path();
-            self.shared
-                .jobs
-                .start(crate::jobs::JobKind::Copy { sources, dest });
+            let document = self
+                .shared
+                .focused_tab
+                .and_then(|id| self.editor_mut(id))
+                .filter(|editor| editor.takes_files());
+            if let Some(document) = document {
+                document.drop_files(&ctx, sources);
+            } else {
+                let dest = self.focused_path();
+                self.shared
+                    .jobs
+                    .start(crate::jobs::JobKind::Copy { sources, dest });
+            }
         }
         dnd::paint_preview(&ctx);
     }

@@ -311,6 +311,14 @@ fn appearance(ui: &mut Ui, app: &mut Access) {
         ui.radio_value(remote, RemoteImages::Ask, "Ask for each document");
         ui.radio_value(remote, RemoteImages::Always, "Always load");
         ui.radio_value(remote, RemoteImages::Never, "Never load");
+        ui.add_space(4.0);
+        ui.label("Keep pasted and dropped pictures in")
+            .on_hover_text("A folder in the document's own folder; empty for that folder itself");
+        ui.add(
+            egui::TextEdit::singleline(&mut app.shared.editor.markdown.image_folder)
+                .hint_text("The document's folder")
+                .desired_width(180.0),
+        );
     }
 }
 

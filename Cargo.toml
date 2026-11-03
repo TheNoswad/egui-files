@@ -70,6 +70,8 @@ serde_json = "1"
 
 # Android has no trash the crate knows of; see android/trash.
 [target.'cfg(not(any(target_os = "android", target_arch = "wasm32")))'.dependencies]
+# Pictures pasted into markdown documents.
+arboard = { version = "3.6", default-features = false, features = ["image-data", "wayland-data-control"] }
 trash = "5.2.9"
 
 # Everything a browser can't run: C libraries (wasm32-unknown-unknown has no

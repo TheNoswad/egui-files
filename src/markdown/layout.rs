@@ -379,6 +379,86 @@ impl Layout {
     }
 }
 
+/// A find match in the rendered text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Hit {
+    /// The item it's in, and which item in that for something sideways.
+    pub item: (usize, Option<usize>),
+    /// By char in the galley.
+    pub chars: Range<usize>,
+}
+
+impl Layout {
+    /// Finds text as it reads on the page, not as it's written.
+    pub fn find(&self, query: &str, match_case: bool, whole_word: bool) -> Vec<Hit> {
+        let mut hits = Vec::new();
+        let mut search = |text: &TextItem, item| {
+            for chars in crate::editor::ops::find(text.galley.text(), query, match_case, whole_word)
+            {
+                hits.push(Hit { item, chars });
+            }
+        };
+        for (index, item) in self.items.iter().enumerate() {
+            match item {
+                Item::Text(text) => search(text, (index, None)),
+                Item::Sideways { items, .. } => {
+                    for (inner, item) in items.iter().enumerate() {
+                        if let Item::Text(text) = item {
+                            search(text, (index, Some(inner)));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        hits
+    }
+
+    /// How far down the document a match is.
+    pub fn y_of_hit(&self, hit: &Hit) -> f32 {
+        let (index, inner) = hit.item;
+        let Some(item) = self.items.get(index) else {
+            return 0.0;
+        };
+        let top = item.rect().min.y;
+        let text = match (item, inner) {
+            (Item::Text(text), None) => Some((text, 0.0)),
+            (Item::Sideways { items, .. }, Some(inner)) => match items.get(inner) {
+                Some(Item::Text(text)) => Some((text, top)),
+                _ => None,
+            },
+            _ => None,
+        };
+        text.map_or(top, |(text, base)| {
+            let at = CCursor::new(hit.chars.start);
+            base + text.pos.y + text.galley.pos_from_cursor(at).min.y
+        })
+    }
+}
+
+/// Each row's part of a range of chars, relative to the galley.
+pub fn row_rects(galley: &Galley, chars: &Range<usize>) -> Vec<Rect> {
+    let mut start = CCursor::new(chars.start);
+    start.prefer_next_row = true;
+    let end = CCursor::new(chars.end);
+    let (from, to) = (galley.pos_from_cursor(start), galley.pos_from_cursor(end));
+    let (first, last) = (
+        galley.layout_from_cursor(start).row,
+        galley.layout_from_cursor(end).row,
+    );
+    if first == last {
+        return vec![Rect::from_min_max(from.min, to.max)];
+    }
+    (first..=last)
+        .filter_map(|row| {
+            let rect = galley.rows.get(row)?.rect();
+            let left = if row == first { from.min.x } else { rect.min.x };
+            let right = if row == last { to.max.x } else { rect.max.x };
+            Some(Rect::from_x_y_ranges(left..=right, rect.y_range()))
+        })
+        .collect()
+}
+
 /// Keeps the laid out paragraphs of the last layout: changing one word of a
 /// long document then lays out one paragraph.
 #[derive(Default)]
@@ -1620,6 +1700,49 @@ mod tests {
             assert!(layout.height > 0.0);
             assert!(layout.anchors.contains_key("stress"));
         }
+    }
+
+    #[test]
+    fn find_looks_at_the_text_on_the_page() {
+        let source = "# One word\n\nA **word** in `word` and\n\n| word |\n|---|\n\n[word](hidden-address)\n\n```\nword\n```\n";
+        let layout = run(source, 500.0, &mut NoImages);
+        assert_eq!(layout.find("word", false, false).len(), 6);
+        assert_eq!(layout.find("WORD", true, false).len(), 0);
+        assert_eq!(
+            layout.find("hidden", false, false).len(),
+            0,
+            "not the address"
+        );
+        assert_eq!(layout.find("**", false, false).len(), 0, "not the markup");
+        let hits = layout.find("word", false, false);
+        let ys: Vec<f32> = hits.iter().map(|hit| layout.y_of_hit(hit)).collect();
+        assert!(ys.windows(2).all(|pair| pair[0] <= pair[1]), "{ys:?}");
+        assert!(ys[5] > ys[0]);
+    }
+
+    #[test]
+    fn find_reaches_what_scrolls_sideways_and_rows_split_matches() {
+        let long = format!("```\n{} needle\n```\n", "x".repeat(400));
+        let layout = run(&long, 300.0, &mut NoImages);
+        let hits = layout.find("needle", false, false);
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].item.1.is_some());
+
+        let layout = run(
+            "one two three four five six seven eight nine ten",
+            80.0,
+            &mut NoImages,
+        );
+        let item = texts(&layout)[0];
+        let all = 0..item.galley.text().chars().count();
+        let rects = row_rects(&item.galley, &all);
+        assert_eq!(rects.len(), item.galley.rows.len());
+        assert!(
+            rects
+                .windows(2)
+                .all(|pair| pair[1].min.y >= pair[0].max.y - 0.5)
+        );
+        assert_eq!(row_rects(&item.galley, &(0..3)).len(), 1);
     }
 
     #[test]

@@ -3,10 +3,13 @@
 //! clicks. The source stays the only document: everything that changes it,
 //! like ticking a task, is a splice of its bytes.
 
+pub mod assets;
+pub mod format;
 pub mod images;
 pub mod layout;
 pub mod links;
 pub mod parse;
+pub mod table;
 pub mod view;
 
 use serde::{Deserialize, Serialize};
@@ -65,6 +68,9 @@ pub struct Prefs {
     pub remote_images: RemoteImages,
     /// The mode "Edit" opens a document in.
     pub edit_mode: Mode,
+    /// Where pictures put into a document are kept: a folder in its own
+    /// folder, or the folder itself when empty.
+    pub image_folder: String,
 }
 
 impl Default for Prefs {
@@ -72,6 +78,7 @@ impl Default for Prefs {
         Self {
             remote_images: RemoteImages::Ask,
             edit_mode: Mode::Split,
+            image_folder: String::new(),
         }
     }
 }

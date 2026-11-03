@@ -31,7 +31,14 @@ use self::{
     ops::{Edit, Indent},
 };
 use crate::{
-    markdown::{self, Click, MdView, Mode, Target, view::toggle_task},
+    markdown::{
+        self, Click, MdView, Mode, Target,
+        format::{self, Inline, LineKind},
+        layout::Hit,
+        parse::{Heading, Stats},
+        table::{self, TableAction},
+        view::toggle_task,
+    },
     tab::{AppAction, Shared},
 };
 
@@ -128,7 +135,13 @@ pub struct EditorTab {
     /// How a markdown document is shown; other files are always source.
     #[serde(default)]
     mode: Mode,
+    /// The list of a document's headings is showing.
+    #[serde(default)]
+    outline: bool,
 
+    /// What `mode` comes to at this width, or source for other files.
+    #[serde(skip)]
+    shown_mode: Mode,
     #[serde(skip)]
     doc: Doc,
     /// What's rendered, for a markdown document.
@@ -432,6 +445,14 @@ struct MarkdownState {
     preview_was: f32,
     source_was: f32,
     version_was: u64,
+    /// The text version the rendered pane was last asked to catch up with.
+    repaint_version: u64,
+    /// The source offset at the top of what's showing, and which heading
+    /// that's under, for the outline.
+    top_byte: usize,
+    outline_current: Option<usize>,
+    /// Where pasted and dropped pictures go; from the settings.
+    image_folder: String,
 }
 
 /// Where the source pane is scrolled, for keeping the panes together.
@@ -443,6 +464,8 @@ struct SourceScroll {
 }
 
 struct FindBar {
+    /// In the rendered document: what's in `matches`, and where.
+    hits: Vec<Hit>,
     query: String,
     replacement: String,
     show_replace: bool,
@@ -465,19 +488,41 @@ struct GoTo {
 
 enum Command {
     Save,
-    Find { replace: bool },
-    FindNext { back: bool },
+    Find {
+        replace: bool,
+    },
+    FindNext {
+        back: bool,
+    },
     GoTo,
     CloseBars,
     ToggleWrap,
     ToggleComment,
-    Indent { outdent: bool },
+    Indent {
+        outdent: bool,
+    },
     Newline,
-    Replace { all: bool },
+    Replace {
+        all: bool,
+    },
     GoToLine,
     NextMode,
     Back,
     Forward,
+    ToggleOutline,
+    Inline(Inline),
+    Heading(u8),
+    Lines(LineKind),
+    CodeBlock,
+    Link,
+    Image,
+    Rule,
+    InsertTable,
+    Table(TableAction),
+    /// Text that looks like an address, pasted.
+    PasteUrl(String),
+    /// Ctrl+V with no text on the clipboard.
+    PasteImage,
 }
 
 impl EditorTab {
@@ -489,6 +534,8 @@ impl EditorTab {
             edit: path,
             syntax: None,
             mode: Mode::Preview,
+            outline: false,
+            shown_mode: Mode::Source,
             doc: Doc::Unloaded,
             md: MarkdownState::default(),
             find: None,
@@ -703,6 +750,10 @@ impl EditorTab {
         } else {
             Mode::Source
         };
+        self.shown_mode = mode;
+        if self.md.image_folder != shared.editor.markdown.image_folder {
+            self.md.image_folder = shared.editor.markdown.image_folder.clone();
+        }
         // Colors for source that isn't shown can wait until it is.
         if mode != Mode::Preview {
             update_highlighter(&ctx, buffer, syntax, &theme);
@@ -713,7 +764,12 @@ impl EditorTab {
         let editable = buffer.read_only.is_none();
         let can_edit_text = mode != Mode::Preview;
         let commands = if focused {
-            shortcuts(&ctx, text_focused && editable && can_edit_text, is_markdown)
+            shortcuts(
+                &ctx,
+                text_focused && editable && can_edit_text,
+                is_markdown,
+                self.md.view.lightbox_is_open(),
+            )
         } else {
             Vec::new()
         };
@@ -727,17 +783,22 @@ impl EditorTab {
                         | Command::NextMode
                         | Command::Back
                         | Command::Forward
+                        | Command::ToggleOutline
+                        | Command::Find { .. }
+                        | Command::FindNext { .. }
                 )
             {
                 self.run(&ctx, command);
             }
         }
 
+        let cursor = self.selection(&ctx).start;
         let Doc::Ready(buffer) = &mut self.doc else {
             return;
         };
         let mut commands = Vec::new();
         let width = ui.available_width();
+        let whole = ui.max_rect();
         Panel::top(Id::new(("editor-toolbar", self.id))).show(ui, |ui| {
             let markdown = is_markdown.then_some(MarkdownBar {
                 mode: &mut self.mode,
@@ -745,6 +806,7 @@ impl EditorTab {
                 has_room: width >= markdown::MIN_SPLIT_WIDTH,
                 can_go_back: !self.md.back.is_empty(),
                 can_go_forward: !self.md.forward.is_empty(),
+                outline: &mut self.outline,
             });
             toolbar(
                 ui,
@@ -755,6 +817,11 @@ impl EditorTab {
                 &mut commands,
             );
         });
+        if is_markdown && can_edit_text && editable {
+            Panel::top(Id::new(("editor-format", self.id))).show(ui, |ui| {
+                format_bar(ui, &buffer.text, cursor, &mut commands);
+            });
+        }
         let mut reload = false;
         if buffer.disk != Disk::InSync || buffer.error.is_some() || buffer.read_only.is_some() {
             Panel::top(Id::new(("editor-banner", self.id)))
@@ -762,7 +829,7 @@ impl EditorTab {
         }
         if let Some(find) = &mut self.find {
             Panel::top(Id::new(("editor-find", self.id))).show(ui, |ui| {
-                find_bar(ui, find, editable, &mut commands);
+                find_bar(ui, find, editable && can_edit_text, &mut commands);
             });
         }
         if let Some(goto) = &mut self.goto {
@@ -771,7 +838,8 @@ impl EditorTab {
             });
         }
         Panel::bottom(Id::new(("editor-status", self.id))).show(ui, |ui| {
-            status_bar(ui, buffer, &mut self.syntax, self.id);
+            let stats = is_markdown.then(|| self.md.view.stats());
+            status_bar(ui, buffer, &mut self.syntax, self.id, stats, can_edit_text);
         });
         if reload {
             buffer.reload = Some(load(&self.edit, &ctx));
@@ -784,13 +852,32 @@ impl EditorTab {
             return;
         };
         let colors = ThemeColors::of(&theme, ui.visuals());
-        if mode != Mode::Source {
-            buffer.view.sync(&buffer.text);
+        // The outline and stats need it whichever way the document shows.
+        if is_markdown {
             self.md.view.sync(&ctx, &buffer.text);
+        }
+        // With no room beside it, the outline takes the place of the document.
+        let outline_only = is_markdown && self.outline && width < markdown::MIN_SPLIT_WIDTH;
+        let mut heading = None;
+        if is_markdown && self.outline {
+            let mut show = |ui: &mut Ui| {
+                heading = outline_ui(ui, &mut self.md);
+            };
+            if outline_only {
+                CentralPanel::default().show(ui, |ui| show(ui));
+            } else {
+                Panel::left(Id::new(("editor-outline", self.id)))
+                    .resizable(true)
+                    .default_size(220.0)
+                    .show(ui, |ui| show(ui));
+            }
+        }
+        if mode != Mode::Source || outline_only {
+            buffer.view.sync(&buffer.text);
         }
         let mut clicks = Vec::new();
         let mut preview_rect = None;
-        if mode != Mode::Source {
+        if mode != Mode::Source && !outline_only {
             let mut show = |ui: &mut Ui| {
                 preview_rect = Some(ui.max_rect());
                 clicks = rendered(
@@ -804,16 +891,23 @@ impl EditorTab {
                         editable,
                         prefs: &shared.editor.markdown,
                         keyboard: focused && !text_focused,
+                        hits: self
+                            .find
+                            .as_ref()
+                            .filter(|_| mode == Mode::Preview)
+                            .map(|find| (find.hits.as_slice(), find.current)),
                     },
                     &mut shared.markdown_images,
                 );
             };
             if mode == Mode::Split {
+                // What the outline left, of which the source keeps some.
+                let room = ui.available_width();
                 Panel::right(Id::new(("editor-rendered-pane", self.id)))
                     .resizable(true)
-                    .default_size(width / 2.0)
+                    .default_size(room / 2.0)
                     .min_size(200.0)
-                    .max_size((width - 200.0).max(200.0))
+                    .max_size((room - 200.0).max(200.0))
                     .frame(egui::Frame::NONE.fill(ui.visuals().panel_fill))
                     .show(ui, |ui| show(ui));
             } else {
@@ -823,7 +917,7 @@ impl EditorTab {
             }
         }
         let mut source_scroll = None;
-        if mode != Mode::Preview {
+        if mode != Mode::Preview && !outline_only {
             CentralPanel::default()
                 .frame(egui::Frame::NONE.fill(colors.background))
                 .show(ui, |ui| {
@@ -856,21 +950,35 @@ impl EditorTab {
                     );
                 });
         }
-        if mode == Mode::Split {
-            // What was typed reaches the rendered pane next frame.
-            if self.md.version_was != buffer.view.version {
-                ctx.request_repaint();
-            }
-            if let (Some(source), Some(rect)) = (&source_scroll, preview_rect) {
-                sync_panes(
-                    &ctx,
-                    &mut self.md,
-                    &buffer.text,
-                    buffer.view.version,
-                    source,
-                    rect,
-                );
-            }
+        // What was typed reaches the rendered pane and the stats next frame.
+        if is_markdown && self.md.repaint_version != buffer.view.version {
+            self.md.repaint_version = buffer.view.version;
+            ctx.request_repaint();
+        }
+        if is_markdown && self.outline {
+            self.md.top_byte = match &source_scroll {
+                Some(source) if mode == Mode::Source => {
+                    let char = source
+                        .galley
+                        .cursor_from_pos(egui::vec2(0.0, source.offset))
+                        .index
+                        .0;
+                    ops::char_to_byte(&buffer.text, char)
+                }
+                _ => self.md.view.source_of_offset(self.md.view.offset),
+            };
+        }
+        if mode == Mode::Split
+            && let (Some(source), Some(rect)) = (&source_scroll, preview_rect)
+        {
+            sync_panes(
+                &ctx,
+                &mut self.md,
+                &buffer.text,
+                buffer.view.version,
+                source,
+                rect,
+            );
         }
 
         if buffer.view.version != buffer.dirty_version {
@@ -878,8 +986,14 @@ impl EditorTab {
             buffer.dirty_version = buffer.view.version;
         }
         if let Some(find) = &mut self.find {
+            let in_rendered = mode == Mode::Preview;
+            let version = if in_rendered {
+                self.md.view.layout_generation() | 1 << 63
+            } else {
+                buffer.view.version
+            };
             let key = (
-                buffer.view.version,
+                version,
                 find.query.clone(),
                 find.match_case,
                 find.whole_word,
@@ -891,12 +1005,29 @@ impl EditorTab {
                     .is_some_and(|(version, query, case, word)| {
                         (query, *case, *word) == (&key.1, key.2, key.3) && *version != key.0
                     });
-                find.matches =
-                    ops::find(&buffer.text, &find.query, find.match_case, find.whole_word);
+                if in_rendered {
+                    let layout = self.md.view.layout();
+                    find.hits = layout.find(&find.query, find.match_case, find.whole_word);
+                    find.matches = find.hits.iter().map(|hit| hit.chars.clone()).collect();
+                } else {
+                    find.hits.clear();
+                    find.matches =
+                        ops::find(&buffer.text, &find.query, find.match_case, find.whole_word);
+                }
                 find.current = None;
                 find.found_for = Some(key);
                 // Typing a search jumps to the first match from where it started.
-                if !edited && !find.matches.is_empty() {
+                if in_rendered && !edited && !find.hits.is_empty() {
+                    let view = &self.md.view;
+                    let top = view.offset;
+                    let index = find
+                        .hits
+                        .iter()
+                        .position(|hit| view.offset_of_hit(hit) >= top)
+                        .unwrap_or(0);
+                    find.current = Some(index);
+                    self.md.preview_to = Some(view.offset_of_hit(&find.hits[index]));
+                } else if !in_rendered && !edited && !find.matches.is_empty() {
                     let start = find.start;
                     let index = find
                         .matches
@@ -915,6 +1046,65 @@ impl EditorTab {
         for click in clicks {
             self.clicked(&ctx, click, &mut shared.app_actions);
         }
+        if let Some((start, slug)) = heading {
+            match mode {
+                Mode::Source => {
+                    if let Doc::Ready(buffer) = &self.doc {
+                        let at = buffer.text.get(..start).map_or(0, |t| t.chars().count());
+                        self.select = Some(at..at);
+                        self.scroll_to_cursor = true;
+                        // It only scrolls to a cursor it has focus for.
+                        self.focus_text = true;
+                    }
+                }
+                _ => self.md.anchor = Some(slug),
+            }
+            if outline_only {
+                self.outline = false;
+            }
+        }
+        if is_markdown
+            && editable
+            && let Some(files) = crate::dnd::files_dropped_on(&ctx, whole)
+        {
+            self.drop_files(&ctx, files);
+        }
+    }
+
+    /// Whether files dropped with this tab focused are for it: a document
+    /// that can take them, rather than the folder it's in.
+    pub fn takes_files(&self) -> bool {
+        self.is_markdown() && matches!(&self.doc, Doc::Ready(b) if b.read_only.is_none())
+    }
+
+    /// Puts files into the document, at the cursor if it's showing.
+    pub fn drop_files(&mut self, ctx: &Context, files: Vec<PathBuf>) {
+        let dir = self.dir().unwrap_or_default();
+        match markdown::assets::markdown_for(&dir, &self.md.image_folder, &files) {
+            Ok(text) if !text.is_empty() => self.insert_block(ctx, &text),
+            Ok(_) => {}
+            Err(err) => {
+                if let Doc::Ready(buffer) = &mut self.doc {
+                    buffer.error = Some(format!("Could not add that: {err}"));
+                }
+            }
+        }
+    }
+
+    /// Adds a block of markdown at the cursor, or at the end of the document
+    /// when it's only being read.
+    fn insert_block(&mut self, ctx: &Context, block: &str) {
+        let Doc::Ready(buffer) = &self.doc else {
+            return;
+        };
+        let selection = if self.shown_mode == Mode::Preview {
+            let end = buffer.text.chars().count();
+            end..end
+        } else {
+            self.selection(ctx)
+        };
+        let edit = format::insert_block(&buffer.text, selection, &format!("{block}\n"));
+        self.apply_edit(ctx, edit);
     }
 
     /// Acts on a click in the rendered document.
@@ -1081,8 +1271,54 @@ impl EditorTab {
             }
             Command::Back => self.go_back(true),
             Command::Forward => self.go_back(false),
+            Command::ToggleOutline => self.outline = !self.outline,
+            Command::Inline(style) => {
+                let edit = format::toggle_inline(&buffer.text, selection, style);
+                self.apply_format(ctx, edit);
+            }
+            Command::Heading(level) => {
+                let edit = format::set_heading(&buffer.text, selection, level);
+                self.apply_format(ctx, edit);
+            }
+            Command::Lines(kind) => {
+                let edit = format::toggle_lines(&buffer.text, selection, kind);
+                self.apply_format(ctx, edit);
+            }
+            Command::CodeBlock => {
+                let edit = format::code_block(&buffer.text, selection);
+                self.apply_format(ctx, edit);
+            }
+            Command::Link => {
+                let edit = format::link(&buffer.text, selection);
+                self.apply_format(ctx, edit);
+            }
+            Command::Image => {
+                let edit = format::image(&buffer.text, selection);
+                self.apply_format(ctx, edit);
+            }
+            Command::Rule => {
+                let edit = format::rule(&buffer.text, selection);
+                self.apply_format(ctx, edit);
+            }
+            Command::InsertTable => {
+                let edit = format::insert_table(&buffer.text, selection);
+                self.apply_format(ctx, edit);
+            }
+            Command::Table(action) => {
+                if let Some(edit) = table::apply(&buffer.text, selection.start, action) {
+                    self.apply_format(ctx, edit);
+                }
+            }
+            Command::PasteUrl(pasted) => {
+                let edit = format::paste_url(&buffer.text, selection.clone(), &pasted)
+                    .unwrap_or_else(|| ops::insert(&buffer.text, selection, &pasted));
+                self.apply_edit(ctx, edit);
+            }
+            Command::PasteImage => self.paste_picture(ctx),
             Command::Find { replace } => {
-                let selected = (selection.start != selection.end)
+                // What's selected in the source isn't what's being read.
+                let selected = (selection.start != selection.end
+                    && self.shown_mode != Mode::Preview)
                     .then(|| {
                         let text = &buffer.text;
                         let start = ops::char_to_byte(text, selection.start);
@@ -1091,6 +1327,7 @@ impl EditorTab {
                     })
                     .filter(|s| !s.contains('\n'));
                 let find = self.find.get_or_insert_with(|| FindBar {
+                    hits: Vec::new(),
                     query: String::new(),
                     replacement: String::new(),
                     show_replace: false,
@@ -1120,6 +1357,7 @@ impl EditorTab {
             Command::CloseBars => {
                 // The text field only keeps a selection while focused.
                 if let Some(find) = self.find.take()
+                    && self.shown_mode != Mode::Preview
                     && let Some(current) = find.current.and_then(|i| find.matches.get(i))
                 {
                     self.select = Some(current.clone());
@@ -1137,6 +1375,19 @@ impl EditorTab {
             }
             Command::Indent { outdent } => {
                 let text = &buffer.text;
+                if self.is_markdown() {
+                    let action = if outdent {
+                        TableAction::PreviousCell
+                    } else {
+                        TableAction::NextCell
+                    };
+                    let edit = table::apply(text, selection.start, action)
+                        .or_else(|| format::indent_item(text, selection.clone(), outdent));
+                    if let Some(edit) = edit {
+                        self.apply_edit(ctx, edit);
+                        return;
+                    }
+                }
                 let multiline = {
                     let start = ops::char_to_byte(text, selection.start);
                     let end = ops::char_to_byte(text, selection.end);
@@ -1170,6 +1421,12 @@ impl EditorTab {
                 self.focus_text = true;
             }
             Command::Newline => {
+                if self.is_markdown()
+                    && let Some(edit) = format::continue_list(&buffer.text, selection.clone())
+                {
+                    self.apply_edit(ctx, edit);
+                    return;
+                }
                 let indent = ops::indent_at(&buffer.text, selection.start).to_owned();
                 let edit = ops::insert(&buffer.text, selection, &format!("\n{indent}"));
                 self.apply_edit(ctx, edit);
@@ -1203,8 +1460,42 @@ impl EditorTab {
                 .unwrap_or(0),
         };
         find.current = Some(index);
+        if self.shown_mode == Mode::Preview {
+            if let Some(hit) = find.hits.get(index) {
+                self.md.preview_to = Some(self.md.view.offset_of_hit(hit));
+            }
+            return;
+        }
         self.select = Some(find.matches[index].clone());
         self.scroll_to_cursor = true;
+    }
+
+    /// A command from the toolbar took focus from the text: it goes back.
+    fn apply_format(&mut self, ctx: &Context, edit: Edit) {
+        self.apply_edit(ctx, edit);
+        self.focus_text = true;
+    }
+
+    /// Saves the picture on the clipboard beside the document and adds it.
+    fn paste_picture(&mut self, ctx: &Context) {
+        #[cfg(not(any(target_os = "android", target_arch = "wasm32")))]
+        {
+            let Some((width, height, rgba)) = markdown::assets::clipboard_picture() else {
+                return;
+            };
+            let dir = self.dir().unwrap_or_default();
+            let folder = self.md.image_folder.clone();
+            match markdown::assets::save_pasted(&dir, &folder, width, height, rgba) {
+                Ok(text) => self.insert_block(ctx, &text),
+                Err(err) => {
+                    if let Doc::Ready(buffer) = &mut self.doc {
+                        buffer.error = Some(format!("Could not save the picture: {err}"));
+                    }
+                }
+            }
+        }
+        #[cfg(any(target_os = "android", target_arch = "wasm32"))]
+        let _ = ctx;
     }
 
     /// Replaces the current match and moves on, or replaces every match.
@@ -1283,7 +1574,12 @@ fn update_highlighter(ctx: &Context, buffer: &mut Buffer, syntax: &str, theme: &
 }
 
 /// Keys the editor handles itself, taken before the text field sees them.
-fn shortcuts(ctx: &Context, text_focused: bool, is_markdown: bool) -> Vec<Command> {
+fn shortcuts(
+    ctx: &Context,
+    text_focused: bool,
+    is_markdown: bool,
+    lightbox_open: bool,
+) -> Vec<Command> {
     use crate::keymap::Command as Global;
     let cmd = Modifiers::COMMAND;
     let keymap = crate::keymap::get(ctx);
@@ -1292,6 +1588,32 @@ fn shortcuts(ctx: &Context, text_focused: bool, is_markdown: bool) -> Vec<Comman
         if is_markdown {
             if i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::V) {
                 commands.push(Command::NextMode);
+            }
+            if i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::O) {
+                commands.push(Command::ToggleOutline);
+            }
+            if text_focused {
+                let cmd_shift = Modifiers::COMMAND | Modifiers::SHIFT;
+                if i.consume_key(cmd_shift, Key::X) {
+                    commands.push(Command::Inline(Inline::Strike));
+                }
+                for (key, command) in [
+                    (Key::B, Command::Inline(Inline::Bold)),
+                    (Key::I, Command::Inline(Inline::Italic)),
+                    (Key::E, Command::Inline(Inline::Code)),
+                    (Key::K, Command::Link),
+                    (Key::Num0, Command::Heading(0)),
+                    (Key::Num1, Command::Heading(1)),
+                    (Key::Num2, Command::Heading(2)),
+                    (Key::Num3, Command::Heading(3)),
+                    (Key::Num4, Command::Heading(4)),
+                    (Key::Num5, Command::Heading(5)),
+                    (Key::Num6, Command::Heading(6)),
+                ] {
+                    if i.consume_key(Modifiers::COMMAND, key) {
+                        commands.push(command);
+                    }
+                }
             }
             if keymap.pressed(i, Global::Back)
                 || i.pointer.button_pressed(egui::PointerButton::Extra1)
@@ -1317,10 +1639,27 @@ fn shortcuts(ctx: &Context, text_focused: bool, is_markdown: bool) -> Vec<Comman
         key(Modifiers::ALT, Key::Z, Command::ToggleWrap);
         key(Modifiers::SHIFT, Key::F3, Command::FindNext { back: true });
         key(Modifiers::NONE, Key::F3, Command::FindNext { back: false });
-        key(Modifiers::NONE, Key::Escape, Command::CloseBars);
+        // Escape closes a picture opened over everything first.
+        if !lightbox_open {
+            key(Modifiers::NONE, Key::Escape, Command::CloseBars);
+        }
         if text_focused {
             // Instead of the text field inserting a plain tab or line break.
             i.events.retain(|event| match event {
+                egui::Event::Paste(pasted) if is_markdown && looks_like_address(pasted) => {
+                    commands.push(Command::PasteUrl(pasted.clone()));
+                    false
+                }
+                egui::Event::Key {
+                    key: Key::V,
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                    ..
+                } if is_markdown && modifiers.command => {
+                    commands.push(Command::PasteImage);
+                    false
+                }
                 egui::Event::Key {
                     key: Key::Tab,
                     pressed,
@@ -1352,6 +1691,14 @@ fn shortcuts(ctx: &Context, text_focused: bool, is_markdown: bool) -> Vec<Comman
     })
 }
 
+fn looks_like_address(text: &str) -> bool {
+    let text = text.trim();
+    ["http://", "https://", "mailto:"]
+        .iter()
+        .any(|scheme| text.starts_with(scheme))
+        && !text.contains(char::is_whitespace)
+}
+
 /// The toolbar's part for a markdown document.
 struct MarkdownBar<'a> {
     mode: &'a mut Mode,
@@ -1360,6 +1707,7 @@ struct MarkdownBar<'a> {
     has_room: bool,
     can_go_back: bool,
     can_go_forward: bool,
+    outline: &'a mut bool,
 }
 
 fn toolbar(
@@ -1389,6 +1737,8 @@ fn toolbar(
         if let Some(markdown) = markdown {
             source_shown = markdown.shown != Mode::Preview;
             ui.separator();
+            ui.toggle_value(markdown.outline, RichText::new(icon::TREE_VIEW).size(16.0))
+                .on_hover_text("Outline (Ctrl+Shift+O)");
             if button(
                 ui,
                 markdown.can_go_back,
@@ -1426,11 +1776,11 @@ fn toolbar(
                 }
             }
         }
+        ui.separator();
+        if button(ui, true, icon::MAGNIFYING_GLASS, "Find (Ctrl+F)") {
+            commands.push(Command::Find { replace: false });
+        }
         if source_shown {
-            ui.separator();
-            if button(ui, true, icon::MAGNIFYING_GLASS, "Find (Ctrl+F)") {
-                commands.push(Command::Find { replace: false });
-            }
             if button(ui, editable, icon::SWAP, "Replace (Ctrl+H)") {
                 commands.push(Command::Find { replace: true });
             }
@@ -1607,7 +1957,162 @@ fn goto_bar(ui: &mut Ui, goto: &mut GoTo, commands: &mut Vec<Command>) {
     });
 }
 
-fn status_bar(ui: &mut Ui, buffer: &Buffer, syntax: &mut Option<String>, id: u64) {
+/// The formatting commands for markdown source, scrolling if there's no room.
+fn format_bar(ui: &mut Ui, text: &str, cursor: usize, commands: &mut Vec<Command>) {
+    ScrollArea::horizontal()
+        .id_salt("format-bar")
+        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+        .scroll_source(crate::touch::scroll_source(ui.ctx()))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let mut button = |ui: &mut Ui, glyph: &str, tip: &str, command: Command| {
+                    if ui
+                        .add(Button::new(RichText::new(glyph).size(16.0)))
+                        .on_hover_text(tip)
+                        .clicked()
+                    {
+                        commands.push(command);
+                    }
+                };
+                for (glyph, tip, style) in [
+                    (icon::TEXT_B, "Bold (Ctrl+B)", Inline::Bold),
+                    (icon::TEXT_ITALIC, "Italic (Ctrl+I)", Inline::Italic),
+                    (
+                        icon::TEXT_STRIKETHROUGH,
+                        "Strikethrough (Ctrl+Shift+X)",
+                        Inline::Strike,
+                    ),
+                    (icon::HIGHLIGHTER, "Highlight", Inline::Highlight),
+                    (icon::CODE_SIMPLE, "Inline code (Ctrl+E)", Inline::Code),
+                ] {
+                    button(ui, glyph, tip, Command::Inline(style));
+                }
+                ui.separator();
+                button(ui, icon::LINK, "Link (Ctrl+K)", Command::Link);
+                button(ui, icon::IMAGE, "Picture", Command::Image);
+                ui.separator();
+                let mut chosen = None;
+                ui.menu_button(RichText::new(icon::TEXT_H).size(16.0), |ui| {
+                    for level in 1..=6u8 {
+                        if ui
+                            .button(format!("Heading {level} (Ctrl+{level})"))
+                            .clicked()
+                        {
+                            chosen = Some(Command::Heading(level));
+                        }
+                    }
+                    if ui.button("Plain text (Ctrl+0)").clicked() {
+                        chosen = Some(Command::Heading(0));
+                    }
+                })
+                .response
+                .on_hover_text("Heading");
+                let mut button = |ui: &mut Ui, glyph: &str, tip: &str, command: Command| {
+                    if ui
+                        .add(Button::new(RichText::new(glyph).size(16.0)))
+                        .on_hover_text(tip)
+                        .clicked()
+                    {
+                        commands.push(command);
+                    }
+                };
+                for (glyph, tip, kind) in [
+                    (icon::LIST_BULLETS, "Bullets", LineKind::Bullet),
+                    (icon::LIST_NUMBERS, "Numbers", LineKind::Numbered),
+                    (icon::LIST_CHECKS, "Tasks", LineKind::Task),
+                    (icon::QUOTES, "Quote", LineKind::Quote),
+                ] {
+                    button(ui, glyph, tip, Command::Lines(kind));
+                }
+                ui.separator();
+                button(ui, icon::CODE_BLOCK, "Code block", Command::CodeBlock);
+                button(ui, icon::MINUS, "Horizontal rule", Command::Rule);
+                ui.menu_button(RichText::new(icon::TABLE).size(16.0), |ui| {
+                    table_menu(ui, text, cursor, &mut chosen);
+                })
+                .response
+                .on_hover_text("Table");
+                commands.extend(chosen);
+            });
+        });
+}
+
+fn table_menu(ui: &mut Ui, text: &str, cursor: usize, chosen: &mut Option<Command>) {
+    use crate::markdown::table::Align as TableAlign;
+    if table::at(text, cursor).is_none() {
+        if ui.button("Insert a table").clicked() {
+            *chosen = Some(Command::InsertTable);
+        }
+        return;
+    }
+    for (label, action) in [
+        ("Add a row below", TableAction::AddRowBelow),
+        ("Add a row above", TableAction::AddRowAbove),
+        ("Add a column to the right", TableAction::AddColumnRight),
+        ("Add a column to the left", TableAction::AddColumnLeft),
+        ("Delete this row", TableAction::DeleteRow),
+        ("Delete this column", TableAction::DeleteColumn),
+        (
+            "Align this column left",
+            TableAction::Align(TableAlign::Left),
+        ),
+        ("Center this column", TableAction::Align(TableAlign::Center)),
+        (
+            "Align this column right",
+            TableAction::Align(TableAlign::Right),
+        ),
+        ("Line up the table", TableAction::Format),
+    ] {
+        if ui.button(label).clicked() {
+            *chosen = Some(Command::Table(action));
+        }
+    }
+}
+
+/// A document's headings. Returns where the one clicked on is: its source
+/// offset and anchor.
+fn outline_ui(ui: &mut Ui, md: &mut MarkdownState) -> Option<(usize, String)> {
+    let headings: &[Heading] = &md.view.document().headings;
+    let top = md.top_byte;
+    let current = headings.iter().rposition(|h| h.source.start <= top);
+    let moved = std::mem::replace(&mut md.outline_current, current) != current;
+    let least = headings.iter().map(|h| h.level).min().unwrap_or(1);
+    let mut clicked = None;
+    ui.add_space(4.0);
+    if headings.is_empty() {
+        ui.weak("No headings");
+    }
+    ScrollArea::vertical()
+        .id_salt("outline")
+        .auto_shrink(false)
+        .scroll_source(crate::touch::scroll_source(ui.ctx()))
+        .show(ui, |ui| {
+            for (index, heading) in headings.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.add_space(f32::from(heading.level - least) * 12.0);
+                    let selected = Some(index) == current;
+                    let response =
+                        ui.add(egui::Button::selectable(selected, &heading.text).truncate());
+                    if selected && moved {
+                        response.scroll_to_me(None);
+                    }
+                    if response.clicked() {
+                        clicked = Some((heading.source.start, heading.slug.clone()));
+                    }
+                });
+            }
+        });
+    clicked
+}
+
+fn status_bar(
+    ui: &mut Ui,
+    buffer: &Buffer,
+    syntax: &mut Option<String>,
+    id: u64,
+    stats: Option<Stats>,
+    source_shown: bool,
+) {
     ui.horizontal(|ui| {
         let detected = buffer.detected_syntax;
         let current = syntax.as_deref().unwrap_or(detected);
@@ -1634,8 +2139,15 @@ fn status_bar(ui: &mut Ui, buffer: &Buffer, syntax: &mut Option<String>, id: u64
         if buffer.text.len() > highlight::MAX_HIGHLIGHT_BYTES {
             ui.weak("Colors off: file too large");
         }
+        if let Some(stats) = stats {
+            ui.weak(format!(
+                "{} words, {} min read",
+                stats.words,
+                stats.minutes()
+            ));
+        }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if let Some((line, col, selected)) = buffer.view.status {
+            if let Some((line, col, selected)) = buffer.view.status.filter(|_| source_shown) {
                 ui.weak(buffer.line_ending.label());
                 ui.weak(if buffer.bom {
                     "UTF-8 with BOM"
@@ -1858,6 +2370,7 @@ struct Rendered<'a> {
     prefs: &'a markdown::Prefs,
     /// Takes the keys that scroll, as no text field does.
     keyboard: bool,
+    hits: Option<(&'a [Hit], Option<usize>)>,
 }
 
 /// The rendered document, and the bar offering its remote pictures.
@@ -1922,6 +2435,7 @@ fn rendered(
         editable: rendered.editable,
         scroll_to,
         compact: false,
+        hits: rendered.hits,
     };
     md.view.show(ui, rendered.id, &options, images)
 }
@@ -2177,6 +2691,199 @@ mod tests {
         h.frame(vec![]);
         h.frame(vec![]);
         assert!(!Arc::ptr_eq(&before, &galley(&h)));
+    }
+
+    fn select(h: &mut Harness, range: Range<usize>) {
+        h.tab.select = Some(range);
+        h.tab.focus_text = true;
+        h.frame(vec![]);
+        h.frame(vec![]);
+    }
+
+    #[test]
+    fn shortcuts_format_the_selection() {
+        let mut h = Harness::with_file("md-format", "a.md", "one two\n");
+        h.tab.mode = Mode::Source;
+        h.frame(vec![]);
+        select(&mut h, 4..7);
+        h.frame(vec![press(Key::B, Modifiers::COMMAND)]);
+        h.frame(vec![]);
+        assert_eq!(text_of(&h), "one **two**\n");
+        assert_eq!(h.tab.selection(&h.ctx), 6..9, "still selected");
+        h.frame(vec![press(Key::B, Modifiers::COMMAND)]);
+        h.frame(vec![]);
+        assert_eq!(text_of(&h), "one two\n");
+        h.frame(vec![press(Key::Num2, Modifiers::COMMAND)]);
+        h.frame(vec![]);
+        assert_eq!(text_of(&h), "## one two\n");
+    }
+
+    #[test]
+    fn formatting_is_only_for_markdown() {
+        let mut h = Harness::new("md-format-other", "one two\n");
+        h.frame(vec![]);
+        select(&mut h, 4..7);
+        h.frame(vec![press(Key::B, Modifiers::COMMAND)]);
+        h.frame(vec![]);
+        assert_eq!(text_of(&h), "one two\n");
+    }
+
+    #[test]
+    fn formatting_is_one_undo_step() {
+        let mut h = Harness::with_file("md-undo", "a.md", "one\n");
+        h.tab.mode = Mode::Source;
+        h.frame(vec![]);
+        select(&mut h, 0..3);
+        h.frame(vec![press(Key::B, Modifiers::COMMAND)]);
+        h.frame(vec![]);
+        assert_eq!(text_of(&h), "**one**\n");
+        h.frame(vec![press(Key::Z, Modifiers::COMMAND)]);
+        h.frame(vec![]);
+        assert_eq!(text_of(&h), "one\n");
+    }
+
+    #[test]
+    fn enter_continues_a_list_and_tab_moves_through_a_table() {
+        let mut h = Harness::with_file("md-keys-edit", "a.md", "- one\n");
+        h.tab.mode = Mode::Source;
+        h.frame(vec![]);
+        select(&mut h, 5..5);
+        h.frame(vec![press(Key::Enter, Modifiers::NONE)]);
+        h.frame(vec![]);
+        assert_eq!(text_of(&h), "- one\n- \n");
+
+        let mut h =
+            Harness::with_file("md-keys-table", "a.md", "| a | b |\n|---|---|\n| 1 | 2 |\n");
+        h.tab.mode = Mode::Source;
+        h.frame(vec![]);
+        select(&mut h, 2..2);
+        h.frame(vec![press(Key::Tab, Modifiers::NONE)]);
+        h.frame(vec![]);
+        assert!(text_of(&h).contains("| --- | --- |"), "{}", text_of(&h));
+        let selection = h.tab.selection(&h.ctx);
+        assert_eq!(selection.len(), 1);
+    }
+
+    #[test]
+    fn pasting_an_address_over_text_makes_a_link() {
+        let mut h = Harness::with_file("md-paste", "a.md", "see this\n");
+        h.tab.mode = Mode::Source;
+        h.frame(vec![]);
+        select(&mut h, 4..8);
+        h.frame(vec![Event::Paste("https://a.com".into())]);
+        h.frame(vec![]);
+        assert_eq!(text_of(&h), "see [this](https://a.com)\n");
+        select(&mut h, 0..0);
+        h.frame(vec![Event::Paste("https://b.com".into())]);
+        h.frame(vec![]);
+        assert!(
+            text_of(&h).starts_with("https://b.com"),
+            "nothing selected: plain"
+        );
+        h.frame(vec![Event::Paste(" other words".into())]);
+        h.frame(vec![]);
+        assert!(
+            text_of(&h).contains(" other words"),
+            "other text pastes as ever"
+        );
+    }
+
+    #[test]
+    fn dropped_pictures_are_added_at_the_end_of_a_document_being_read() {
+        let mut h = Harness::with_file("md-drop", "a.md", "text\n");
+        h.tab.mode = Mode::Preview;
+        h.frame(vec![]);
+        h.frame(vec![]);
+        let picture = h.dir.join("p.png");
+        disk::write(&picture, "pixels").unwrap();
+        assert!(h.tab.takes_files());
+        let ctx = h.ctx.clone();
+        h.tab.drop_files(&ctx, vec![picture]);
+        assert_eq!(text_of(&h), "text\n\n![p](p.png)\n");
+        assert!(
+            h.tab.is_dirty() || {
+                h.frame(vec![]);
+                h.tab.is_dirty()
+            }
+        );
+    }
+
+    #[test]
+    fn other_files_dont_take_drops() {
+        let mut h = Harness::new("md-no-drop", "fn main() {}\n");
+        h.frame(vec![]);
+        assert!(!h.tab.takes_files());
+    }
+
+    #[test]
+    fn find_in_a_rendered_document_searches_what_it_says() {
+        let source =
+            "# Title\n\nA **word** here, and a [word](address) there.\n\n`address` once.\n";
+        let mut h = Harness::with_file("md-find", "a.md", source);
+        h.tab.mode = Mode::Preview;
+        h.frame(vec![]);
+        h.frame(vec![press(Key::F, Modifiers::COMMAND)]);
+        h.frame(vec![]);
+        let find = h.tab.find.as_mut().expect("the bar opens in Preview");
+        find.query = "word".to_owned();
+        h.frame(vec![]);
+        h.frame(vec![]);
+        let find = h.tab.find.as_ref().unwrap();
+        assert_eq!(find.hits.len(), 2);
+        assert_eq!(find.current, Some(0));
+        h.frame(vec![press(Key::F3, Modifiers::NONE)]);
+        h.frame(vec![]);
+        assert_eq!(h.tab.find.as_ref().unwrap().current, Some(1));
+        h.frame(vec![press(Key::F3, Modifiers::NONE)]);
+        h.frame(vec![]);
+        assert_eq!(h.tab.find.as_ref().unwrap().current, Some(0), "wraps");
+
+        h.tab.find.as_mut().unwrap().query = "address".to_owned();
+        h.frame(vec![]);
+        h.frame(vec![]);
+        assert_eq!(
+            h.tab.find.as_ref().unwrap().hits.len(),
+            1,
+            "the link's isn't on the page"
+        );
+
+        // In the source, the same search sees the markup.
+        h.tab.mode = Mode::Source;
+        h.frame(vec![]);
+        h.frame(vec![]);
+        let find = h.tab.find.as_ref().unwrap();
+        assert!(find.hits.is_empty());
+        assert_eq!(find.matches.len(), 2);
+        assert_eq!(text_of(&h), source, "searching changes nothing");
+    }
+
+    #[test]
+    fn closing_find_in_preview_leaves_the_source_selection_alone() {
+        let mut h = Harness::with_file("md-find-close", "a.md", "word word\n");
+        h.tab.mode = Mode::Preview;
+        h.frame(vec![]);
+        h.frame(vec![press(Key::F, Modifiers::COMMAND)]);
+        h.tab.find.as_mut().unwrap().query = "word".to_owned();
+        h.frame(vec![]);
+        h.frame(vec![press(Key::Escape, Modifiers::NONE)]);
+        h.frame(vec![]);
+        assert!(h.tab.find.is_none());
+        assert_eq!(h.tab.select, None);
+    }
+
+    #[test]
+    fn the_outline_lists_headings_and_goes_to_them() {
+        let source = "# One\n\n## Two\n\ntext\n";
+        let mut h = Harness::with_file("md-outline", "a.md", source);
+        h.tab.mode = Mode::Source;
+        h.frame(vec![]);
+        h.frame(vec![press(Key::O, Modifiers::COMMAND | Modifiers::SHIFT)]);
+        h.frame(vec![]);
+        assert!(h.tab.outline);
+        let headings = &h.tab.md.view.document().headings;
+        assert_eq!(headings.len(), 2);
+        assert_eq!(headings[1].slug, "two");
+        assert_eq!(h.tab.md.view.stats().words, 3);
     }
 
     #[test]

@@ -39,3 +39,6 @@ it doesn't. Tab windows hit it when a window's last tab is dragged out.
 To update egui-winit: copy the new version from `~/.cargo/registry/src` over
 this folder and redo the change in `init_smithay_clipboard` (and the two
 places that lock it).
+
+Also passes the key press through when Ctrl+V finds no text on the clipboard,
+instead of dropping it, so a picture can be pasted (`markdown::assets`).

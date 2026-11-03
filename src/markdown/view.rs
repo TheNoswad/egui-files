@@ -18,10 +18,10 @@ use super::{
     Images,
     images::resolve,
     layout::{
-        self, CodeSpans, Fonts, GalleyCache, ImageSizes, Inputs, Item, Layout, Params, TextItem,
-        Theme, Widget,
+        self, CodeSpans, Fonts, GalleyCache, Hit, ImageSizes, Inputs, Item, Layout, Params,
+        TextItem, Theme, Widget, row_rects,
     },
-    parse::{self, BlockKind, Document, Link, Task},
+    parse::{self, BlockKind, Document, Link, Stats, Task},
 };
 use crate::editor::highlight::{self, Highlighter};
 
@@ -57,6 +57,8 @@ pub struct Options<'a> {
     pub scroll_to: Option<f32>,
     /// Keep to the width given, without margins, as in the preview pane.
     pub compact: bool,
+    /// What to mark as found, and which of it is current.
+    pub hits: Option<(&'a [Hit], Option<usize>)>,
 }
 
 /// A document's parse, layout and what's being highlighted for it.
@@ -79,11 +81,43 @@ pub struct MdView {
     /// Scrolled to last frame, how far down, and how tall the view was.
     pub offset: f32,
     pub viewport_height: f32,
+    /// Goes up with each new layout, for what's worked out from it.
+    layout_generation: u64,
+    stats: Stats,
+    lightbox: Option<Lightbox>,
+}
+
+/// A picture shown large, over everything.
+struct Lightbox {
+    key: String,
+    zoom: f32,
+    pan: Vec2,
 }
 
 impl MdView {
     pub fn layout(&self) -> &Layout {
         &self.layout
+    }
+
+    pub fn document(&self) -> &Document {
+        &self.document
+    }
+
+    pub fn stats(&self) -> Stats {
+        self.stats
+    }
+
+    pub fn layout_generation(&self) -> u64 {
+        self.layout_generation
+    }
+
+    pub fn lightbox_is_open(&self) -> bool {
+        self.lightbox.is_some()
+    }
+
+    /// Where to scroll to show a match, a little way down the view.
+    pub fn offset_of_hit(&self, hit: &Hit) -> f32 {
+        (self.layout.y_of_hit(hit) + MARGIN - self.viewport_height / 3.0).max(0.0)
     }
 
     /// Parses `text` if it isn't what's parsed already. A very long document
@@ -101,6 +135,7 @@ impl MdView {
         }
         crate::theme::fonts::want(text);
         self.document = Arc::new(parse::parse(text));
+        self.stats = self.document.stats();
         self.parsed = Some(Arc::from(text));
         self.parsed_at = Some(Instant::now());
         self.inputs = None;
@@ -204,6 +239,7 @@ impl MdView {
             },
         );
         self.inputs = Some(inputs);
+        self.layout_generation += 1;
     }
 
     /// Fills the space given with the document, scrolling within it.
@@ -223,6 +259,7 @@ impl MdView {
         self.update_layout(ui, page, options, images);
         let height = self.layout.height + MARGIN * 2.0;
         let mut clicks = Vec::new();
+        let mut opened = None;
         let mut scroll = ScrollArea::vertical()
             .id_salt(id.with("scroll"))
             .auto_shrink(false)
@@ -241,6 +278,7 @@ impl MdView {
                 origin,
                 visible,
                 id,
+                None,
                 &mut Painting {
                     images,
                     dir: options.dir,
@@ -249,11 +287,21 @@ impl MdView {
                     clicks: &mut clicks,
                     toggled: &mut self.toggled,
                     fold_generation: &mut self.fold_generation,
+                    hits: options.hits,
+                    opened: Some(&mut opened),
                 },
             );
         });
         self.offset = output.state.offset.y;
         self.viewport_height = output.inner_rect.height();
+        if let Some(key) = opened {
+            self.lightbox = Some(Lightbox {
+                key,
+                zoom: 1.0,
+                pan: Vec2::ZERO,
+            });
+        }
+        self.show_lightbox(ui.ctx(), id, images);
         clicks
     }
 
@@ -277,6 +325,7 @@ impl MdView {
             rect.min,
             ui.clip_rect(),
             id,
+            None,
             &mut Painting {
                 images,
                 dir: options.dir,
@@ -285,9 +334,65 @@ impl MdView {
                 clicks: &mut clicks,
                 toggled: &mut self.toggled,
                 fold_generation: &mut self.fold_generation,
+                hits: options.hits,
+                opened: None,
             },
         );
         clicks
+    }
+
+    /// Shows the picture opened, if there is one: the wheel or a pinch zooms,
+    /// dragging moves it, and a click or Escape closes it.
+    fn show_lightbox(&mut self, ctx: &Context, id: Id, images: &mut Images) {
+        let Some(lightbox) = &mut self.lightbox else {
+            return;
+        };
+        let size = images.size(&lightbox.key);
+        let (Some(size), Some(texture)) = (size, images.texture(&lightbox.key).map(|t| t.id()))
+        else {
+            self.lightbox = None;
+            return;
+        };
+        let screen = ctx.content_rect();
+        let mut close = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+        egui::Area::new(id.with("lightbox"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(screen.min)
+            .show(ctx, |ui| {
+                let response = ui.allocate_response(screen.size(), Sense::click_and_drag());
+                let (scroll, pinch) = ui.input(|i| (i.smooth_scroll_delta.y, i.zoom_delta()));
+                let wheel = (scroll * 0.002).exp();
+                lightbox.zoom = (lightbox.zoom * wheel * pinch).clamp(0.1, 16.0);
+                lightbox.pan += response.drag_delta();
+                close |= response.clicked();
+                let painter = ui.painter();
+                painter.rect_filled(screen, 0.0, Color32::from_black_alpha(220));
+                let margin = 24.0;
+                let room = screen.shrink(margin).size();
+                let fit = (room.x / size.x).min(room.y / size.y).min(1.0);
+                let rect = Rect::from_center_size(
+                    screen.center() + lightbox.pan,
+                    size * fit * lightbox.zoom,
+                );
+                painter.image(
+                    texture,
+                    rect,
+                    Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                    Color32::WHITE,
+                );
+                painter.text(
+                    pos2(screen.max.x - margin, screen.min.y + margin),
+                    egui::Align2::RIGHT_TOP,
+                    icon::X,
+                    egui::FontId::proportional(20.0),
+                    Color32::WHITE,
+                );
+            });
+        // The wheel is for the picture, not what's under it.
+        ctx.input_mut(|i| i.smooth_scroll_delta = Vec2::ZERO);
+        if close {
+            self.lightbox = None;
+        }
     }
 
     /// How far down an anchor is, for scrolling to it.
@@ -361,6 +466,9 @@ struct Painting<'a> {
     clicks: &'a mut Vec<Click>,
     toggled: &'a mut HashSet<usize>,
     fold_generation: &'a mut u64,
+    hits: Option<(&'a [Hit], Option<usize>)>,
+    /// Takes the picture clicked on, where they can be opened.
+    opened: Option<&'a mut Option<String>>,
 }
 
 /// Draws the items on screen. While text is selected, all of it goes through
@@ -371,6 +479,7 @@ fn paint(
     origin: Pos2,
     visible: Rect,
     id: Id,
+    outer: Option<usize>,
     painting: &mut Painting<'_>,
 ) {
     let selecting = ui
@@ -385,6 +494,10 @@ fn paint(
         match item {
             Item::Text(text) if on_screen || selecting => {
                 paint_text(ui, text, origin, item_id, on_screen, painting);
+                if on_screen {
+                    let key = outer.map_or((index, None), |outer| (outer, Some(index)));
+                    paint_hits(ui, text, origin, key, painting);
+                }
             }
             Item::Sideways {
                 rect,
@@ -402,7 +515,7 @@ fn paint(
                             ui.set_min_size(vec2(*content_width, rect.height()));
                             let inner = ui.max_rect().min;
                             let visible = viewport.translate(inner.to_vec2());
-                            paint(ui, items, inner, visible, item_id, painting);
+                            paint(ui, items, inner, visible, item_id, Some(index), painting);
                         });
                 });
             }
@@ -477,6 +590,36 @@ fn paint(
     }
 }
 
+/// Marks what was found in this text.
+fn paint_hits(
+    ui: &Ui,
+    text: &TextItem,
+    origin: Pos2,
+    key: (usize, Option<usize>),
+    painting: &Painting<'_>,
+) {
+    let Some((hits, current)) = painting.hits else {
+        return;
+    };
+    let first = hits.partition_point(|hit| hit.item < key);
+    let pos = text.pos + origin.to_vec2();
+    let fill = ui.visuals().selection.bg_fill.gamma_multiply(0.6);
+    let stroke = Stroke::new(1.5, ui.visuals().strong_text_color());
+    for (index, hit) in hits.iter().enumerate().skip(first) {
+        if hit.item != key {
+            break;
+        }
+        for rect in row_rects(&text.galley, &hit.chars) {
+            let rect = rect.translate(pos.to_vec2());
+            ui.painter().rect_filled(rect, 2.0, fill);
+            if Some(index) == current {
+                ui.painter()
+                    .rect_stroke(rect.expand(1.0), 2.0, stroke, StrokeKind::Outside);
+            }
+        }
+    }
+}
+
 fn paint_text(
     ui: &mut Ui,
     text: &TextItem,
@@ -498,6 +641,7 @@ fn paint_text(
     let hovered_link = response
         .hover_pos()
         .and_then(|pointer| text.link_at(pointer - origin.to_vec2()));
+    let mut image_under = None;
     if on_screen {
         for image in &text.images {
             let Some(key) = resolve(&image.url, painting.dir, painting.allow_remote) else {
@@ -513,8 +657,11 @@ fn paint_text(
                 Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
                 Color32::WHITE,
             );
-            if !image.tip.is_empty() && ui.rect_contains_pointer(image_rect) {
-                response.clone().on_hover_text(&image.tip);
+            if ui.rect_contains_pointer(image_rect) {
+                image_under = Some(key);
+                if !image.tip.is_empty() {
+                    response.clone().on_hover_text(&image.tip);
+                }
             }
         }
     }
@@ -532,6 +679,13 @@ fn paint_text(
         );
     }
     let Some(link) = hovered_link else {
+        // A picture that's a link goes there instead.
+        if let (Some(key), Some(opened)) = (image_under, &mut painting.opened) {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ZoomIn);
+            if response.clicked() {
+                **opened = Some(key);
+            }
+        }
         return;
     };
     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
