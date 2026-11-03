@@ -64,6 +64,20 @@ pub struct Terminal {
     #[cfg(target_os = "linux")]
     #[serde(skip)]
     pending_cd: Option<(PathBuf, f64)>,
+    /// Following onto a server: the folder there the shell was last sent
+    /// to with ssh, or that the tab moved to while the shell was busy (so
+    /// leaving ssh doesn't go straight back in).
+    #[cfg(target_os = "linux")]
+    #[serde(skip)]
+    remote_sent: Option<PathBuf>,
+    /// The tab's folder, as last seen.
+    #[cfg(target_os = "linux")]
+    #[serde(skip)]
+    last_folder: Option<PathBuf>,
+    /// The shell has been at a prompt since it started.
+    #[cfg(target_os = "linux")]
+    #[serde(skip)]
+    prompted: bool,
     /// A key already sent with Alt; drop the text event that follows it.
     #[serde(skip)]
     skip_text: bool,
@@ -186,7 +200,11 @@ impl Terminal {
             // A following shell starts with the tab; others where they were
             // left, if that folder still exists.
             let saved = self.dir.take().filter(|d| !self.follow && d.is_dir());
-            let start = saved.as_deref().or(folder);
+            // A server's folder is reached with ssh once the shell's up.
+            let start = saved
+                .as_deref()
+                .or(folder)
+                .filter(|f| !crate::remote::is_remote(f));
             let shell = match &self.command {
                 Some(command) => Some(tty::Shell::new(
                     command.program.clone(),
@@ -649,7 +667,14 @@ impl Terminal {
     #[cfg(target_os = "linux")]
     fn follow(&mut self, now: f64, folder: &Path) -> Option<PathBuf> {
         let session = self.session.as_ref()?;
-        if !session.shell_idle() {
+        let idle = session.shell_idle();
+        self.prompted |= idle;
+        if crate::remote::is_remote(folder) {
+            return self.follow_onto_server(folder, idle);
+        }
+        self.remote_sent = None;
+        self.last_folder = Some(folder.to_path_buf());
+        if !idle {
             return None;
         }
         let cwd = session.shell_cwd()?;
@@ -678,6 +703,58 @@ impl Terminal {
         }
         None
     }
+}
+
+#[cfg(target_os = "linux")]
+impl Terminal {
+    /// Follows the tab onto a server: from a prompt, ssh there, into the
+    /// folder, with the user's shell. Once in, the session isn't followed
+    /// further: there's no telling whether the shell at the other end is at
+    /// a prompt, so moving about the server leaves it be. Coming back out
+    /// of ssh doesn't go back in, unless the tab moves again.
+    fn follow_onto_server(&mut self, folder: &Path, idle: bool) -> Option<PathBuf> {
+        let moved = self.last_folder.as_deref() != Some(folder);
+        self.last_folder = Some(folder.to_path_buf());
+        if moved && !idle && self.prompted {
+            self.remote_sent = Some(folder.to_path_buf());
+        }
+        if !idle || self.remote_sent.as_deref() == Some(folder) {
+            return None;
+        }
+        let command = ssh_command(folder)?;
+        let mut keys = b"\x05\x15 ".to_vec();
+        keys.extend_from_slice(command.as_bytes());
+        keys.push(b'\r');
+        self.session.as_ref()?.write(keys);
+        self.remote_sent = Some(folder.to_path_buf());
+        None
+    }
+}
+
+/// What to type to reach `folder` on its server with ssh, in a login shell
+/// there.
+#[cfg(target_os = "linux")]
+fn ssh_command(folder: &Path) -> Option<String> {
+    let location = disk::sftp::parse(folder)?;
+    let target = disk::sftp::Target::parse(&location.authority)?;
+    let quote = |text: &str| format!("'{}'", text.replace('\'', r"'\''"));
+    let mut command = "ssh -t".to_owned();
+    if let Some(port) = target.port {
+        command.push_str(&format!(" -p {port}"));
+    }
+    if let Some(user) = &target.user {
+        command.push_str(&format!(" -l {}", quote(user)));
+    }
+    // Run by the shell over there: into the folder, then the user's shell.
+    // `~` is the home folder there, where ssh starts anyway.
+    let cd = match location.path.strip_prefix("/~") {
+        Some("") => String::new(),
+        Some(rest) if rest.starts_with('/') => format!("cd -- \"$HOME\"{}; ", quote(rest)),
+        _ => format!("cd -- {}; ", quote(&location.path)),
+    };
+    let remote = format!("{cd}exec \"$SHELL\" -l");
+    command.push_str(&format!(" -- {} {}", quote(&target.host), quote(&remote)));
+    Some(command)
 }
 
 /// The shell to run: the user's login shell, except in tests, where its
@@ -1308,6 +1385,57 @@ fn paint(ui: &Ui, session: &Session, grid: &Grid, font: &FontId, palette: &Palet
 
 #[cfg(test)]
 mod tests {
+    /// What's typed to follow onto a server reaches ssh as its own words,
+    /// whatever's in the path, and the folder reaches the shell there whole.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn following_onto_a_server_types_an_ssh_command() {
+        let root = std::env::temp_dir().join(format!("egui-files-ssh-{}", std::process::id()));
+        let dir = root.join("it's a dir");
+        disk::create_dir_all(&dir).unwrap();
+        // The shell "over there": says where it started.
+        let shell = root.join("shell");
+        disk::write(&shell, "#!/bin/sh\npwd\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            disk::set_permissions(&shell, disk::Permissions::from_mode(0o755)).unwrap();
+        }
+        let folder = PathBuf::from(format!("sftp://me@host:2222{}", dir.display()));
+        let command = ssh_command(&folder).unwrap();
+        // A stand-in ssh says what it was given, then runs the command for
+        // over there.
+        let script =
+            format!("ssh() {{ printf '%s\\n' \"$@\"; shift 7; sh -c \"$1\"; }}; {command}");
+        let output = std::process::Command::new("/bin/sh")
+            .args(["-c", &script])
+            .env("SHELL", &shell)
+            .output()
+            .unwrap();
+        let output = String::from_utf8(output.stdout).unwrap();
+        let lines: Vec<&str> = output.lines().collect();
+        let real = disk::canonicalize(&dir).unwrap();
+        assert_eq!(lines[..7], ["-t", "-p", "2222", "-l", "me", "--", "host"]);
+        assert_eq!(lines.last().copied(), Some(real.to_str().unwrap()));
+        assert_eq!(ssh_command(Path::new("/local")), None);
+        // Home, before it's known where that is.
+        let home = |path| {
+            let command = ssh_command(Path::new(path)).unwrap();
+            // Like ssh, it starts over there in the home folder.
+            let script = format!("ssh() {{ shift 3; cd; sh -c \"$1\"; }}; {command}");
+            let output = std::process::Command::new("/bin/sh")
+                .args(["-c", &script])
+                .env("SHELL", &shell)
+                .env("HOME", &root)
+                .output()
+                .unwrap();
+            String::from_utf8(output.stdout).unwrap()
+        };
+        let root_real = disk::canonicalize(&root).unwrap();
+        assert_eq!(home("sftp://h/~").trim(), root_real.to_str().unwrap());
+        assert_eq!(home("sftp://h/~/it's a dir").trim(), real.to_str().unwrap());
+        disk::remove_dir_all(root).unwrap();
+    }
+
     use super::*;
 
     #[test]
