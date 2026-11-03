@@ -30,10 +30,11 @@ pub use std::fs::{
 mod memory;
 #[cfg(target_arch = "wasm32")]
 pub use memory::{
-    DirEntry, File, FileType, Metadata, OpenOptions, Permissions, ReadDir, canonicalize, copy,
-    create_dir, create_dir_all, exists, hard_link, metadata, read, read_dir, read_link,
-    read_to_string, remove_dir, remove_dir_all, remove_file, rename, set_file_mtime,
-    set_file_times, set_permissions, symlink, symlink_metadata, take_changes, write,
+    DirEntry, File, FileType, Metadata, OpenOptions, Permissions, ReadDir, RemoteLoader,
+    add_remote, canonicalize, copy, create_dir, create_dir_all, exists, hard_link, metadata, read,
+    read_dir, read_link, read_to_string, remove_dir, remove_dir_all, remove_file, rename,
+    set_file_mtime, set_file_times, set_permissions, set_remote_loader, symlink, symlink_metadata,
+    take_changes, write,
 };
 
 /// The time now, as file times are given. std's clock panics in the browser.

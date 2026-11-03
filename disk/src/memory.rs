@@ -8,6 +8,10 @@
 //!
 //! Every change is noted by path, for [`take_changes`]: the browser can't
 //! watch folders, so the app asks instead.
+//!
+//! A file can also start out somewhere else ([`add_remote`]): it's listed with
+//! its size, and its contents are fetched the first time something opens it,
+//! through the function given to [`set_remote_loader`].
 
 // Natively it's built only for its tests.
 #![cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
@@ -17,7 +21,7 @@ use std::{
     ffi::{OsStr, OsString},
     io::{self, ErrorKind, Read, Seek, SeekFrom, Write},
     path::{Component, Path, PathBuf},
-    sync::{Mutex, MutexGuard, PoisonError},
+    sync::{Mutex, MutexGuard, OnceLock, PoisonError},
     time::SystemTime,
 };
 
@@ -27,8 +31,18 @@ const MAX_SYMLINKS: usize = 40;
 type Id = usize;
 const ROOT: Id = 0;
 
+/// Fetches a remote file's contents; see [`set_remote_loader`].
+pub type RemoteLoader = fn(&str) -> io::Result<Vec<u8>>;
+
+static REMOTE_LOADER: OnceLock<RemoteLoader> = OnceLock::new();
+
 enum Data {
     File(Vec<u8>),
+    /// A file whose contents are still at this URL.
+    Remote {
+        url: String,
+        len: u64,
+    },
     Dir(BTreeMap<OsString, Id>),
     Symlink(PathBuf),
 }
@@ -61,7 +75,7 @@ impl Node {
 
     fn file_type(&self) -> FileType {
         FileType(match self.data {
-            Data::File(_) => Kind::File,
+            Data::File(_) | Data::Remote { .. } => Kind::File,
             Data::Dir(_) => Kind::Dir,
             Data::Symlink(_) => Kind::Symlink,
         })
@@ -72,6 +86,7 @@ impl Node {
             file_type: self.file_type(),
             len: match &self.data {
                 Data::File(bytes) => bytes.len() as u64,
+                Data::Remote { len, .. } => *len,
                 Data::Dir(_) => 0,
                 Data::Symlink(target) => target.as_os_str().len() as u64,
             },
@@ -257,6 +272,19 @@ impl Tree {
         }
     }
 
+    /// Fetches the contents of a file still at its URL. Failures leave it
+    /// there, to try again on the next open.
+    fn fetch_remote(&mut self, id: Id) -> io::Result<()> {
+        if let Data::Remote { url, .. } = &self.node(id).data {
+            let loader = REMOTE_LOADER
+                .get()
+                .ok_or_else(|| io::Error::other("nothing to fetch remote files with"))?;
+            let bytes = loader(url)?;
+            self.node_mut(id).data = Data::File(bytes);
+        }
+        Ok(())
+    }
+
     fn open(&mut self, path: &Path, options: &OpenOptions) -> io::Result<File> {
         let writes = options.write || options.append;
         if !options.read && !writes
@@ -267,8 +295,19 @@ impl Tree {
         let (id, path) = match self.find(path, true) {
             Ok(_) if options.create_new => return Err(error(ErrorKind::AlreadyExists)),
             Ok(found) => {
+                if writes && options.truncate {
+                    // Going over it: no need for what's there.
+                    if matches!(self.node(found.id).data, Data::Remote { .. })
+                        && !self.node(found.id).readonly
+                    {
+                        self.node_mut(found.id).data = Data::File(Vec::new());
+                    }
+                } else {
+                    self.fetch_remote(found.id)?;
+                }
                 let node = self.node_mut(found.id);
                 match &mut node.data {
+                    Data::Remote { .. } => return Err(error(ErrorKind::PermissionDenied)),
                     Data::Dir(_) if writes => return Err(error(ErrorKind::IsADirectory)),
                     Data::File(_) if writes && node.readonly => {
                         return Err(error(ErrorKind::PermissionDenied));
@@ -751,9 +790,35 @@ pub fn read_dir(path: impl AsRef<Path>) -> io::Result<ReadDir> {
     Ok(ReadDir(entries.into_iter()))
 }
 
+/// Sets how remote files are fetched. Only the first call counts.
+pub fn set_remote_loader(loader: RemoteLoader) {
+    let _ = REMOTE_LOADER.set(loader);
+}
+
+/// Adds a file whose contents are at `url`, to fetch when it's first opened.
+pub fn add_remote(
+    path: impl AsRef<Path>,
+    url: impl Into<String>,
+    len: u64,
+    modified: SystemTime,
+) -> io::Result<()> {
+    let mut tree = tree();
+    let (parent, name) = tree.parent(path.as_ref())?;
+    let path = parent.path.join(&name);
+    let data = Data::Remote {
+        url: url.into(),
+        len,
+    };
+    let id = tree.add(parent.id, name, data)?;
+    tree.node_mut(id).modified = modified;
+    tree.changed(&path);
+    Ok(())
+}
+
 pub fn read(path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
-    let tree = tree();
+    let mut tree = tree();
     let found = tree.find(path.as_ref(), true)?;
+    tree.fetch_remote(found.id)?;
     match &tree.node(found.id).data {
         Data::File(bytes) => Ok(bytes.clone()),
         _ => Err(error(ErrorKind::IsADirectory)),
@@ -814,6 +879,7 @@ pub fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<()> {
 pub fn copy(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<u64> {
     let mut tree = tree();
     let found = tree.find(from.as_ref(), true)?;
+    tree.fetch_remote(found.id)?;
     let source = tree.node(found.id);
     let Data::File(bytes) = &source.data else {
         return Err(io::Error::new(
@@ -1078,5 +1144,73 @@ mod tests {
 
     fn path_exists(path: impl AsRef<Path>) -> bool {
         metadata(path).is_ok()
+    }
+
+    fn fake_loader(url: &str) -> io::Result<Vec<u8>> {
+        match url {
+            "good" | "good-2" | "good-3" | "good-4" => Ok(b"fetched".to_vec()),
+            _ => Err(io::Error::new(ErrorKind::NotFound, "404")),
+        }
+    }
+
+    #[test]
+    fn remote_files_are_listed_without_fetching_and_read_when_opened() {
+        set_remote_loader(fake_loader);
+        let dir = PathBuf::from("/remote-read");
+        create_dir_all(&dir).unwrap();
+        let file = dir.join("photo.jpg");
+        let when = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000);
+        add_remote(&file, "good", 12_345, when).unwrap();
+
+        // The size it's said to have, until the contents are here.
+        let meta = metadata(&file).unwrap();
+        assert!(meta.is_file());
+        assert_eq!(meta.len(), 12_345);
+        assert_eq!(meta.modified().unwrap(), when);
+
+        assert_eq!(read(&file).unwrap(), b"fetched");
+        assert_eq!(metadata(&file).unwrap().len(), 7);
+        assert_eq!(metadata(&file).unwrap().modified().unwrap(), when);
+    }
+
+    #[test]
+    fn a_failed_fetch_is_an_error_and_can_be_tried_again() {
+        set_remote_loader(fake_loader);
+        let dir = PathBuf::from("/remote-missing");
+        create_dir_all(&dir).unwrap();
+        let file = dir.join("gone");
+        add_remote(&file, "missing", 5, now()).unwrap();
+        assert_eq!(read(&file).unwrap_err().kind(), ErrorKind::NotFound);
+        assert_eq!(File::open(&file).err().unwrap().kind(), ErrorKind::NotFound);
+        // Still listed as it was.
+        assert_eq!(metadata(&file).unwrap().len(), 5);
+    }
+
+    #[test]
+    fn remote_files_can_be_copied_moved_and_replaced() {
+        set_remote_loader(fake_loader);
+        let dir = PathBuf::from("/remote-ops");
+        create_dir_all(&dir).unwrap();
+        let (a, b, c) = (dir.join("a"), dir.join("b"), dir.join("c"));
+        add_remote(&a, "good-2", 7, now()).unwrap();
+        copy(&a, &b).unwrap();
+        assert_eq!(read(&b).unwrap(), b"fetched");
+        add_remote(&c, "good-3", 7, now()).unwrap();
+        // Moved before it's fetched: the URL goes along.
+        let moved = dir.join("moved");
+        rename(&c, &moved).unwrap();
+        assert_eq!(read(&moved).unwrap(), b"fetched");
+        // Written over without fetching: the URL here doesn't even exist.
+        let over = dir.join("over");
+        add_remote(&over, "missing", 7, now()).unwrap();
+        write(&over, b"mine").unwrap();
+        assert_eq!(read(&over).unwrap(), b"mine");
+        // Appending needs what's there.
+        let log = dir.join("log");
+        add_remote(&log, "good-4", 7, now()).unwrap();
+        let mut file = OpenOptions::new().append(true).open(&log).unwrap();
+        file.write_all(b"!").unwrap();
+        drop(file);
+        assert_eq!(read(&log).unwrap(), b"fetched!");
     }
 }

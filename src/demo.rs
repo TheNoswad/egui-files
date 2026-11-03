@@ -110,6 +110,7 @@ pub fn create() {
     if let Err(err) = create_files() {
         log::error!("demo files: {err}");
     }
+    add_fetched_files();
     crate::background::spawn("demo pictures", || {
         if let Err(err) = create_pictures().and_then(|()| create_archives()) {
             log::error!("demo pictures: {err}");
@@ -140,6 +141,74 @@ fn create_files() -> io::Result<()> {
     file(&project.join(".gitignore"), "/target\n", 30.0)?;
     disk::symlink("egui-files", home.join("Projects/current"))?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Files on the server
+
+/// Beside the page: what web/demo-files.sh made of `web/demo-files/`.
+const FETCHED: &str = "files";
+
+/// Adds the files on the server to the home folder. They're listed from a
+/// manifest (`size<TAB>modified<TAB>path` to a line), and fetched when first
+/// opened. Without one (a plain trunk build) there just aren't any.
+fn add_fetched_files() {
+    disk::set_remote_loader(fetch);
+    let manifest = match fetch(&format!("{FETCHED}/manifest.txt")) {
+        Ok(manifest) => String::from_utf8_lossy(&manifest).into_owned(),
+        Err(err) => {
+            log::info!("no files to fetch: {err}");
+            return;
+        }
+    };
+    for (line, entry) in manifest.lines().map(|line| (line, parse_line(line))) {
+        let Some((len, modified, path)) = entry else {
+            log::error!("bad line in the demo's manifest: {line}");
+            continue;
+        };
+        let target = Path::new(HOME).join(path);
+        let url: Vec<String> = path
+            .split('/')
+            .map(|part| String::from(js_sys::encode_uri_component(part)))
+            .collect();
+        let url = format!("{FETCHED}/{}", url.join("/"));
+        let added = target
+            .parent()
+            .map_or(Ok(()), disk::create_dir_all)
+            .and_then(|()| disk::add_remote(&target, url, len, modified));
+        if let Err(err) = added {
+            log::error!("demo file {path}: {err}");
+        }
+    }
+}
+
+fn parse_line(line: &str) -> Option<(u64, SystemTime, &str)> {
+    let mut parts = line.splitn(3, '\t');
+    let len = parts.next()?.parse().ok()?;
+    let modified = Duration::from_secs(parts.next()?.parse().ok()?);
+    Some((len, SystemTime::UNIX_EPOCH + modified, parts.next()?))
+}
+
+/// Gets a file from the server, and waits for it: the files' callers can't
+/// wait any other way, so the page stops until it's here. Sync requests can't
+/// ask for bytes, so it comes as text that maps each byte to one character.
+fn fetch(url: &str) -> io::Result<Vec<u8>> {
+    let failed = |err: wasm_bindgen::JsValue| io::Error::other(format!("{err:?}"));
+    let request = web_sys::XmlHttpRequest::new().map_err(failed)?;
+    request.open_with_async("GET", url, false).map_err(failed)?;
+    request
+        .override_mime_type("text/plain; charset=x-user-defined")
+        .map_err(failed)?;
+    request.send().map_err(failed)?;
+    let status = request.status().map_err(failed)?;
+    if status != 200 {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("{url}: HTTP {status}"),
+        ));
+    }
+    let text = request.response_text().map_err(failed)?.unwrap_or_default();
+    Ok(text.encode_utf16().map(|unit| unit as u8).collect())
 }
 
 /// Writes `text` to `path`, last changed `days` ago.
