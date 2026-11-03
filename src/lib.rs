@@ -127,6 +127,7 @@ pub fn run_web() {
                 eframe::WebOptions::default(),
                 Box::new(|cc| {
                     web_files::install(&cc.egui_ctx);
+                    demo::set_context(&cc.egui_ctx);
                     Ok(Box::new(app::FilesApp::new(cc)))
                 }),
             )

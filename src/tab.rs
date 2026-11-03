@@ -342,6 +342,8 @@ impl BrowserTab {
             gone = Some(self.path.clone());
             self.navigate(existing.to_path_buf());
         }
+        #[cfg(target_arch = "wasm32")]
+        crate::demo::fetch_folder(&self.path);
         match fs::read_dir(&self.path) {
             Ok(mut entries) => {
                 // New entries have no folder sizes; they're put in again.

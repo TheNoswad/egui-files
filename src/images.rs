@@ -164,14 +164,19 @@ impl ImageCache {
     }
 
     /// Without worker threads, decodes the newest request, one a frame so
-    /// the UI keeps responding.
+    /// the UI keeps responding. In the browser, of those whose files are here:
+    /// reading one that isn't would stop the page until it is.
     fn decode_inline(&self) -> Option<Done> {
-        let key = self
-            .queue
-            .jobs
-            .lock()
-            .expect("image queue poisoned")
-            .pop()?;
+        let key = {
+            let mut jobs = self.queue.jobs.lock().expect("image queue poisoned");
+            #[cfg(target_arch = "wasm32")]
+            let index = jobs
+                .iter()
+                .rposition(|key| crate::demo::is_here(&key.path))?;
+            #[cfg(not(target_arch = "wasm32"))]
+            let index = jobs.len().checked_sub(1)?;
+            jobs.remove(index)
+        };
         let result = decode(&key.path, key.modified, key.max_side);
         self.ctx.request_repaint();
         Some(Done { key, result })

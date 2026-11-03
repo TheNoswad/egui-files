@@ -1,15 +1,148 @@
 //! The web demo's files: a home folder, from `web/demo-files/` on the server.
 //!
 //! `web/demo-files.sh` puts them beside the page with a manifest, which is
-//! read at startup, so they're listed right away. Each is fetched the first
-//! time something opens it. Nothing is kept: a reload starts over.
+//! read at startup, so they're listed right away. A folder's files are fetched
+//! in the background when it's shown ([`fetch_folder`]), and pictures wait for
+//! theirs ([`is_here`]), so the page keeps going. Anything opened before its
+//! file is here is fetched then, which stops the page until it's done. Nothing
+//! is kept: a reload starts over.
 
-use std::{io, path::Path, time::Duration};
+use std::{
+    cell::RefCell,
+    collections::{HashSet, VecDeque},
+    io,
+    path::{Path, PathBuf},
+    time::Duration,
+};
+
+use js_sys::Uint8Array;
+use wasm_bindgen::{JsCast, JsValue};
+use wasm_bindgen_futures::JsFuture;
+use web_sys::Response;
 
 pub const HOME: &str = "/home/demo";
 
 /// Beside the page: where web/demo-files.sh puts them.
 const FILES: &str = "files";
+
+/// Background fetches at once. Browsers allow six connections to a server over
+/// HTTP/1.1, so this leaves room for opening a file, which can't wait for one.
+const MAX_FETCHES: usize = 4;
+
+#[derive(Default)]
+struct Fetches {
+    /// Next first.
+    waiting: VecDeque<PathBuf>,
+    /// By URL, which stays with a file that moves.
+    running: HashSet<String>,
+    /// Not tried again in the background: opening the file still does.
+    failed: HashSet<String>,
+    ctx: Option<egui::Context>,
+}
+
+thread_local! {
+    static FETCHES: RefCell<Fetches> = RefCell::default();
+}
+
+/// Sets what's repainted as files come in, for pictures waiting for them.
+pub fn set_context(ctx: &egui::Context) {
+    FETCHES.with_borrow_mut(|fetches| fetches.ctx = Some(ctx.clone()));
+}
+
+/// Fetches the files in `dir` in the background, ahead of any already waiting,
+/// and the smallest first, so that as many as can be are here soonest.
+pub fn fetch_folder(dir: &Path) {
+    let Ok(entries) = disk::read_dir(dir) else {
+        return;
+    };
+    let mut files: Vec<(u64, PathBuf)> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| disk::remote_url(path).is_some())
+        .map(|path| (disk::metadata(&path).map_or(0, |m| m.len()), path))
+        .collect();
+    files.sort();
+    FETCHES.with_borrow_mut(|fetches| {
+        fetches
+            .waiting
+            .retain(|path| !files.iter().any(|(_, file)| file == path));
+        for (_, path) in files.into_iter().rev() {
+            fetches.waiting.push_front(path);
+        }
+    });
+    start_fetches();
+}
+
+/// Whether reading the file at `path` won't stop the page to fetch it. If it
+/// would, it's fetched in the background, next, and repaints when it's here.
+///
+/// A file that failed there counts as here: reading it tries once more, and
+/// has the error to show.
+pub fn is_here(path: &Path) -> bool {
+    let Some(url) = disk::remote_url(path) else {
+        return true;
+    };
+    let waits = FETCHES.with_borrow_mut(|fetches| {
+        if fetches.failed.contains(&url) {
+            return false;
+        }
+        if !fetches.running.contains(&url) && !fetches.waiting.iter().any(|p| p == path) {
+            fetches.waiting.push_front(path.to_owned());
+        }
+        true
+    });
+    start_fetches();
+    !waits
+}
+
+/// Starts the next fetches, up to the limit.
+fn start_fetches() {
+    FETCHES.with_borrow_mut(|fetches| {
+        while fetches.running.len() < MAX_FETCHES {
+            let Some(path) = fetches.waiting.pop_front() else {
+                return;
+            };
+            // It may have been opened, written over or moved since.
+            let Some(url) = disk::remote_url(&path) else {
+                continue;
+            };
+            if !fetches.failed.contains(&url) && fetches.running.insert(url.clone()) {
+                wasm_bindgen_futures::spawn_local(fetch_in_background(url));
+            }
+        }
+    });
+}
+
+async fn fetch_in_background(url: String) {
+    let result = fetch_async(&url).await;
+    let ctx = FETCHES.with_borrow_mut(|fetches| {
+        fetches.running.remove(&url);
+        if let Err(err) = &result {
+            log::warn!("couldn't fetch {url}: {err:?}");
+            fetches.failed.insert(url.clone());
+        }
+        fetches.ctx.clone()
+    });
+    if let Ok(bytes) = result {
+        disk::fill_remote(&url, bytes);
+    }
+    start_fetches();
+    if let Some(ctx) = ctx {
+        ctx.request_repaint();
+    }
+}
+
+async fn fetch_async(url: &str) -> Result<Vec<u8>, JsValue> {
+    let window = web_sys::window().ok_or("no window")?;
+    let response: Response = JsFuture::from(window.fetch_with_str(url))
+        .await?
+        .dyn_into()?;
+    if !response.ok() {
+        return Err(format!("HTTP {}", response.status()).into());
+    }
+    let buffer = JsFuture::from(response.array_buffer()?).await?;
+    Ok(Uint8Array::new(&buffer).to_vec())
+}
 
 /// Makes the demo's home folder.
 pub fn create() {

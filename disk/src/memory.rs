@@ -11,7 +11,8 @@
 //!
 //! A file can also start out somewhere else ([`add_remote`]): it's listed with
 //! its size, and its contents are fetched the first time something opens it,
-//! through the function given to [`set_remote_loader`].
+//! through the function given to [`set_remote_loader`], unless they were given
+//! to [`fill_remote`] by then.
 
 // Natively it's built only for its tests.
 #![cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
@@ -815,6 +816,30 @@ pub fn add_remote(
     Ok(())
 }
 
+/// The URL of the file at `path`, if its contents are still there.
+pub fn remote_url(path: impl AsRef<Path>) -> Option<String> {
+    let tree = tree();
+    let found = tree.find(path.as_ref(), true).ok()?;
+    match &tree.node(found.id).data {
+        Data::Remote { url, .. } => Some(url.clone()),
+        _ => None,
+    }
+}
+
+/// Gives the file still at `url` its contents, fetched ahead of its being
+/// opened. By URL, as it may have moved since; if it has since been fetched,
+/// written over or deleted, there's nothing to do.
+pub fn fill_remote(url: &str, bytes: Vec<u8>) {
+    let mut tree = tree();
+    let waiting = tree
+        .nodes
+        .iter_mut()
+        .find(|node| matches!(&node.data, Data::Remote { url: at, .. } if at == url));
+    if let Some(node) = waiting {
+        node.data = Data::File(bytes);
+    }
+}
+
 pub fn read(path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
     let mut tree = tree();
     let found = tree.find(path.as_ref(), true)?;
@@ -1184,6 +1209,52 @@ mod tests {
         assert_eq!(File::open(&file).err().unwrap().kind(), ErrorKind::NotFound);
         // Still listed as it was.
         assert_eq!(metadata(&file).unwrap().len(), 5);
+    }
+
+    #[test]
+    fn remote_files_can_be_filled_ahead_of_being_opened() {
+        set_remote_loader(fake_loader);
+        let dir = PathBuf::from("/remote-fill");
+        create_dir_all(&dir).unwrap();
+        let file = dir.join("photo.jpg");
+        let when = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000);
+        // The loader would fail on this URL, so reading it shows it wasn't used.
+        add_remote(&file, "fill-1", 5, when).unwrap();
+        assert_eq!(remote_url(&file).as_deref(), Some("fill-1"));
+        fill_remote("fill-1", b"ahead".to_vec());
+        assert_eq!(remote_url(&file), None);
+        assert_eq!(read(&file).unwrap(), b"ahead");
+        assert_eq!(metadata(&file).unwrap().modified().unwrap(), when);
+        // Too late: what's there stays.
+        fill_remote("fill-1", b"late".to_vec());
+        assert_eq!(read(&file).unwrap(), b"ahead");
+
+        // It finds the file where it went, and a link leads to it.
+        let moved = dir.join("moved");
+        add_remote(dir.join("before"), "fill-2", 5, when).unwrap();
+        rename(dir.join("before"), &moved).unwrap();
+        let link = dir.join("link");
+        symlink("moved", &link).unwrap();
+        assert_eq!(remote_url(&link).as_deref(), Some("fill-2"));
+        fill_remote("fill-2", b"ahead".to_vec());
+        assert_eq!(read(&moved).unwrap(), b"ahead");
+
+        // Written over or deleted before it came: nothing to fill.
+        let over = dir.join("over");
+        add_remote(&over, "fill-3", 5, when).unwrap();
+        write(&over, b"mine").unwrap();
+        fill_remote("fill-3", b"ahead".to_vec());
+        assert_eq!(read(&over).unwrap(), b"mine");
+        let gone = dir.join("gone");
+        add_remote(&gone, "fill-4", 5, when).unwrap();
+        remove_file(&gone).unwrap();
+        fill_remote("fill-4", b"ahead".to_vec());
+        assert_eq!(remote_url(&gone), None);
+        assert!(!path_exists(&gone));
+
+        // Not remote, or not there.
+        assert_eq!(remote_url(&dir), None);
+        assert_eq!(remote_url(dir.join("missing")), None);
     }
 
     #[test]
