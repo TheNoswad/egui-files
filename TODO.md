@@ -64,7 +64,8 @@ Trims and converts with the user's own ffmpeg, so the app ships no codecs (`src/
 - [x] Resize and frame rate; audio: remove, choose a track, bitrate, audio only
 - [x] Hardware encoders, as a toggle when one is found (run here: VAAPI; NVENC and QuickSync only have their arguments tested)
 - [ ] Target size for audio on its own (only the bitrate can be chosen there)
-- [ ] Crop, rotate and flip, speed; GIF and animated WebP
+- [x] Crop (free or to a shape), turn and mirror, speed; GIF and animated WebP, also to a target size
+- [x] Turning, mirroring and speed show in the editor's video, with the crop's rectangle turning along
 - [ ] Settings field for ffmpeg's path, and offering to download an LGPL build (no x264 or x265 in those; none for macOS from BtbN)
 - [ ] Windows and macOS: needs the video backend above; the editor stays off there until then
 - [ ] Android: Media3 Transformer to export, ExoPlayer to show (getting its frames into egui needs a prototype)

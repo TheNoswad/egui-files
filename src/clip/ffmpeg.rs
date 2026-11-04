@@ -16,6 +16,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::crop::{Crop, View};
 use crate::{
     fs::unique_path,
     jobs::{Outcome, Progress},
@@ -30,8 +31,15 @@ pub const NOT_INSTALLED: &str = "ffmpeg isn't installed. Install it from your pa
 /// Below this a video is only smears: not worth an encode that would take as
 /// long as a good one.
 const MIN_VIDEO_BITRATE: f64 = 30_000.0;
+/// The shorter side and frame rate of an animation unless asked otherwise.
+pub const ANIMATION_SIDE: u32 = 480;
+pub const ANIMATION_FPS: u32 = 15;
+/// The smallest an animation is shrunk to in search of a target size.
+const SMALLEST_ANIMATION_SIDE: f64 = 32.0;
 /// How many encodes at a target size to try before saying it can't be done.
 const MAX_ATTEMPTS: usize = 4;
+/// Animations aim less exactly, having only their picture's size to change.
+const MAX_ANIMATION_ATTEMPTS: usize = 6;
 /// What's aimed at, of a target size: the rest is for the container, and for
 /// encoders landing a little over.
 const TARGET_MARGIN: f64 = 0.97;
@@ -99,13 +107,21 @@ impl Source {
         !self.subtitles.is_empty() || self.chapters > 0
     }
 
-    /// The shorter of its sides, which "1080p" means either way up.
-    pub fn short_side(&self) -> u32 {
-        self.width.min(self.height)
-    }
-
     pub fn fps(&self) -> f64 {
         self.fps
+    }
+
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// Its picture's width over its height.
+    pub fn aspect(&self) -> f32 {
+        self.width as f32 / self.height.max(1) as f32
     }
 }
 
@@ -190,10 +206,12 @@ pub enum Format {
     Opus,
     Flac,
     Wav,
+    Gif,
+    WebpAnimated,
 }
 
 impl Format {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 14] = [
         Self::Original,
         Self::Mp4H264,
         Self::Mp4Hevc,
@@ -206,6 +224,8 @@ impl Format {
         Self::Opus,
         Self::Flac,
         Self::Wav,
+        Self::Gif,
+        Self::WebpAnimated,
     ];
 
     pub fn label(self) -> &'static str {
@@ -222,6 +242,8 @@ impl Format {
             Self::Opus => "Opus",
             Self::Flac => "FLAC (lossless)",
             Self::Wav => "WAV (lossless)",
+            Self::Gif => "GIF",
+            Self::WebpAnimated => "WebP",
         }
     }
 
@@ -234,7 +256,13 @@ impl Format {
             Self::WebmVp9 => Some(("webm", Codec::Vp9)),
             Self::WebmAv1 => Some(("webm", Codec::Av1)),
             Self::MkvH264 => Some(("mkv", Codec::H264)),
-            Self::Mp3 | Self::M4a | Self::Opus | Self::Flac | Self::Wav => None,
+            Self::Mp3
+            | Self::M4a
+            | Self::Opus
+            | Self::Flac
+            | Self::Wav
+            | Self::Gif
+            | Self::WebpAnimated => None,
         }
     }
 
@@ -251,6 +279,19 @@ impl Format {
         }
     }
 
+    /// For a looping picture without sound: the extension and the encoder.
+    fn animated(self) -> Option<(&'static str, &'static str)> {
+        match self {
+            Self::Gif => Some(("gif", "gif")),
+            Self::WebpAnimated => Some(("webp", "libwebp_anim")),
+            _ => None,
+        }
+    }
+
+    pub fn is_animated(self) -> bool {
+        self.animated().is_some()
+    }
+
     pub fn is_audio_only(self) -> bool {
         self.audio_only().is_some()
     }
@@ -263,6 +304,9 @@ impl Format {
     /// Whether this ffmpeg can make it.
     pub fn available(self, tools: &Tools) -> bool {
         if let Some((_, encoder, _)) = self.audio_only() {
+            return tools.encoders.contains(encoder);
+        }
+        if let Some((_, encoder)) = self.animated() {
             return tools.encoders.contains(encoder);
         }
         self.target()
@@ -324,6 +368,45 @@ impl Default for Keep {
     }
 }
 
+/// How far the picture is turned clockwise.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Turn {
+    #[default]
+    None,
+    Quarter,
+    Half,
+    ThreeQuarters,
+}
+
+impl Turn {
+    pub fn clockwise(self) -> Self {
+        match self {
+            Self::None => Self::Quarter,
+            Self::Quarter => Self::Half,
+            Self::Half => Self::ThreeQuarters,
+            Self::ThreeQuarters => Self::None,
+        }
+    }
+
+    pub fn counter_clockwise(self) -> Self {
+        self.clockwise().clockwise().clockwise()
+    }
+
+    /// Its width and height trade places.
+    pub fn swaps_sides(self) -> bool {
+        matches!(self, Self::Quarter | Self::ThreeQuarters)
+    }
+
+    pub fn degrees(self) -> u32 {
+        match self {
+            Self::None => 0,
+            Self::Quarter => 90,
+            Self::Half => 180,
+            Self::ThreeQuarters => 270,
+        }
+    }
+}
+
 /// Which audio to keep.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AudioChoice {
@@ -357,6 +440,15 @@ pub struct Settings {
     pub audio_kbps: Option<u32>,
     /// Encode on the GPU, where there's an encoder for it.
     pub hardware: bool,
+    /// The part of the picture to keep.
+    pub crop: Option<Crop>,
+    /// The shape to keep the crop to, as width and height.
+    pub crop_shape: Option<(u32, u32)>,
+    pub turn: Turn,
+    pub flip_horizontal: bool,
+    pub flip_vertical: bool,
+    /// How many times as fast it plays.
+    pub speed: f64,
 }
 
 impl Default for Settings {
@@ -373,6 +465,12 @@ impl Default for Settings {
             audio: AudioChoice::default(),
             audio_kbps: None,
             hardware: false,
+            crop: None,
+            crop_shape: None,
+            turn: Turn::None,
+            flip_horizontal: false,
+            flip_vertical: false,
+            speed: 1.0,
         }
     }
 }
@@ -400,6 +498,13 @@ impl Settings {
         self.keep = fresh.keep;
         self.audio = fresh.audio;
         self.exact = fresh.exact;
+        // These are about this video's picture.
+        self.crop = fresh.crop;
+        self.crop_shape = fresh.crop_shape;
+        self.turn = fresh.turn;
+        self.flip_horizontal = fresh.flip_horizontal;
+        self.flip_vertical = fresh.flip_vertical;
+        self.speed = fresh.speed;
         self
     }
 
@@ -411,6 +516,68 @@ impl Settings {
             && !self.use_target
             && self.scale_to(source).is_none()
             && self.fps_to(source).is_none()
+            && self.crop.is_none()
+            && self.turn == Turn::None
+            && !self.flip_horizontal
+            && !self.flip_vertical
+            && !self.changes_speed()
+    }
+
+    /// How the picture is shown, with what's been asked of it.
+    pub fn view(&self) -> View {
+        if self.format.is_audio_only() {
+            return View {
+                turn: Turn::None,
+                flip_horizontal: false,
+                flip_vertical: false,
+            };
+        }
+        View {
+            turn: self.turn,
+            flip_horizontal: self.flip_horizontal,
+            flip_vertical: self.flip_vertical,
+        }
+    }
+
+    /// The crop's shape, width over height, as fractions of the original
+    /// picture's. The crop comes before the turn, but its shape is what's
+    /// wanted of the result, so a turn swaps it.
+    pub fn crop_ratio(&self, source: &Source) -> Option<f32> {
+        let (width, height) = self.crop_shape?;
+        let (width, height) = if self.turn.swaps_sides() {
+            (height, width)
+        } else {
+            (width, height)
+        };
+        Some(width as f32 / height as f32 / source.aspect())
+    }
+
+    pub fn changes_speed(&self) -> bool {
+        (self.speed - 1.0).abs() > 0.001
+    }
+
+    /// The width and height of the picture after cropping and turning, before
+    /// any shrinking.
+    pub fn visible_size(&self, source: &Source) -> (u32, u32) {
+        let (width, height) = match self.crop {
+            Some(crop) => {
+                let (width, height, _, _) = crop.pixels(source.width, source.height);
+                (width, height)
+            }
+            None => (source.width, source.height),
+        };
+        if self.turn.swaps_sides() {
+            (height, width)
+        } else {
+            (width, height)
+        }
+    }
+
+    /// The shorter side of [`Self::visible_size`], which "1080p" means either
+    /// way up.
+    pub fn visible_short_side(&self, source: &Source) -> u32 {
+        let (width, height) = self.visible_size(source);
+        width.min(height)
     }
 
     /// Whether a hardware encoder could do this.
@@ -437,26 +604,39 @@ impl Settings {
         (self.use_target && !self.format.is_audio_only()).then_some(self.target_mb * 1e6)
     }
 
-    /// The shorter side to shrink to: never larger than it is.
+    /// The shorter side to shrink to: never larger than it is. An animation
+    /// at full size would be enormous, so it's small unless asked otherwise.
     fn scale_to(&self, source: &Source) -> Option<u32> {
-        self.resolution
-            .filter(|side| !self.format.is_audio_only() && *side < source.short_side())
+        let wanted = if self.format.is_audio_only() {
+            None
+        } else if self.format.is_animated() {
+            Some(self.resolution.unwrap_or(ANIMATION_SIDE))
+        } else {
+            self.resolution
+        };
+        wanted.filter(|side| *side < self.visible_short_side(source))
     }
 
     /// The frame rate to lower to: never higher than it is.
     fn fps_to(&self, source: &Source) -> Option<u32> {
-        self.fps
-            .filter(|fps| !self.format.is_audio_only() && f64::from(*fps) < source.fps - 0.5)
+        let wanted = if self.format.is_audio_only() {
+            None
+        } else if self.format.is_animated() {
+            Some(self.fps.unwrap_or(ANIMATION_FPS))
+        } else {
+            self.fps
+        };
+        wanted.filter(|fps| f64::from(*fps) < source.fps - 0.5)
     }
 
     /// The pixels of each frame it comes out with, and its frames each second.
     fn output_rate(&self, source: &Source) -> (f64, f64) {
-        let (width, height) = (f64::from(source.width), f64::from(source.height));
-        let scale = self
-            .scale_to(source)
-            .map_or(1.0, |side| f64::from(side) / f64::from(source.short_side()));
+        let (width, height) = self.visible_size(source);
+        let scale = self.scale_to(source).map_or(1.0, |side| {
+            f64::from(side) / f64::from(self.visible_short_side(source))
+        });
         let fps = self.fps_to(source).map_or(source.fps, f64::from);
-        (width * height * scale * scale, fps)
+        (f64::from(width) * f64::from(height) * scale * scale, fps)
     }
 
     /// The audio streams that go in.
@@ -474,7 +654,8 @@ impl Settings {
     /// How `length` seconds fit the target size; an error says if they can't.
     pub fn fit(&self, source: &Source, length: f64) -> Result<Fit, String> {
         let bytes = self.target_bytes().unwrap_or(0.0);
-        let length = length.max(0.001);
+        // What matters is how long it plays for.
+        let length = (length / self.speed).max(0.001);
         let budget = bytes * 8.0 * TARGET_MARGIN / length;
         let tracks = self.audio_streams(source).len() as f64;
         // The audio gets a little of what there is, within what still sounds
@@ -503,7 +684,8 @@ impl Settings {
     /// A shorter side to shrink to, if at this target size it would look fine.
     pub fn suggested_resolution(&self, source: &Source, fit: &Fit) -> Option<u32> {
         let (pixels, fps) = self.output_rate(source);
-        let side = f64::from(self.scale_to(source).unwrap_or(source.short_side()));
+        let visible = self.visible_short_side(source);
+        let side = f64::from(self.scale_to(source).unwrap_or(visible));
         // Pixels go by the square of the side.
         let fine = side * (fit.video_bps / (pixels * fps).max(1.0) / FINE_BPP).sqrt();
         super::tab::RESOLUTIONS
@@ -526,6 +708,9 @@ impl Settings {
     ) -> Result<(String, Option<Codec>), String> {
         let original = original.to_ascii_lowercase();
         if let Some((extension, _, _)) = self.format.audio_only() {
+            return Ok((extension.to_owned(), None));
+        }
+        if let Some((extension, _)) = self.format.animated() {
             return Ok((extension.to_owned(), None));
         }
         if self.copies(source) {
@@ -941,6 +1126,8 @@ struct Encode {
     /// For a target size: the video's bits a second, and the audio's kbit/s.
     rate: Option<(f64, u32)>,
     pass: Pass,
+    /// For an animation at a target size: the shorter side to shrink to.
+    side: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1100,8 +1287,15 @@ fn video_args(
 /// The name a two-pass encode's notes go by, in a folder of their own.
 const STATS: &str = "pass";
 
-/// The filters a re-encode runs the video through.
-fn video_filters(job: &ClipJob, tone_map: bool, ten_bit: bool, vaapi: bool) -> Option<String> {
+/// The filters a re-encode runs the video through: what's kept of the picture,
+/// then which way up it goes, then how big, then how fast.
+fn video_filters(
+    job: &ClipJob,
+    encode: Encode,
+    tone_map: bool,
+    ten_bit: bool,
+    vaapi: bool,
+) -> Option<String> {
     let ClipJob {
         source, settings, ..
     } = job;
@@ -1109,15 +1303,38 @@ fn video_filters(job: &ClipJob, tone_map: bool, ten_bit: bool, vaapi: bool) -> O
     if tone_map {
         filters.push(TONE_MAP.to_owned());
     }
-    if let Some(side) = settings.scale_to(source) {
-        filters.push(if source.width >= source.height {
+    if let Some(crop) = settings.crop {
+        let (width, height, x, y) = crop.pixels(source.width, source.height);
+        filters.push(format!("crop={width}:{height}:{x}:{y}"));
+    }
+    match settings.turn {
+        Turn::None => {}
+        Turn::Quarter => filters.push("transpose=clock".to_owned()),
+        Turn::Half => filters.push("hflip,vflip".to_owned()),
+        Turn::ThreeQuarters => filters.push("transpose=cclock".to_owned()),
+    }
+    if settings.flip_horizontal {
+        filters.push("hflip".to_owned());
+    }
+    if settings.flip_vertical {
+        filters.push("vflip".to_owned());
+    }
+    if let Some(side) = encode.side.or_else(|| settings.scale_to(source)) {
+        let (width, height) = settings.visible_size(source);
+        filters.push(if width >= height {
             format!("scale=-2:{side}:flags=lanczos")
         } else {
             format!("scale={side}:-2:flags=lanczos")
         });
     }
+    if settings.changes_speed() {
+        filters.push(format!("setpts=PTS/{}", settings.speed));
+    }
     if let Some(fps) = settings.fps_to(source) {
         filters.push(format!("fps={fps}"));
+    } else if settings.changes_speed() {
+        // Or it would change along with the speed.
+        filters.push(format!("fps={:.3}", source.fps));
     }
     if vaapi {
         // Last, as the others work on pictures in memory.
@@ -1126,8 +1343,35 @@ fn video_filters(job: &ClipJob, tone_map: bool, ten_bit: bool, vaapi: bool) -> O
             if ten_bit { "p010" } else { "nv12" }
         ));
     }
+    if settings.format == Format::Gif {
+        // The best 256 colors for this video, not some general ones.
+        let dither =
+            settings
+                .quality
+                .pick("sierra2_4a", "bayer:bayer_scale=3", "bayer:bayer_scale=1");
+        filters.push(format!(
+            "split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither={dither}"
+        ));
+    }
     (!filters.is_empty()).then(|| filters.join(","))
 }
+
+/// `atempo` filters for a speed: each only goes from half to double.
+fn tempo_filters(mut speed: f64) -> String {
+    let mut filters = Vec::new();
+    while speed > 2.0 {
+        filters.push("atempo=2".to_owned());
+        speed /= 2.0;
+    }
+    while speed < 0.5 {
+        filters.push("atempo=0.5".to_owned());
+        speed /= 0.5;
+    }
+    filters.push(format!("atempo={speed}"));
+    filters.join(",")
+}
+
+const NO_ZIMG: &str = "Converting HDR to SDR needs an ffmpeg with zimg. Keep HDR, in a format that can, or install another build.";
 
 /// Converts HDR to SDR.
 const TONE_MAP: &str = "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,\
@@ -1165,7 +1409,8 @@ fn plan(
     if let Some(device) = hardware.as_ref().and_then(|h| h.device.as_deref()) {
         add(&["-vaapi_device", device]);
     }
-    let copying_video = codec.is_none() && audio_only.is_none();
+    let animated = settings.format.animated();
+    let copying_video = codec.is_none() && audio_only.is_none() && animated.is_none();
     let seek = job.start
         + if copying_video {
             copy_margin(extension)
@@ -1182,7 +1427,11 @@ fn plan(
     args.push(reachable(&job.input).into());
     let mut add = |more: &[&str]| args.extend(more.iter().map(OsString::from));
 
-    let streams = settings.audio_streams(source);
+    let streams = if animated.is_some() {
+        Vec::new()
+    } else {
+        settings.audio_streams(source)
+    };
     if audio_only.is_none() {
         add(&["-map", &format!("0:{}", source.video_index)]);
     } else if streams.is_empty() {
@@ -1194,7 +1443,9 @@ fn plan(
         }
     }
     let mut subtitle_args = Vec::new();
-    if keep.subtitles && audio_only.is_none() && encode.pass != Pass::First {
+    // Subtitles can't follow a change of speed: they'd be at the wrong times.
+    let keeps_subtitles = keep.subtitles && !settings.changes_speed();
+    if keeps_subtitles && audio_only.is_none() && animated.is_none() && encode.pass != Pass::First {
         let mut mapped = 0;
         for subtitle in &source.subtitles {
             let encoder = if copying_video {
@@ -1214,18 +1465,34 @@ fn plan(
     let subtitle_args: Vec<&str> = subtitle_args.iter().map(String::as_str).collect();
     add(&subtitle_args);
 
+    if let Some((_, encoder)) = animated {
+        // Neither has room for HDR.
+        let tone_map = source.is_hdr();
+        if tone_map && !job.tools.zscale {
+            return Err(NO_ZIMG.to_owned());
+        }
+        if let Some(filters) = video_filters(job, encode, tone_map, false, false) {
+            add(&["-vf", &filters]);
+        }
+        add(&["-c:v", encoder, "-an", "-sn", "-loop", "0"]);
+        if settings.format == Format::WebpAnimated {
+            let quality = settings.quality.pick("85", "70", "50");
+            add(&["-quality", quality]);
+        }
+        add(&["-map_metadata", "-1", "-map_chapters", "-1"]);
+        args.push(output.into());
+        return Ok(args);
+    }
+
     if let (Some(codec), Some(hardware)) = (codec, &hardware) {
         // H.264 here is 8-bit, which can't hold HDR.
         let tone_map = source.is_hdr() && (!keep.hdr || codec == Codec::H264);
         if tone_map && !job.tools.zscale {
-            return Err(
-                "Converting HDR to SDR needs an ffmpeg with zimg. Keep HDR, in a format that can, or install another build."
-                    .to_owned(),
-            );
+            return Err(NO_ZIMG.to_owned());
         }
         let ten_bit = source.is_hdr() && !tone_map;
         let vaapi = hardware.device.is_some();
-        if let Some(filters) = video_filters(job, tone_map, ten_bit, vaapi) {
+        if let Some(filters) = video_filters(job, encode, tone_map, ten_bit, vaapi) {
             add(&["-vf", &filters]);
         }
         let video = video_args(&hardware.encoder, codec, extension, job, tone_map, encode);
@@ -1242,6 +1509,14 @@ fn plan(
         return Ok(args);
     }
 
+    let tempo = settings
+        .changes_speed()
+        .then(|| tempo_filters(settings.speed));
+    if let Some(tempo) = &tempo
+        && !streams.is_empty()
+    {
+        add(&["-af", tempo]);
+    }
     let kbps = encode.rate.map(|(_, audio)| audio).or(settings.audio_kbps);
     if let Some((_, encoder, usual)) = audio_only {
         add(&["-vn", "-c:a", encoder]);
@@ -1257,7 +1532,9 @@ fn plan(
             "aac"
         };
         add(&["-c:a", encoder, "-b:a", &format!("{kbps}k")]);
-    } else if copying_video || streams.iter().all(|a| audio_fits(extension, &a.codec)) {
+    } else if tempo.is_none()
+        && (copying_video || streams.iter().all(|a| audio_fits(extension, &a.codec)))
+    {
         add(&["-c:a", "copy"]);
     } else if extension == "webm" {
         add(&["-c:a", "libopus", "-b:a", "160k"]);
@@ -1265,7 +1542,7 @@ fn plan(
         add(&["-c:a", "aac", "-b:a", "192k"]);
     }
 
-    add(&["-map_chapters", if keep.subtitles { "0" } else { "-1" }]);
+    add(&["-map_chapters", if keeps_subtitles { "0" } else { "-1" }]);
     add(&["-map_metadata", if keep.details { "0" } else { "-1" }]);
     // Either the tags stayed and these blank them, or they went and these put
     // them back.
@@ -1291,7 +1568,7 @@ fn parse_progress(line: &str) -> Option<f64> {
 
 /// Runs a job, leaving the output only if all of it was made.
 pub fn export(job: ClipJob, p: &Progress) {
-    p.set_time_total(job.end - job.start);
+    p.set_time_total((job.end - job.start) / job.settings.speed);
     let Some(_turn) = wait_for_turn(&job, p) else {
         return;
     };
@@ -1340,7 +1617,7 @@ fn run(mut job: ClipJob, p: &Progress) -> Result<(), (PathBuf, String)> {
         job.start = keyframe_before(&job.input, &job.source, job.start).map_err(fail)?;
     }
     let length = job.end - job.start;
-    p.set_time_total(length);
+    p.set_time_total(length / job.settings.speed);
 
     let dir = reachable(&job.dir);
     let temporary = unique_path(&dir, OsStr::new(&format!(".{}.part.{extension}", job.name)));
@@ -1396,7 +1673,12 @@ fn make(
         let args = plan(job, extension, temporary, Encode::default())?;
         return encode(&args, None, 0.0, p);
     };
+    if job.settings.format.is_animated() {
+        return make_animation(job, extension, temporary, limit, p);
+    }
     let fit = job.settings.fit(&job.source, length)?;
+    // From here on, how long it plays for.
+    let length = length / job.settings.speed;
     let codec = job.settings.format.codec().or_else(|| {
         let (_, codec) = job.settings.container(&job.source, extension).ok()?;
         codec
@@ -1421,6 +1703,7 @@ fn make(
         let first = Encode {
             rate: rate(video_bps),
             pass: Pass::First,
+            side: None,
         };
         encode(&plan(job, extension, temporary, first)?, cwd, 0.0, p)?;
         base = length;
@@ -1440,6 +1723,7 @@ fn make(
         let this = Encode {
             rate: rate(video_bps),
             pass,
+            side: None,
         };
         encode(&plan(job, extension, temporary, this)?, cwd, base, p)?;
         if p.cancelled() {
@@ -1460,6 +1744,64 @@ fn make(
         "Couldn't get it under {} MB. Try a lower resolution or frame rate.",
         job.settings.target_mb
     ))
+}
+
+/// Writes an animation small enough for `limit` bytes. These have no bitrate to
+/// ask for, but their size goes with their picture's: shrinks it till it fits.
+fn make_animation(
+    job: &ClipJob,
+    extension: &str,
+    temporary: &Path,
+    limit: f64,
+    p: &Progress,
+) -> Result<(), String> {
+    let settings = &job.settings;
+    let mut side = None;
+    for attempt in 0..MAX_ANIMATION_ATTEMPTS {
+        if p.cancelled() {
+            return Ok(());
+        }
+        let _ = disk::remove_file(temporary);
+        p.set_status(&if attempt == 0 {
+            format!("{}: encoding", job.name)
+        } else {
+            format!("{}: was too big, trying it smaller", job.name)
+        });
+        let this = Encode {
+            side,
+            ..Encode::default()
+        };
+        encode(&plan(job, extension, temporary, this)?, None, 0.0, p)?;
+        if p.cancelled() {
+            return Ok(());
+        }
+        let size = disk::metadata(temporary)
+            .map_err(|err| err.to_string())?
+            .len() as f64;
+        if size <= limit {
+            return Ok(());
+        }
+        let shown = side
+            .or_else(|| settings.scale_to(&job.source))
+            .unwrap_or_else(|| settings.visible_short_side(&job.source));
+        let next = smaller_side(f64::from(shown), size, limit);
+        if next < SMALLEST_ANIMATION_SIDE {
+            break;
+        }
+        side = Some(next as u32);
+    }
+    Err(format!(
+        "Couldn't get it under {} MB. Try a shorter clip or a lower frame rate.",
+        settings.target_mb
+    ))
+}
+
+/// The side to try after `side` made `size` bytes against a `limit`: the size
+/// goes with the area, so with the side's square. Even, for the encoders, and
+/// always smaller than it was.
+fn smaller_side(side: f64, size: f64, limit: f64) -> f64 {
+    let wanted = side * (limit * TARGET_MARGIN / size).sqrt();
+    ((wanted / 2.0).floor() * 2.0).min(side - 2.0)
 }
 
 /// The video bitrate to try after `bitrate` made `size` bytes against a `limit`:
@@ -1765,7 +2107,7 @@ mod tests {
             "side_data_list": [{"rotation": -90}]}], "format": {"duration": "9"}}"#;
         let source = parse_probe(turned).unwrap();
         assert_eq!((source.width, source.height), (1080, 1920));
-        assert_eq!(source.short_side(), 1080);
+        assert_eq!(Settings::default().visible_short_side(&source), 1080);
         let mut job = job(Settings {
             resolution: Some(720),
             ..Settings::default()
@@ -1878,6 +2220,7 @@ mod tests {
         let encode = |pass| Encode {
             rate: Some((1_000_000.0, 96)),
             pass,
+            side: None,
         };
         let plain = |job: &ClipJob, pass| -> Vec<String> {
             plan(job, "mp4", Path::new("/out"), encode(pass))
@@ -1927,6 +2270,165 @@ mod tests {
         );
         assert_eq!(first_error(""), "ffmpeg failed");
         assert_eq!(first_error("[not a tag] stays"), "[not a tag] stays");
+    }
+
+    #[test]
+    fn the_picture_changes_in_the_right_order() {
+        let settings = Settings {
+            crop: Some(Crop {
+                x: 0.5,
+                y: 0.0,
+                w: 0.5,
+                h: 1.0,
+            }),
+            turn: Turn::Quarter,
+            flip_horizontal: true,
+            resolution: Some(720),
+            speed: 2.0,
+            ..Settings::default()
+        };
+        let source = parse_probe(PROBED).unwrap();
+        assert!(!settings.copies(&source));
+        // 1920 by 2160, on its side.
+        assert_eq!(settings.visible_size(&source), (2160, 1920));
+        let args = planned(&job(settings), "mkv");
+        assert!(has(
+            &args,
+            "-vf",
+            "crop=1920:2160:1920:0,transpose=clock,hflip,scale=-2:720:flags=lanczos,setpts=PTS/2,fps=29.970"
+        ));
+    }
+
+    #[test]
+    fn each_of_these_rules_out_copying() {
+        let source = parse_probe(PROBED).unwrap();
+        for changed in [
+            Settings {
+                crop: Some(Crop::centered(1.0)),
+                ..Settings::default()
+            },
+            Settings {
+                turn: Turn::Half,
+                ..Settings::default()
+            },
+            Settings {
+                flip_vertical: true,
+                ..Settings::default()
+            },
+            Settings {
+                speed: 0.5,
+                ..Settings::default()
+            },
+        ] {
+            assert!(!changed.copies(&source), "{changed:?}");
+            assert!(changed.encodes_anyway(&source));
+        }
+    }
+
+    #[test]
+    fn a_crop_shape_is_the_shape_of_the_result() {
+        let source = parse_probe(PROBED).unwrap();
+        let settings = |turn| Settings {
+            crop_shape: Some((9, 16)),
+            turn,
+            ..Settings::default()
+        };
+        for turn in [Turn::None, Turn::Quarter, Turn::Half, Turn::ThreeQuarters] {
+            let mut settings = settings(turn);
+            settings.crop = settings.crop_ratio(&source).map(Crop::centered);
+            let (width, height) = settings.visible_size(&source);
+            let shape = f64::from(width) / f64::from(height);
+            assert!(
+                (shape - 9.0 / 16.0).abs() < 0.01,
+                "{turn:?}: {width} by {height}"
+            );
+        }
+    }
+
+    #[test]
+    fn turns_come_back_round() {
+        assert_eq!(Turn::None.counter_clockwise(), Turn::ThreeQuarters);
+        let mut turn = Turn::None;
+        for _ in 0..4 {
+            turn = turn.clockwise();
+        }
+        assert_eq!(turn, Turn::None);
+    }
+
+    #[test]
+    fn speed_changes_the_audio_and_drops_the_subtitles() {
+        assert_eq!(tempo_filters(1.5), "atempo=1.5");
+        assert_eq!(tempo_filters(4.0), "atempo=2,atempo=2");
+        assert_eq!(tempo_filters(0.25), "atempo=0.5,atempo=0.5");
+        let settings = Settings {
+            speed: 2.0,
+            ..Settings::default()
+        };
+        let args = planned(&job(settings), "mkv");
+        assert!(has(&args, "-af", "atempo=2"));
+        assert!(!has(&args, "-c:a", "copy"), "changed audio can't be copied");
+        assert!(
+            !has(&args, "-map", "0:4"),
+            "no subtitles at the wrong times"
+        );
+        assert!(has(&args, "-map_chapters", "-1"));
+        // The target is for what plays, which takes half as long.
+        let source = parse_probe(PROBED).unwrap();
+        let sized = Settings {
+            use_target: true,
+            ..settings
+        };
+        let plain = Settings {
+            use_target: true,
+            ..Settings::default()
+        };
+        let quick = sized.fit(&source, 100.0).unwrap().video_bps;
+        let slow = plain.fit(&source, 100.0).unwrap().video_bps;
+        assert!(quick > slow * 1.9, "{quick} {slow}");
+    }
+
+    #[test]
+    fn animations_are_small_silent_and_on_their_own_palette() {
+        let settings = Settings {
+            format: Format::Gif,
+            ..Settings::default()
+        };
+        let source = parse_probe(PROBED).unwrap();
+        assert_eq!(settings.extension(&source, "mkv").unwrap(), "gif");
+        let mut job = job(settings);
+        job.tools.encoders.insert("gif".to_owned());
+        let args = planned(&job, "gif");
+        let filters = args.windows(2).find(|w| w[0] == "-vf").unwrap()[1].clone();
+        assert!(filters.starts_with(TONE_MAP), "{filters}");
+        assert!(filters.contains("scale=-2:480"), "{filters}");
+        assert!(filters.contains(",fps=15,"), "{filters}");
+        assert!(filters.contains("palettegen"), "{filters}");
+        assert!(args.iter().any(|arg| arg == "-an"));
+        assert!(!has(&args, "-map", "0:2") && !has(&args, "-map", "0:4"));
+        assert_eq!(Format::Gif.codec(), None);
+        // Audio settings and copying don't come into it.
+        assert!(!job.settings.copies(&source));
+    }
+
+    #[test]
+    fn a_too_big_animation_is_tried_smaller() {
+        // Four times too big: half the side, less the margin, evenly.
+        assert_eq!(smaller_side(480.0, 4e6, 1e6), 236.0);
+        // A hair over still comes down.
+        assert_eq!(smaller_side(480.0, 1.0001e6, 1e6), 472.0);
+    }
+
+    #[test]
+    fn new_tabs_leave_the_picture_alone() {
+        let used = Settings {
+            crop: Some(Crop::centered(1.0)),
+            crop_shape: Some((1, 1)),
+            turn: Turn::Half,
+            flip_vertical: true,
+            speed: 2.0,
+            ..Settings::default()
+        };
+        assert_eq!(used.for_new_tab(), Settings::default());
     }
 
     #[test]
@@ -2447,6 +2949,159 @@ mod tests {
             let size = std::fs::metadata(&out).unwrap().len() as f64;
             assert!(size <= 0.5e6, "{} made {size}", hardware.encoder);
             assert!(entries(&out, "stream=height").contains("360"));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn crops_turns_and_changes_speed() {
+        let dir = temp_dir("picture");
+        let Some(input) = sample(&dir) else {
+            eprintln!("no ffmpeg: skipped");
+            return;
+        };
+        let cropped = Settings {
+            crop: Some(Crop {
+                x: 0.25,
+                y: 0.0,
+                w: 0.5,
+                h: 1.0,
+            }),
+            ..Settings::default()
+        };
+        let out = run_job(&dir, &input, cropped, (0.0, 2.0));
+        assert!(entries(&out, "stream=width,height").contains("80,90"));
+
+        let turned = Settings {
+            turn: Turn::Quarter,
+            ..cropped
+        };
+        let out = run_job(&dir, &input, turned, (0.0, 2.0));
+        assert!(entries(&out, "stream=width,height").contains("90,80"));
+
+        // Which way it turned: a white top left corner goes to the top right.
+        let marked = dir.join("marked.mp4");
+        let made = command("ffmpeg")
+            .args(["-v", "error", "-f", "lavfi", "-i"])
+            .arg("color=black:s=160x90:r=10:d=1,drawbox=x=0:y=0:w=30:h=30:color=white:t=fill")
+            .args(["-c:v", "libx264", "-qp", "0"])
+            .arg(&marked)
+            .status();
+        assert!(made.unwrap().success());
+        let pixel = |path: &Path, x: u32, y: u32| {
+            let out = command("ffmpeg")
+                .args(["-v", "error", "-i"])
+                .arg(path)
+                .args(["-frames:v", "1", "-vf", &format!("crop=2:2:{x}:{y}")])
+                .args(["-f", "rawvideo", "-pix_fmt", "gray", "-"])
+                .output()
+                .unwrap();
+            out.stdout[0]
+        };
+        let bright = |value: u8| value > 200;
+        assert!(bright(pixel(&marked, 5, 5)) && !bright(pixel(&marked, 155, 5)));
+        let clockwise = Settings {
+            turn: Turn::Quarter,
+            ..Settings::default()
+        };
+        let out = run_job(&dir, &marked, clockwise, (0.0, 1.0));
+        assert!(entries(&out, "stream=width,height").contains("90,160"));
+        assert!(bright(pixel(&out, 85, 5)), "to the top right");
+        assert!(!bright(pixel(&out, 5, 5)));
+        let counter = Settings {
+            turn: Turn::ThreeQuarters,
+            ..Settings::default()
+        };
+        let out = run_job(&dir, &marked, counter, (0.0, 1.0));
+        assert!(bright(pixel(&out, 5, 155)), "to the bottom left");
+        let mirrored = Settings {
+            flip_horizontal: true,
+            ..Settings::default()
+        };
+        let out = run_job(&dir, &marked, mirrored, (0.0, 1.0));
+        assert!(bright(pixel(&out, 155, 5)), "to the other side");
+        let upended = Settings {
+            flip_vertical: true,
+            ..Settings::default()
+        };
+        let out = run_job(&dir, &marked, upended, (0.0, 1.0));
+        assert!(bright(pixel(&out, 5, 85)), "to the bottom");
+        let half = Settings {
+            turn: Turn::Half,
+            ..Settings::default()
+        };
+        let out = run_job(&dir, &marked, half, (0.0, 1.0));
+        assert!(bright(pixel(&out, 155, 85)), "to the opposite corner");
+
+        let fast = Settings {
+            speed: 2.0,
+            ..Settings::default()
+        };
+        let out = run_job(&dir, &input, fast, (0.0, 8.0));
+        assert!((duration(&out) - 4.0).abs() < 0.3, "{}", duration(&out));
+        let frames: f64 = entries(&out, "stream=avg_frame_rate")
+            .lines()
+            .find_map(|line| parse_rate(line.trim_end_matches(',')))
+            .unwrap();
+        assert!(
+            (frames - 10.0).abs() < 0.5,
+            "the frame rate stays: {frames}"
+        );
+
+        // Slower than the one atempo can go, and audio alone follows too.
+        let slow_audio = Settings {
+            format: Format::Flac,
+            speed: 0.25,
+            ..Settings::default()
+        };
+        let out = run_job(&dir, &input, slow_audio, (0.0, 2.0));
+        assert!((duration(&out) - 8.0).abs() < 0.3, "{}", duration(&out));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn makes_animations() {
+        let dir = temp_dir("animation");
+        let Some(input) = sample(&dir) else {
+            eprintln!("no ffmpeg: skipped");
+            return;
+        };
+        let tools = super::tools().unwrap();
+        let gif = Settings {
+            format: Format::Gif,
+            ..Settings::default()
+        };
+        if gif.format.available(&tools) {
+            let out = run_job(&dir, &input, gif, (0.0, 3.0));
+            assert_eq!(out.extension().unwrap(), "gif");
+            assert!(entries(&out, "stream=codec_name").contains("gif"));
+            assert!(entries(&out, "stream=width,height").contains("160,90"));
+            let limited = Settings {
+                use_target: true,
+                target_mb: 0.1,
+                ..gif
+            };
+            let out = run_job(&dir, &input, limited, (0.0, 10.0));
+            let size = std::fs::metadata(&out).unwrap().len() as f64;
+            assert!(size <= 0.1e6, "made {size}");
+        }
+        let webp = Settings {
+            format: Format::WebpAnimated,
+            ..Settings::default()
+        };
+        if webp.format.available(&tools) {
+            let out = run_job(&dir, &input, webp, (0.0, 3.0));
+            assert_eq!(out.extension().unwrap(), "webp");
+            let bytes = std::fs::read(&out).unwrap();
+            assert!(bytes.windows(4).any(|w| w == b"ANIM"), "it's animated");
+            let limited = Settings {
+                use_target: true,
+                target_mb: 0.1,
+                ..webp
+            };
+            let out = run_job(&dir, &input, limited, (0.0, 10.0));
+            let size = std::fs::metadata(&out).unwrap().len() as f64;
+            assert!(size <= 0.1e6, "made {size}");
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

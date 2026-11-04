@@ -8,12 +8,15 @@ use std::{
 
 use egui::{
     Align2, Button, Color32, ComboBox, FontId, Id, Key, Layout, Modal, Rect, RichText, ScrollArea,
-    Sense, Stroke, TextEdit, Ui, pos2, vec2,
+    Sense, Stroke, TextEdit, Ui, emath::GuiRounding, pos2, vec2,
 };
 use egui_phosphor::regular as icon;
 use serde::{Deserialize, Serialize};
 
-use super::ffmpeg::{self, AudioChoice, ClipJob, Format, Quality, Settings, Source, Tools};
+use super::{
+    crop::{self, Crop, Grab, View},
+    ffmpeg::{self, AudioChoice, ClipJob, Format, Quality, Settings, Source, Tools},
+};
 use crate::{
     archive::FolderPicker,
     fs::{display_name, human_size},
@@ -35,6 +38,12 @@ const FRAME_RATES: [u32; 5] = [60, 50, 30, 24, 15];
 const AUDIO_BITRATES: [u32; 7] = [64, 96, 128, 160, 192, 256, 320];
 /// Target sizes a click away, in MB.
 const TARGET_PRESETS: [f64; 5] = [10.0, 25.0, 50.0, 100.0, 500.0];
+/// Speeds to choose from.
+const SPEEDS: [f64; 8] = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 4.0];
+/// Shapes to keep a crop to, as width and height.
+const CROP_SHAPES: [(u32, u32); 5] = [(16, 9), (9, 16), (1, 1), (4, 3), (4, 5)];
+/// How far from the crop's edges, in points, a press still takes them.
+const CROP_REACH: f32 = 10.0;
 
 type Loaded = Result<(Source, Tools), String>;
 /// The start a keyframe was asked for, and when known, the answer.
@@ -107,12 +116,35 @@ fn precise_time(seconds: f64) -> String {
     )
 }
 
+/// A frame drawn in `rect`, turned and mirrored as `view` says.
+fn picture_mesh(texture: egui::TextureId, rect: Rect, view: View) -> egui::Shape {
+    let mut mesh = egui::Mesh::with_texture(texture);
+    for (corner, on_view) in [
+        (rect.left_top(), (0.0, 0.0)),
+        (rect.right_top(), (1.0, 0.0)),
+        (rect.right_bottom(), (1.0, 1.0)),
+        (rect.left_bottom(), (0.0, 1.0)),
+    ] {
+        let (u, v) = view.to_source(on_view);
+        mesh.vertices.push(egui::epaint::Vertex {
+            pos: corner,
+            uv: pos2(u, v),
+            color: Color32::WHITE,
+        });
+    }
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(0, 2, 3);
+    egui::Shape::mesh(mesh)
+}
+
 /// What the tab worked out once, or is working out.
 #[derive(Default)]
 struct Runtime {
     loaded: Option<Arc<OnceLock<Loaded>>>,
     keyframe: Option<KeyframeLookup>,
     drag: Option<Handle>,
+    /// A drag of the crop: what it took, the crop then, and where it began.
+    crop_drag: Option<(Grab, Crop, (f32, f32))>,
     /// Where playing was last frame, to stop on passing the range's end.
     last_position: f64,
     name: Option<String>,
@@ -244,16 +276,37 @@ impl ClipTab {
         let source_size = status.video_size.map_or(vec2(16.0, 9.0), |[w, h]| {
             vec2(w.max(1) as f32, h.max(1) as f32)
         });
-        let scale = (room.x / source_size.x).min(room.y / source_size.y);
-        let (area, response) = ui.allocate_exact_size(room, Sense::click());
+        let view = self.settings.view();
+        let view_size = if view.swaps_sides() {
+            vec2(source_size.y, source_size.x)
+        } else {
+            source_size
+        };
+        let scale = (room.x / view_size.x).min(room.y / view_size.y);
+        let cropping = self.settings.crop.is_some() && !self.settings.format.is_audio_only();
+        let sense = if cropping {
+            Sense::click_and_drag()
+        } else {
+            Sense::click()
+        };
+        let (area, response) = ui.allocate_exact_size(room, sense);
+        // mpv renders it upright, at the size it'll be shown; turning it is
+        // only a matter of which corner of the frame goes where.
         let rect = Rect::from_center_size(area.center(), source_size * scale);
-        let shown = player.render_for(rect, ui.pixels_per_point());
+        let pixels_per_point = ui.pixels_per_point();
+        let rendered = player.render_for(rect, pixels_per_point);
+        let shown = if view.swaps_sides() {
+            let size = vec2(rendered.height(), rendered.width());
+            Rect::from_center_size(rendered.center(), size).round_to_pixels(pixels_per_point)
+        } else {
+            rendered
+        };
+        player.set_speed(self.settings.speed);
         let media = crate::theme::colors(ui.ctx()).media.clone();
         let painter = ui.painter_at(area);
         painter.rect_filled(area, 0.0, media.backdrop);
         if let Some(frame) = player.frame() {
-            let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
-            painter.image(frame.id(), shown, uv, Color32::WHITE);
+            painter.add(picture_mesh(frame.id(), shown, view));
         }
         if let Some(err) = &status.error {
             painter.text(
@@ -264,7 +317,11 @@ impl ClipTab {
                 ui.visuals().error_fg_color,
             );
         }
-        let clicked_video = response.clicked();
+        if cropping {
+            self.crop_overlay(ui, &response, area, shown, source);
+        }
+        // While cropping, the picture is for that.
+        let clicked_video = response.clicked() && !cropping;
 
         // Stops at the end of the range when playing reaches it, but lets it
         // play on from past there.
@@ -391,6 +448,90 @@ impl ClipTab {
         });
     }
 
+    /// Dims what's cropped away over the picture at `shown`, and lets the
+    /// pointer change what isn't.
+    fn crop_overlay(
+        &mut self,
+        ui: &Ui,
+        response: &egui::Response,
+        area: Rect,
+        shown: Rect,
+        source: &Source,
+    ) {
+        let Some(crop) = self.settings.crop else {
+            self.runtime.crop_drag = None;
+            return;
+        };
+        let view = self.settings.view();
+        let size = shown.size().max(vec2(1.0, 1.0));
+        // Everything's worked out on the original picture, whichever way
+        // it's shown.
+        let fraction = |pos: egui::Pos2| {
+            view.to_source((
+                (pos.x - shown.min.x) / size.x,
+                (pos.y - shown.min.y) / size.y,
+            ))
+        };
+        let reach = (CROP_REACH / size.x, CROP_REACH / size.y);
+        let reach = if view.swaps_sides() {
+            (reach.1, reach.0)
+        } else {
+            reach
+        };
+        let ratio = self.settings.crop_ratio(source);
+        let pointer = response
+            .hover_pos()
+            .or_else(|| response.interact_pointer_pos());
+        let hovered =
+            pointer.and_then(|pos| Grab::at(&crop, fraction(pos), reach, ratio.is_some()));
+
+        if !response.is_pointer_button_down_on() {
+            self.runtime.crop_drag = None;
+        } else if self.runtime.crop_drag.is_none()
+            && let Some(pos) = response.interact_pointer_pos()
+            && let Some(grab) = Grab::at(&crop, fraction(pos), reach, ratio.is_some())
+        {
+            self.runtime.crop_drag = Some((grab, crop, fraction(pos)));
+        }
+        let mut crop = crop;
+        if let Some((grab, began, from)) = self.runtime.crop_drag
+            && let Some(pos) = response.interact_pointer_pos()
+        {
+            let (x, y) = fraction(pos);
+            crop = crop::dragged(began, grab, (x - from.0, y - from.1), ratio);
+            self.settings.crop = Some(crop);
+        }
+        let held = self.runtime.crop_drag.map(|(grab, _, _)| grab).or(hovered);
+        if let Some(grab) = held {
+            ui.ctx().set_cursor_icon(view.cursor(grab));
+        }
+
+        let on_screen = |point: (f32, f32)| {
+            let (x, y) = view.to_view(point);
+            shown.min + vec2(x * size.x, y * size.y)
+        };
+        let kept = Rect::from_two_pos(
+            on_screen((crop.x, crop.y)),
+            on_screen((crop.x + crop.w, crop.y + crop.h)),
+        );
+        let painter = ui.painter_at(area);
+        let dim = Color32::from_black_alpha(150);
+        for part in [
+            Rect::from_min_max(shown.min, pos2(shown.max.x, kept.min.y)),
+            Rect::from_min_max(pos2(shown.min.x, kept.max.y), shown.max),
+            Rect::from_min_max(pos2(shown.min.x, kept.min.y), pos2(kept.min.x, kept.max.y)),
+            Rect::from_min_max(pos2(kept.max.x, kept.min.y), pos2(shown.max.x, kept.max.y)),
+        ] {
+            painter.rect_filled(part, 0.0, dim);
+        }
+        let line = Stroke::new(1.5, Color32::WHITE);
+        painter.rect_stroke(kept, 0.0, line, egui::StrokeKind::Inside);
+        for corner in [kept.min, kept.max, kept.left_bottom(), kept.right_top()] {
+            let handle = Rect::from_center_size(corner, vec2(9.0, 9.0));
+            painter.rect_filled(handle, 1.0, Color32::WHITE);
+        }
+    }
+
     /// Asks where a copy starting at the current start really would, if
     /// nothing has yet; the answer, once it's known.
     fn keyframe(&mut self, ui: &Ui, source: &Source) -> Option<Result<f64, String>> {
@@ -429,16 +570,31 @@ impl ClipTab {
         ui.add_space(6.0);
 
         self.format_ui(ui, source, tools);
-        if !self.settings.format.is_audio_only() {
+        let format = self.settings.format;
+        if !format.is_audio_only() {
             self.video_ui(ui, source, tools, end);
         }
-        if !source.audio.is_empty() {
+        self.speed_ui(ui);
+        if !source.audio.is_empty() && !format.is_animated() {
             ui.add_space(6.0);
             self.audio_ui(ui, source);
         }
 
+        // An animation has no tags to speak of.
+        if !format.is_animated() {
+            self.keep_ui(ui, source);
+        }
+
+        ui.add_space(6.0);
+        ui.separator();
+        self.output(ui, shared, source, tools);
+    }
+
+    /// What's carried over from the source.
+    fn keep_ui(&mut self, ui: &mut Ui, source: &Source) {
         ui.add_space(6.0);
         ui.label("Keep:");
+        let speed_changes = self.settings.changes_speed();
         let keep = &mut self.settings.keep;
         ui.checkbox(&mut keep.details, "File details")
             .on_hover_text("Title, creation date, camera and similar tags");
@@ -447,17 +603,118 @@ impl ClipTab {
                 .on_hover_text("Where it was filmed. Anyone you send the file to can read this.");
         }
         if source.has_subtitles_or_chapters() {
-            ui.checkbox(&mut keep.subtitles, "Subtitles and chapters")
-                .on_hover_text("Picture subtitles can't go into MP4 or WebM, and are left out");
+            ui.add_enabled_ui(!speed_changes, |ui| {
+                ui.checkbox(&mut keep.subtitles, "Subtitles and chapters")
+                    .on_hover_text("Picture subtitles can't go into MP4 or WebM, and are left out")
+                    .on_disabled_hover_text(
+                        "They can't follow a change of speed, and are left out",
+                    );
+            });
         }
         if source.is_hdr() {
             ui.checkbox(&mut keep.hdr, "HDR")
                 .on_hover_text("Without it, or in H.264, the video is converted to SDR");
         }
+    }
 
-        ui.add_space(6.0);
-        ui.separator();
-        self.output(ui, shared, source, tools);
+    /// What's kept of the picture, and which way up.
+    fn picture_ui(&mut self, ui: &mut Ui, source: &Source) {
+        ui.horizontal(|ui| {
+            let mut cropping = self.settings.crop.is_some();
+            if ui
+                .checkbox(&mut cropping, "Crop")
+                .on_hover_text("Drag the rectangle on the video, by its inside, edges or corners")
+                .changed()
+            {
+                self.settings.crop = cropping.then(|| match self.settings.crop_ratio(source) {
+                    Some(ratio) => Crop::centered(ratio),
+                    None => Crop::FULL,
+                });
+            }
+            if cropping {
+                let label = |shape: Option<(u32, u32)>| {
+                    shape.map_or("Free".to_owned(), |(width, height)| {
+                        format!("{width}:{height}")
+                    })
+                };
+                let before = self.settings.crop_shape;
+                ComboBox::from_id_salt(("crop-shape", self.id))
+                    .selected_text(label(before))
+                    .width(70.0)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.settings.crop_shape, None, label(None));
+                        for shape in CROP_SHAPES {
+                            let name = label(Some(shape));
+                            ui.selectable_value(&mut self.settings.crop_shape, Some(shape), name);
+                        }
+                    });
+                if self.settings.crop_shape != before
+                    && let Some(ratio) = self.settings.crop_ratio(source)
+                {
+                    self.settings.crop = Some(Crop::centered(ratio));
+                }
+                let (width, height, _, _) = self
+                    .settings
+                    .crop
+                    .unwrap_or(Crop::FULL)
+                    .pixels(source.width(), source.height());
+                ui.weak(format!("{width} × {height}"));
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("Turn:");
+            let turn = self.settings.turn;
+            if ui
+                .button(icon::ARROW_COUNTER_CLOCKWISE)
+                .on_hover_text("Turn left")
+                .clicked()
+            {
+                self.settings.turn = turn.counter_clockwise();
+            }
+            if ui
+                .button(icon::ARROW_CLOCKWISE)
+                .on_hover_text("Turn right")
+                .clicked()
+            {
+                self.settings.turn = turn.clockwise();
+            }
+            ui.weak(format!("{}°", self.settings.turn.degrees()));
+            // A shape is of the result, so it needs another rectangle now.
+            if self.settings.turn.swaps_sides() != turn.swaps_sides()
+                && self.settings.crop.is_some()
+                && let Some(ratio) = self.settings.crop_ratio(source)
+            {
+                self.settings.crop = Some(Crop::centered(ratio));
+            }
+            ui.add_space(8.0);
+            ui.toggle_value(&mut self.settings.flip_horizontal, icon::FLIP_HORIZONTAL)
+                .on_hover_text("Mirror left to right");
+            ui.toggle_value(&mut self.settings.flip_vertical, icon::FLIP_VERTICAL)
+                .on_hover_text("Mirror top to bottom");
+        });
+    }
+
+    /// How fast it plays.
+    fn speed_ui(&mut self, ui: &mut Ui) {
+        ui.horizontal(|ui| {
+            ui.label("Speed:");
+            let label = |speed: f64| format!("{speed}×");
+            ComboBox::from_id_salt(("speed", self.id))
+                .selected_text(label(self.settings.speed))
+                .show_ui(ui, |ui| {
+                    for speed in SPEEDS {
+                        ui.selectable_value(&mut self.settings.speed, speed, label(speed));
+                    }
+                });
+        });
+        if self.settings.changes_speed()
+            && let Some(end) = self.end
+        {
+            ui.weak(format!(
+                "Plays for {}",
+                precise_time((end - self.start) / self.settings.speed)
+            ));
+        }
     }
 
     fn format_ui(&mut self, ui: &mut Ui, source: &Source, tools: &Tools) {
@@ -467,14 +724,19 @@ impl ClipTab {
                 .selected_text(self.settings.format.label())
                 .width(170.0)
                 // All of them, without scrolling to find the audio ones.
-                .height(400.0)
+                .height(480.0)
                 .show_ui(ui, |ui| {
-                    let mut audio_begun = false;
+                    let (mut audio_begun, mut animation_begun) = (false, false);
                     for format in Format::ALL {
                         if format.is_audio_only() && !audio_begun {
                             audio_begun = true;
                             ui.separator();
                             ui.weak("Audio only");
+                        }
+                        if format.is_animated() && !animation_begun {
+                            animation_begun = true;
+                            ui.separator();
+                            ui.weak("Animation, no sound");
                         }
                         let no_audio = format.is_audio_only() && source.audio.is_empty();
                         ui.add_enabled_ui(format.available(tools) && !no_audio, |ui| {
@@ -525,18 +787,27 @@ impl ClipTab {
             });
         }
 
+        self.picture_ui(ui, source);
+
+        let animated = self.settings.format.is_animated();
         ui.horizontal(|ui| {
             ui.label("Resolution:");
+            let short_side = self.settings.visible_short_side(source);
+            let no_side = if animated {
+                format!("Auto ({}p at most)", ffmpeg::ANIMATION_SIDE)
+            } else {
+                "Original".to_owned()
+            };
             let selected = self
                 .settings
                 .resolution
-                .filter(|side| *side < source.short_side())
-                .map_or("Original".to_owned(), |side| format!("{side}p"));
+                .filter(|side| *side < short_side)
+                .map_or(no_side.clone(), |side| format!("{side}p"));
             ComboBox::from_id_salt(("resolution", self.id))
                 .selected_text(selected)
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.settings.resolution, None, "Original");
-                    for side in RESOLUTIONS.into_iter().filter(|s| *s < source.short_side()) {
+                    ui.selectable_value(&mut self.settings.resolution, None, no_side);
+                    for side in RESOLUTIONS.into_iter().filter(|s| *s < short_side) {
                         let label = format!("{side}p");
                         ui.selectable_value(&mut self.settings.resolution, Some(side), label);
                     }
@@ -545,15 +816,20 @@ impl ClipTab {
         ui.horizontal(|ui| {
             ui.label("Frame rate:");
             let lower = |fps: &u32| f64::from(*fps) < source.fps() - 0.5;
+            let no_rate = if animated {
+                format!("Auto ({} fps at most)", ffmpeg::ANIMATION_FPS)
+            } else {
+                "Original".to_owned()
+            };
             let selected = self
                 .settings
                 .fps
                 .filter(lower)
-                .map_or("Original".to_owned(), |fps| format!("{fps} fps"));
+                .map_or(no_rate.clone(), |fps| format!("{fps} fps"));
             ComboBox::from_id_salt(("fps", self.id))
                 .selected_text(selected)
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.settings.fps, None, "Original");
+                    ui.selectable_value(&mut self.settings.fps, None, no_rate);
                     for fps in FRAME_RATES.into_iter().filter(|fps| lower(fps)) {
                         let label = format!("{fps} fps");
                         ui.selectable_value(&mut self.settings.fps, Some(fps), label);
@@ -611,6 +887,10 @@ impl ClipTab {
                 }
             }
         });
+        if self.settings.format.is_animated() {
+            ui.weak("Shrinks the picture until it fits, which can take a few tries.");
+            return;
+        }
         let length = end - self.start;
         match self.settings.fit(source, length) {
             Ok(fit) => {
@@ -758,6 +1038,7 @@ impl ClipTab {
         let end = self.end.unwrap_or(source.duration);
         let fits = !self.settings.use_target
             || self.settings.format.is_audio_only()
+            || self.settings.format.is_animated()
             || self.settings.fit(source, end - self.start).is_ok();
         if ui
             .add_enabled(
@@ -820,6 +1101,25 @@ impl ClipTab {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_turned_picture_has_its_corners_in_the_right_places() {
+        let texture = egui::TextureId::Managed(1);
+        let rect = Rect::from_min_size(pos2(10.0, 20.0), vec2(90.0, 160.0));
+        let view = Settings {
+            turn: ffmpeg::Turn::Quarter,
+            ..Settings::default()
+        }
+        .view();
+        let egui::Shape::Mesh(mesh) = picture_mesh(texture, rect, view) else {
+            panic!("not a mesh");
+        };
+        assert!(mesh.is_valid());
+        assert_eq!(mesh.vertices[0].pos, rect.left_top());
+        // Turned clockwise, the frame's bottom left is at the top left.
+        assert_eq!(mesh.vertices[0].uv, pos2(0.0, 1.0));
+        assert_eq!(mesh.vertices[1].uv, pos2(0.0, 0.0));
+    }
 
     #[test]
     fn a_press_takes_the_closest_handle() {

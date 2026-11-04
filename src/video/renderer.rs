@@ -338,6 +338,7 @@ impl VideoPlayer {
                 self.mpv
                     .set_property("mute", if muted { "yes" } else { "no" })
             }
+            Command::Speed(speed) => self.mpv.set_property("speed", &speed.to_string()),
             Command::Volume(volume) => {
                 self.state.volume = volume;
                 self.mpv.set_property("volume", &volume.to_string())

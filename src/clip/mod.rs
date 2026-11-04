@@ -3,6 +3,7 @@
 //! [`tab`] is the editor; [`ffmpeg`] does the work, with the user's own ffmpeg
 //! in another process, so the app ships no codecs of its own.
 
+mod crop;
 mod ffmpeg;
 mod tab;
 

@@ -243,6 +243,7 @@ enum Command {
     Seek(f64),
     Mute(bool),
     Volume(f64),
+    Speed(f64),
 }
 
 // Read by the video thread, which only Linux has yet (see "Video backend
@@ -280,6 +281,8 @@ pub struct Player {
     size: [u32; 2],
     /// Shared by all players, so the last volume chosen sticks.
     volume: Arc<AtomicU64>,
+    /// How many times as fast it plays.
+    speed: f64,
 }
 
 impl Player {
@@ -360,6 +363,14 @@ impl Player {
         self.status_mut().volume = volume;
         self.volume.store(volume.to_bits(), Ordering::Relaxed);
         self.send(Command::Volume(volume));
+    }
+
+    /// Plays this many times as fast, at the same pitch.
+    pub fn set_speed(&mut self, speed: f64) {
+        if speed != self.speed {
+            self.speed = speed;
+            self.send(Command::Speed(speed));
+        }
     }
 
     fn load(&mut self, path: &Path) {
@@ -505,6 +516,7 @@ impl Videos {
                     status,
                     size: [0, 0],
                     volume: self.volume.clone(),
+                    speed: 1.0,
                 };
                 player.load(path);
                 entry.insert(Slot {
@@ -702,6 +714,7 @@ mod tests {
             status: Arc::default(),
             size: [0, 0],
             volume: Arc::default(),
+            speed: 1.0,
         };
         let ppp = 1.25;
         let rect = Rect::from_min_size(egui::pos2(10.3, 20.7), egui::vec2(200.45, 112.6));
