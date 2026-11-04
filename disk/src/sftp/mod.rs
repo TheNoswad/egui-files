@@ -31,7 +31,7 @@ use std::{
 use web_time::Instant;
 
 pub use file::File;
-use session::Session;
+use session::{FileChannel, Session};
 pub use wire::{Attrs, S_IFDIR, S_IFLNK, S_IFREG};
 use wire::{Reply, Writer};
 
@@ -422,6 +422,56 @@ fn start_session(
     Session::start(command, &asking)
 }
 
+/// The session to open files on: a second SFTP channel over the connection to
+/// `authority`, when it can share that connection. A server answers each
+/// channel's requests in order, so without one, listing a folder would wait
+/// its turn behind every read ahead of a big file. It never asks the user
+/// anything: failing that, files use the connection's own channel.
+fn file_session(authority: &str) -> io::Result<Arc<Session>> {
+    let main = session(authority)?;
+    if control_path().is_none() {
+        return Ok(main);
+    }
+    let may_start = !NO_CONNECTING.get();
+    let channel = {
+        // Others wait for it to start, so that all of a job's files are on
+        // the one channel: a copy on the server needs that.
+        let guard = if may_start {
+            Some(
+                main.file_channel
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner),
+            )
+        } else {
+            main.file_channel.try_lock().ok()
+        };
+        guard.and_then(|mut channel| match &*channel {
+            FileChannel::Up(session) if session.is_open() => Some(session.clone()),
+            FileChannel::Unavailable => None,
+            _ if !may_start => None,
+            _ => {
+                let started = start_file_channel(authority);
+                *channel = started
+                    .clone()
+                    .map_or(FileChannel::Unavailable, FileChannel::Up);
+                started
+            }
+        })
+    };
+    Ok(channel.unwrap_or(main))
+}
+
+fn start_file_channel(authority: &str) -> Option<Arc<Session>> {
+    let (mut extra_args, askpass) = {
+        let (pool, _) = pool();
+        (pool.extra_args.clone(), pool.askpass.clone())
+    };
+    extra_args.extend(["-o".into(), "BatchMode=yes".into()]);
+    start_session(authority, &extra_args, askpass)
+        .ok()
+        .map(Arc::new)
+}
+
 /// Connects to the computer `path` is on, if it isn't already, trying again
 /// if it failed before. Waits for the user to answer any questions.
 pub fn connect(path: &Path) -> io::Result<()> {
@@ -779,7 +829,7 @@ pub struct Open {
 }
 
 pub fn open(location: &Location, how: Open) -> io::Result<File> {
-    let session = session(&location.authority)?;
+    let session = file_session(&location.authority)?;
     let mut flags = 0;
     if how.read {
         flags |= wire::OPEN_READ;
@@ -815,10 +865,22 @@ pub fn open(location: &Location, how: Open) -> io::Result<File> {
         }
         reply => return Err(reply.error()),
     };
-    if how.write || how.append || how.truncate || how.create || how.create_new {
+    let changes = how.write || how.append || how.truncate || how.create || how.create_new;
+    if changes {
         changed(location);
     }
-    Ok(File::new(session, handle, location.clone(), how.append))
+    let known_len = if changes {
+        None
+    } else {
+        known(location, true).and_then(|attrs| attrs.size)
+    };
+    Ok(File::new(
+        session,
+        handle,
+        location.clone(),
+        how.append,
+        known_len,
+    ))
 }
 
 fn exists(session: &Session, location: &Location) -> bool {

@@ -26,6 +26,7 @@ mod dock_tab;
 #[cfg(target_os = "linux")]
 mod drag_icon;
 mod editor;
+mod exif;
 #[cfg(windows)]
 mod file_clipboard;
 mod fs;

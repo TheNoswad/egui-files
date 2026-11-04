@@ -83,7 +83,18 @@ fn lost(shared: &Shared) -> io::Error {
     io::Error::new(io::ErrorKind::ConnectionAborted, why)
 }
 
+/// The channel a connection's open files use: see [`super::file_session`].
+#[derive(Default)]
+pub enum FileChannel {
+    #[default]
+    NotYet,
+    Up(Arc<Session>),
+    /// Files share the connection's own.
+    Unavailable,
+}
+
 pub struct Session {
+    pub file_channel: Mutex<FileChannel>,
     shared: Arc<Shared>,
     input: Mutex<ChildStdin>,
     child: Arc<Mutex<Child>>,
@@ -210,6 +221,7 @@ impl Session {
             .name("sftp replies".into())
             .spawn(move || read_replies(output, &reader))?;
         let mut session = Self {
+            file_channel: Mutex::default(),
             shared,
             input: Mutex::new(input),
             child,

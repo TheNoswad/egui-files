@@ -17,6 +17,12 @@ use super::{
 
 /// The most reads asked for ahead, once reading has gone on a while.
 const MAX_READ_AHEAD: usize = 32;
+/// The most asked for by a read that may be all that's wanted (after opening
+/// or seeking): enough for a look at a file's start, without the wait and the
+/// traffic of a whole read's worth that may go unused.
+const FIRST_READ: u32 = 72 * 1024;
+/// Reads asked for at once for the rest of a file of unknown size.
+const WHOLE_FILE_READ_AHEAD: usize = 4;
 /// The most writes on their way at once.
 const MAX_WRITES_IN_FLIGHT: usize = 64;
 
@@ -26,11 +32,12 @@ pub struct File {
     location: Location,
     pos: u64,
     append: bool,
-    /// Data read but not yet taken, starting at `pos`.
+    /// The last data read, of which what's from `buffer_start` is still to
+    /// be taken; `pos` is there. What's been taken stays for seeking back.
     buffer: Vec<u8>,
     buffer_start: usize,
-    /// Reads asked for: where each starts, and its reply.
-    ahead: VecDeque<(u64, Pending)>,
+    /// Reads asked for: where each starts, how much, and its reply.
+    ahead: VecDeque<(u64, u32, Pending)>,
     /// Where the next read ahead starts.
     next_ahead: u64,
     /// How many reads to keep asked for; doubles as reading goes on.
@@ -40,6 +47,11 @@ pub struct File {
     write_error: Option<io::Error>,
     /// The end of the file, once a read reached it.
     eof: bool,
+    /// The file's size when it was opened, if that was known without asking.
+    known_len: Option<u64>,
+    wrote: bool,
+    #[cfg(test)]
+    pub(super) reads_asked: u32,
 }
 
 impl File {
@@ -48,6 +60,7 @@ impl File {
         handle: Vec<u8>,
         location: Location,
         append: bool,
+        known_len: Option<u64>,
     ) -> Self {
         Self {
             session,
@@ -63,11 +76,30 @@ impl File {
             writes: VecDeque::new(),
             write_error: None,
             eof: false,
+            known_len,
+            wrote: false,
+            #[cfg(test)]
+            reads_asked: 0,
         }
     }
 
     pub fn location(&self) -> &Location {
         &self.location
+    }
+
+    #[cfg(all(test, unix))]
+    pub(super) fn session_max_read(&self) -> u32 {
+        self.session.max_read
+    }
+
+    #[cfg(all(test, unix))]
+    pub(super) fn on_session(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.session, &other.session)
+    }
+
+    #[cfg(all(test, unix))]
+    pub(super) fn is_on(&self, session: &Arc<Session>) -> bool {
+        Arc::ptr_eq(&self.session, session)
     }
 
     fn buffered(&self) -> &[u8] {
@@ -86,14 +118,26 @@ impl File {
     }
 
     fn ask_ahead(&mut self) -> io::Result<()> {
-        while self.ahead.len() < self.window {
-            let len = self.session.max_read;
+        // Past the end, only to find out it's the end when nothing else is
+        // left to ask for: the file may have grown.
+        while self.ahead.len() < self.window
+            && (self.ahead.is_empty() || self.known_len.is_none_or(|len| self.next_ahead < len))
+        {
+            let len = if self.window == 1 {
+                self.session.max_read.min(FIRST_READ)
+            } else {
+                self.session.max_read
+            };
+            #[cfg(test)]
+            {
+                self.reads_asked += 1;
+            }
             let request = Writer::default()
                 .bytes(&self.handle)
                 .u64(self.next_ahead)
                 .u32(len);
             let pending = self.session.request(wire::READ, request)?;
-            self.ahead.push_back((self.next_ahead, pending));
+            self.ahead.push_back((self.next_ahead, len, pending));
             self.next_ahead += u64::from(len);
         }
         Ok(())
@@ -133,6 +177,7 @@ impl File {
 
     pub fn set_len(&mut self, len: u64) -> io::Result<()> {
         self.drop_read_ahead();
+        self.known_len = None;
         self.set_attrs(&Attrs {
             size: Some(len),
             ..Attrs::default()
@@ -215,18 +260,22 @@ impl Read for File {
                 return Ok(0);
             }
             self.ask_ahead()?;
-            let (offset, pending) = self.ahead.pop_front().expect("just asked");
+            let (offset, asked, pending) = self.ahead.pop_front().expect("just asked");
             debug_assert_eq!(offset, self.pos);
             match pending.wait()? {
                 Reply::Data(data) => {
                     let len = data.len() as u64;
                     self.buffer = data;
                     self.buffer_start = 0;
-                    if len < u64::from(self.session.max_read) {
+                    if len < u64::from(asked) {
                         // A short read: what's asked for after it starts
-                        // too late, so ask again from where this ends.
+                        // too late, so ask again from where this ends,
+                        // unless that's the end anyway.
                         self.ahead.clear();
                         self.next_ahead = offset + len;
+                        if self.known_len == Some(offset + len) {
+                            self.eof = true;
+                        }
                     } else {
                         self.window = (self.window * 2).min(MAX_READ_AHEAD);
                     }
@@ -242,6 +291,30 @@ impl Read for File {
             }
         }
     }
+
+    /// All the rest is wanted, so it's asked for at once where its size is
+    /// known, rather than working up to it round trip by round trip.
+    fn read_to_end(&mut self, out: &mut Vec<u8>) -> io::Result<usize> {
+        let reads = match self.known_len {
+            Some(len) => usize::try_from(
+                len.saturating_sub(self.pos)
+                    .div_ceil(u64::from(self.session.max_read)),
+            )
+            .unwrap_or(MAX_READ_AHEAD),
+            None => WHOLE_FILE_READ_AHEAD,
+        };
+        self.window = self.window.max(reads.clamp(2, MAX_READ_AHEAD));
+        Read::read_to_end(&mut Reads(self), out)
+    }
+}
+
+/// std's way of reading to the end, by [`File`]'s `read`.
+struct Reads<'a>(&'a mut File);
+
+impl Read for Reads<'_> {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        self.0.read(out)
+    }
 }
 
 impl Write for File {
@@ -249,7 +322,7 @@ impl Write for File {
         if let Some(err) = self.write_error.take() {
             return Err(err);
         }
-        if !self.ahead.is_empty() || !self.buffered().is_empty() {
+        if !self.ahead.is_empty() || !self.buffer.is_empty() {
             self.drop_read_ahead();
         }
         let n = data.len().min(self.session.max_write as usize);
@@ -264,6 +337,8 @@ impl Write for File {
             .bytes(&data[..n]);
         let pending = self.session.request(wire::WRITE, request)?;
         self.writes.push_back(pending);
+        self.wrote = true;
+        self.known_len = None;
         if !self.append {
             self.pos += n as u64;
         }
@@ -307,6 +382,14 @@ impl Seek for File {
             self.pos = target;
             return Ok(target);
         }
+        // Back within it, as when something looks at the start of a file to
+        // tell what it is, and then reads it from the top.
+        let behind = self.pos.checked_sub(target);
+        if let Some(back) = behind.filter(|&n| n <= self.buffer_start as u64) {
+            self.buffer_start -= back as usize;
+            self.pos = target;
+            return Ok(target);
+        }
         self.finish_writes()?;
         self.pos = target;
         self.drop_read_ahead();
@@ -320,9 +403,10 @@ impl Drop for File {
         if let Ok(pending) = self
             .session
             .request(wire::CLOSE, Writer::default().bytes(&self.handle))
+            && self.wrote
         {
             // Wait, so that once a file's dropped, it's all on the server
-            // for whoever reads it next.
+            // for whoever reads it next. Nothing's riding on it otherwise.
             let _ = pending.wait();
         }
     }

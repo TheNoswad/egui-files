@@ -705,6 +705,16 @@ impl Read for File {
                 .read(buf),
         }
     }
+
+    fn read_to_end(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
+        match &mut self.0 {
+            Handle::Local(file) => file.read_to_end(buf),
+            Handle::Remote(file) => file
+                .get_mut()
+                .unwrap_or_else(PoisonError::into_inner)
+                .read_to_end(buf),
+        }
+    }
 }
 
 impl Write for File {

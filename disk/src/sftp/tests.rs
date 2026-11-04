@@ -414,3 +414,195 @@ fn failures_say_why() {
     let err = disk::metadata(&root).unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::NotConnected);
 }
+
+/// A folder and server for testing without a network: "ssh" here just runs
+/// the machine's SFTP server, refusing a second channel to `nochannel`. `None`
+/// without one, or when the tests are set up for a real server.
+#[cfg(unix)]
+fn local_server(name: &str) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    if std::env::var_os("EGUI_FILES_SFTP_TEST_CONFIG").is_some() {
+        return None;
+    }
+    let program = ["/usr/lib/ssh/sftp-server", "/usr/lib/openssh/sftp-server"]
+        .into_iter()
+        .find(|path| Path::new(path).exists())?;
+    let dir = std::env::temp_dir().join(format!("egui-files-sftp-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    static SET_UP: Once = Once::new();
+    SET_UP.call_once(|| {
+        let script = std::env::temp_dir().join(format!(
+            "egui-files-fake-ssh-{}",
+            std::process::id()
+        ));
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\ncase \"$*\" in *BatchMode=yes*nochannel*) exit 1;; esac\nexec {program}\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        set_ssh_program(&script);
+        set_askpass_program("/bin/false");
+    });
+    Some(dir)
+}
+
+#[cfg(unix)]
+fn location_in(host: &str, file: &Path) -> Location {
+    parse(&url(host, file.to_str().unwrap())).unwrap()
+}
+
+#[cfg(unix)]
+fn test_data(len: u32) -> Vec<u8> {
+    (0..len).map(|i| (i * 7 % 251) as u8).collect()
+}
+
+#[cfg(unix)]
+#[test]
+fn looking_at_a_files_start_keeps_what_was_read() {
+    let Some(dir) = local_server("look") else {
+        return;
+    };
+    let path = dir.join("big.bin");
+    let data = test_data(3_000_017);
+    std::fs::write(&path, &data).unwrap();
+    let mut file = open(
+        &location_in("local", &path),
+        Open {
+            read: true,
+            ..Open::default()
+        },
+    )
+    .unwrap();
+    let mut start = [0; 16];
+    file.read_exact(&mut start).unwrap();
+    assert_eq!(file.seek(SeekFrom::Start(0)).unwrap(), 0);
+    let mut again = [0; 1000];
+    file.read_exact(&mut again).unwrap();
+    assert_eq!(again, data[..1000]);
+    assert_eq!(file.reads_asked, 1, "the first read was enough");
+    // And it all still lines up, reading on from there.
+    let mut rest = Vec::new();
+    file.read_to_end(&mut rest).unwrap();
+    assert_eq!(rest, data[1000..]);
+    drop(file);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn seeking_back_after_a_write_doesnt_read_what_was_there() {
+    let Some(dir) = local_server("rewrite") else {
+        return;
+    };
+    let path = dir.join("file.bin");
+    std::fs::write(&path, test_data(1000)).unwrap();
+    let mut file = open(
+        &location_in("local", &path),
+        Open {
+            read: true,
+            write: true,
+            ..Open::default()
+        },
+    )
+    .unwrap();
+    let mut first = [0; 10];
+    file.read_exact(&mut first).unwrap();
+    file.write_all(b"new").unwrap();
+    file.seek(SeekFrom::Start(10)).unwrap();
+    let mut read = [0; 3];
+    file.read_exact(&mut read).unwrap();
+    assert_eq!(&read, b"new");
+    drop(file);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn reading_all_of_a_listed_file_needs_one_round_of_requests() {
+    let Some(dir) = local_server("whole") else {
+        return;
+    };
+    let path = dir.join("big.bin");
+    let data = test_data(1_500_001);
+    std::fs::write(&path, &data).unwrap();
+    let location = location_in("local", &path);
+    // Its size comes from here, as from a listing.
+    assert_eq!(stat(&location, true).unwrap().size, Some(data.len() as u64));
+    let mut file = open(
+        &location,
+        Open {
+            read: true,
+            ..Open::default()
+        },
+    )
+    .unwrap();
+    let mut read = Vec::new();
+    file.read_to_end(&mut read).unwrap();
+    assert_eq!(read, data);
+    let session_max = u64::from(file.session_max_read());
+    let needed = (data.len() as u64).div_ceil(session_max) as u32;
+    assert_eq!(file.reads_asked, needed, "and nothing to find the end");
+    drop(file);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn files_have_a_channel_of_their_own_and_copy_on_it() {
+    let Some(dir) = local_server("channel") else {
+        return;
+    };
+    let (from, to) = (dir.join("from"), dir.join("to"));
+    std::fs::write(&from, b"data").unwrap();
+    let mut source = open(
+        &location_in("local", &from),
+        Open {
+            read: true,
+            ..Open::default()
+        },
+    )
+    .unwrap();
+    let mut target = open(
+        &location_in("local", &to),
+        Open {
+            write: true,
+            create: true,
+            ..Open::default()
+        },
+    )
+    .unwrap();
+    let main = session("local").unwrap();
+    assert!(source.on_session(&target) && !source.is_on(&main));
+    assert!(source.copy_on_server(&mut target, 0, 4).unwrap());
+    drop((source, target));
+    assert_eq!(std::fs::read(&to).unwrap(), b"data");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn files_share_the_connection_without_a_channel() {
+    let Some(dir) = local_server("nochannel") else {
+        return;
+    };
+    let path = dir.join("file");
+    std::fs::write(&path, b"data").unwrap();
+    let mut file = open(
+        &location_in("nochannel", &path),
+        Open {
+            read: true,
+            ..Open::default()
+        },
+    )
+    .unwrap();
+    assert!(file.is_on(&session("nochannel").unwrap()));
+    let mut read = Vec::new();
+    file.read_to_end(&mut read).unwrap();
+    assert_eq!(read, b"data");
+    drop(file);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
