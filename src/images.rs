@@ -119,8 +119,8 @@ struct Done {
 
 #[derive(Default)]
 struct Jobs {
-    /// Pictures to decode, newest last.
-    waiting: Vec<Key>,
+    /// Pictures to decode with the frame that asked for them, newest last.
+    waiting: Vec<(u64, Key)>,
     /// Provisional pictures to replace, newest last.
     to_sharpen: Vec<Key>,
     /// One is being replaced, until the UI has it: it may be on screen and
@@ -131,8 +131,12 @@ struct Jobs {
 impl Jobs {
     /// The next job, if there's one to start, and whether it's to sharpen.
     fn next(&mut self) -> Option<(Key, bool)> {
-        // Newest first: the most recent requests are what is on screen.
-        if let Some(key) = self.waiting.pop() {
+        // The newest frame's first, as what it asked for is what's on screen;
+        // and in the order it asked, as views draw in reading order, so what's
+        // on screen fills in that way.
+        if let Some(&(newest, _)) = self.waiting.last() {
+            let first = self.waiting.partition_point(|(frame, _)| *frame < newest);
+            let (_, key) = self.waiting.remove(first);
             return Some((key, false));
         }
         if self.sharpening {
@@ -309,12 +313,16 @@ impl ImageCache {
             let mut jobs = self.queue.jobs.lock().expect("image queue poisoned");
             let jobs = &mut jobs.waiting;
             #[cfg(target_arch = "wasm32")]
+            let here = |key: &Key| crate::demo::is_here(&key.path);
+            #[cfg(not(target_arch = "wasm32"))]
+            let here = |_: &Key| true;
+            // In the same order as `Jobs::next`.
+            let (newest, _) = jobs.iter().rev().find(|(_, key)| here(key))?;
+            let newest = *newest;
             let index = jobs
                 .iter()
-                .rposition(|key| crate::demo::is_here(&key.path))?;
-            #[cfg(not(target_arch = "wasm32"))]
-            let index = jobs.len().checked_sub(1)?;
-            jobs.remove(index)
+                .position(|(frame, key)| *frame == newest && here(key))?;
+            jobs.remove(index).1
         };
         let result = decode(&key, false, &self.queue);
         self.ctx.request_repaint();
@@ -455,11 +463,11 @@ impl ImageCache {
         let queue = self.queue_for(&key.path);
         let mut jobs = queue.jobs.lock().expect("image queue poisoned");
         let jobs = &mut jobs.waiting;
-        jobs.push(key);
+        jobs.push((self.frame, key));
         if jobs.len() > MAX_QUEUE {
             let excess = jobs.len() - MAX_QUEUE;
-            let dropped: Vec<Key> = jobs.drain(..excess).collect();
-            for key in dropped {
+            let dropped: Vec<(u64, Key)> = jobs.drain(..excess).collect();
+            for (_, key) in dropped {
                 // Forget it so it is requested again if it comes back into view.
                 self.slots.remove(&key);
             }
@@ -767,7 +775,7 @@ mod tests {
             max_side: THUMBNAIL_SIZE,
         };
         let mut jobs = Jobs {
-            waiting: vec![key("old"), key("new")],
+            waiting: vec![(1, key("old")), (2, key("new"))],
             to_sharpen: vec![key("a"), key("b")],
             sharpening: false,
         };
@@ -775,10 +783,37 @@ mod tests {
         assert_eq!(jobs.next(), Some((key("old"), false)));
         assert_eq!(jobs.next(), Some((key("b"), true)));
         assert_eq!(jobs.next(), None, "one's still going");
-        jobs.waiting.push(key("another"));
+        jobs.waiting.push((3, key("another")));
         assert_eq!(jobs.next(), Some((key("another"), false)));
         jobs.sharpening = false;
         assert_eq!(jobs.next(), Some((key("a"), true)));
+    }
+
+    /// What's on screen fills in as it's read, and what's scrolled to comes
+    /// ahead of what's been scrolled past.
+    #[test]
+    fn a_frames_pictures_load_in_the_order_it_asked_for_them() {
+        let key = |name: &str| Key {
+            path: PathBuf::from(name),
+            modified: None,
+            max_side: THUMBNAIL_SIZE,
+        };
+        let mut jobs = Jobs {
+            waiting: vec![
+                (1, key("first screen, top")),
+                (1, key("first screen, bottom")),
+                (2, key("scrolled to, top")),
+                (2, key("scrolled to, bottom")),
+            ],
+            to_sharpen: Vec::new(),
+            sharpening: false,
+        };
+        let mut next = || jobs.next().map(|(key, _)| key.path);
+        assert_eq!(next(), Some("scrolled to, top".into()));
+        assert_eq!(next(), Some("scrolled to, bottom".into()));
+        assert_eq!(next(), Some("first screen, top".into()));
+        assert_eq!(next(), Some("first screen, bottom".into()));
+        assert_eq!(next(), None);
     }
 
     #[test]
