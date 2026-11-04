@@ -20,9 +20,10 @@ use super::{
     images::resolve,
     layout::{
         self, CodeSpans, Fonts, GalleyCache, Hit, ImageSizes, Inputs, Item, Layout, Params,
-        TextItem, Theme, Widget, row_rects,
+        PlacedField, TextItem, Theme, Widget, row_rects,
     },
     parse::{self, BlockKind, Document, Link, Stats, Task},
+    wysiwyg::{Editable, field_at},
 };
 use crate::editor::highlight::{self, Highlighter};
 
@@ -49,6 +50,13 @@ pub enum Click {
         source: Option<std::ops::Range<usize>>,
         word: Option<(String, usize)>,
     },
+    /// Put the page's cursor here, taking the selection there if `extend`.
+    Caret {
+        offset: usize,
+        extend: bool,
+    },
+    /// Select the word around here.
+    SelectWord(usize),
 }
 
 /// A block of the document being edited in place, as its markdown.
@@ -81,6 +89,19 @@ pub struct Options<'a> {
     pub compact: bool,
     /// What to mark as found, and which of it is current.
     pub hits: Option<(&'a [Hit], Option<usize>)>,
+    /// The cursor in the page, when its text is being edited.
+    pub caret: Option<Caret>,
+}
+
+/// Where the cursor and selection are, in the source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Caret {
+    pub anchor: usize,
+    pub head: usize,
+    /// It has no block to be in, and gets a line of its own here.
+    pub gap: Option<usize>,
+    /// What takes the keys while the page is being edited.
+    pub focus: Id,
 }
 
 /// A document's parse, layout and what's being highlighted for it.
@@ -111,6 +132,10 @@ pub struct MdView {
     drawings: Vec<String>,
     atlas_fill: f32,
     atlas_generation: u64,
+    /// The pointer is selecting in the page being edited.
+    dragging_caret: bool,
+    /// Where the page's top left was last drawn, on the screen.
+    pub page_origin: Pos2,
 }
 
 /// A picture shown large, over everything.
@@ -165,6 +190,27 @@ impl MdView {
         self.parsed = Some(Arc::from(text));
         self.parsed_at = Some(Instant::now());
         self.inputs = None;
+    }
+
+    /// Whether what's parsed and laid out is this text.
+    pub fn is_current(&self, text: &str) -> bool {
+        self.parsed.as_deref() == Some(text) && self.inputs.is_some()
+    }
+
+    /// Where to scroll so the cursor at this source offset shows, if it doesn't.
+    pub fn offset_to_show(&self, text: &str, offset: usize) -> Option<f32> {
+        let fields = self.layout.placed_fields();
+        let refs: Vec<_> = fields.iter().map(|placed| placed.field).collect();
+        let (index, _) = super::wysiwyg::field_at(&refs, offset)?;
+        let rect = fields[index].cursor_rect(text, offset);
+        let (top, bottom) = (rect.min.y + MARGIN, rect.max.y + MARGIN);
+        if top < self.offset {
+            Some((top - MARGIN).max(0.0))
+        } else if bottom > self.offset + self.viewport_height {
+            Some(bottom + MARGIN - self.viewport_height)
+        } else {
+            None
+        }
     }
 
     /// Whether to show the bar offering to load remote images.
@@ -254,6 +300,8 @@ impl MdView {
             fold_generation: self.fold_generation,
             allow_remote: options.allow_remote,
             editing,
+            wysiwyg: options.caret.is_some(),
+            gap: options.caret.and_then(|caret| caret.gap),
         };
         if self.inputs.as_ref() == Some(&inputs) {
             return;
@@ -282,6 +330,7 @@ impl MdView {
                 code_spans: &self.code_spans,
                 toggled: &self.toggled,
                 previous_drawings: &self.drawings,
+                source: self.parsed.as_deref(),
             },
         );
         // What was being typed a moment ago needn't be drawn anymore.
@@ -347,12 +396,45 @@ impl MdView {
                     hits: options.hits,
                     opened: Some(&mut opened),
                     editor: editor.as_deref_mut(),
+                    caret: options.caret.map(|caret| PaintedCaret {
+                        caret,
+                        on: blink_on(ui.ctx()),
+                        source: self.parsed.as_deref().unwrap_or_default(),
+                        field: self
+                            .layout
+                            .placed_fields()
+                            .iter()
+                            .map(|p| p.field)
+                            .collect(),
+                    }),
                 },
             );
         });
         self.offset = output.state.offset.y;
         self.viewport_height = output.inner_rect.height();
-        if options.editable && editor.is_none() && !self.lightbox_is_open() {
+        self.page_origin = page_origin;
+        if let Some(caret) = options.caret {
+            clicks.extend(self.caret_pointer(ui, output.inner_rect, page_origin));
+            take_keys(
+                ui,
+                output.inner_rect,
+                page_origin,
+                caret,
+                &self.layout,
+                self.parsed.as_deref(),
+            );
+            // A click takes the keys from what it isn't on, and the text on the
+            // page is on top of what has them.
+            let clicked_page = ui.input(|i| {
+                i.pointer.any_click()
+                    && i.pointer
+                        .interact_pos()
+                        .is_some_and(|pos| output.inner_rect.contains(pos))
+            });
+            if clicked_page {
+                ui.memory_mut(|memory| memory.request_focus(caret.focus));
+            }
+        } else if options.editable && editor.is_none() && !self.lightbox_is_open() {
             clicks.extend(self.double_clicked(ui, output.inner_rect, page_origin));
         }
         if let Some(key) = opened {
@@ -398,6 +480,7 @@ impl MdView {
                 hits: options.hits,
                 opened: None,
                 editor: None,
+                caret: None,
             },
         );
         clicks
@@ -426,6 +509,82 @@ impl MdView {
         Some(Click::EditBlock {
             source: self.layout.block_at(on_page.y).cloned(),
             word: self.layout.word_at(on_page),
+        })
+    }
+
+    /// What the pointer does to the cursor in the page: pressing puts it there,
+    /// dragging selects, and a double-click selects a word. A double-click on
+    /// what can't be edited on the page opens it as its markdown.
+    fn caret_pointer(&mut self, ui: &Ui, viewport: Rect, origin: Pos2) -> Option<Click> {
+        let touch = crate::touch::is_touch(ui.ctx());
+        let (pressed, down, pos, double, shift, command) = ui.input(|i| {
+            let pointer = &i.pointer;
+            (
+                // On a touchscreen a touch that moves is a scroll.
+                if touch {
+                    pointer.primary_clicked()
+                } else {
+                    pointer.primary_pressed()
+                },
+                pointer.primary_down(),
+                pointer.interact_pos(),
+                pointer.button_double_clicked(egui::PointerButton::Primary),
+                i.modifiers.shift,
+                i.modifiers.command,
+            )
+        });
+        if !down {
+            self.dragging_caret = false;
+        }
+        let pos = pos?;
+        let on_page = pos - origin.to_vec2();
+        if self.dragging_caret && !touch {
+            let offset = self.layout.offset_at_pos(on_page)?;
+            return Some(Click::Caret {
+                offset,
+                extend: true,
+            });
+        }
+        let in_front = ui
+            .ctx()
+            .layer_id_at(pos)
+            .is_some_and(|layer| layer != ui.layer_id());
+        // The scroll bar is at the right of the viewport.
+        let over_page = viewport.contains(pos) && pos.x < viewport.max.x - 12.0;
+        if in_front || !over_page || self.layout.is_button_at(on_page) {
+            return None;
+        }
+        // Following a link takes Ctrl; ticking a task is what it always is.
+        let on_link = self.layout.is_control_at(on_page) && !self.layout.is_widget_at(on_page);
+        if self.layout.is_widget_at(on_page) || (on_link && command) {
+            return None;
+        }
+        let on_text = self
+            .layout
+            .placed_fields()
+            .iter()
+            .any(|placed| placed.rect().contains(on_page));
+        if double {
+            self.dragging_caret = false;
+            if on_text {
+                return Some(Click::SelectWord(self.layout.offset_at_pos(on_page)?));
+            }
+            return self
+                .layout
+                .block_at(on_page.y)
+                .cloned()
+                .map(|source| Click::EditBlock {
+                    source: Some(source),
+                    word: None,
+                });
+        }
+        if !pressed {
+            return None;
+        }
+        self.dragging_caret = !touch;
+        Some(Click::Caret {
+            offset: self.layout.offset_at_pos(on_page)?,
+            extend: shift,
         })
     }
 
@@ -573,6 +732,74 @@ struct Painting<'a> {
     /// Takes the picture clicked on, where they can be opened.
     opened: Option<&'a mut Option<String>>,
     editor: Option<&'a mut BlockEditor>,
+    caret: Option<PaintedCaret<'a>>,
+}
+
+/// The cursor in the page, for drawing.
+struct PaintedCaret<'a> {
+    caret: Caret,
+    /// It blinks.
+    on: bool,
+    source: &'a str,
+    field: Vec<&'a Editable>,
+}
+
+/// Blinks with egui's own timing, and asks to be drawn when that changes.
+fn blink_on(ctx: &Context) -> bool {
+    const ON: f64 = 0.8;
+    const OFF: f64 = 0.4;
+    let time = ctx.input(|i| i.time) % (ON + OFF);
+    let (on, left) = if time < ON {
+        (true, ON - time)
+    } else {
+        (false, ON + OFF - time)
+    };
+    ctx.request_repaint_after(std::time::Duration::from_secs_f64(left));
+    on
+}
+
+/// Keeps the keys for the page, and tells the system where text would go,
+/// which is what brings up an on-screen keyboard.
+fn take_keys(
+    ui: &Ui,
+    viewport: Rect,
+    origin: Pos2,
+    caret: Caret,
+    layout: &Layout,
+    source: Option<&str>,
+) {
+    let response = ui.interact(viewport, caret.focus, Sense::focusable_noninteractive());
+    if !response.has_focus() {
+        return;
+    }
+    ui.memory_mut(|memory| {
+        memory.set_focus_lock_filter(
+            caret.focus,
+            egui::EventFilter {
+                tab: true,
+                horizontal_arrows: true,
+                vertical_arrows: true,
+                escape: false,
+            },
+        );
+    });
+    let fields = layout.placed_fields();
+    let refs: Vec<&Editable> = fields.iter().map(|placed| placed.field).collect();
+    let at = field_at(&refs, caret.head).map(|(index, _)| &fields[index]);
+    let cursor = at.map_or(viewport, |placed| {
+        placed
+            .cursor_rect(source.unwrap_or_default(), caret.head)
+            .translate(origin.to_vec2())
+    });
+    ui.ctx().output_mut(|output| {
+        output.mutable_text_under_cursor = true;
+        output.ime = Some(egui::output::IMEOutput {
+            rect: viewport,
+            cursor_rect: cursor,
+            purpose: Default::default(),
+            should_interrupt_composition: false,
+        });
+    });
 }
 
 /// Draws the items on screen. While text is selected, all of it goes through
@@ -812,9 +1039,19 @@ fn paint_text(
         Sense::click_and_drag()
     };
     let response = ui.interact(rect, id, sense);
+    let editing = painting.caret.is_some();
+    let command = ui.input(|i| i.modifiers.command);
+    // While the page is being edited, a click there puts the cursor there.
     let hovered_link = response
         .hover_pos()
+        .filter(|_| !editing || command)
         .and_then(|pointer| text.link_at(pointer - origin.to_vec2()));
+    if on_screen {
+        paint_selection(ui, text, pos, painting);
+    }
+    if editing && text.editable.is_some() && response.hovered() && hovered_link.is_none() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
+    }
     let mut image_under = None;
     if on_screen {
         for image in &text.images {
@@ -831,8 +1068,9 @@ fn paint_text(
                 Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
                 Color32::WHITE,
             );
-            // A formula is part of the line: it has nothing more to show.
-            if ui.rect_contains_pointer(image_rect) && !is_drawing(&key) {
+            // A formula is part of the line: it has nothing more to show. And
+            // while editing, a click on a picture is a place for the cursor.
+            if ui.rect_contains_pointer(image_rect) && !is_drawing(&key) && !editing {
                 image_under = Some(key);
                 if !image.tip.is_empty() {
                     response.clone().on_hover_text(&image.tip);
@@ -840,9 +1078,12 @@ fn paint_text(
             }
         }
     }
-    if touch {
+    if touch || editing {
         ui.painter()
             .galley(pos, text.galley.clone(), Color32::PLACEHOLDER);
+        if on_screen {
+            paint_caret(ui, text, origin, painting);
+        }
     } else {
         egui::text_selection::LabelSelectionState::label_text_selection(
             ui,
@@ -882,6 +1123,55 @@ fn paint_text(
             new_tab: true,
         });
     }
+}
+
+/// What's selected in this text, behind it.
+fn paint_selection(ui: &Ui, text: &TextItem, pos: Pos2, painting: &Painting<'_>) {
+    let (Some(painted), Some(field)) = (&painting.caret, &text.editable) else {
+        return;
+    };
+    let (anchor, head) = (painted.caret.anchor, painted.caret.head);
+    if anchor == head {
+        return;
+    }
+    let (min, max) = (anchor.min(head), anchor.max(head));
+    if max < field.low() || min > field.high() {
+        return;
+    }
+    let chars = field.char_at(min)..field.char_at(max);
+    if chars.is_empty() {
+        return;
+    }
+    let fill = ui.visuals().selection.bg_fill;
+    for rect in row_rects(&text.galley, &chars) {
+        ui.painter()
+            .rect_filled(rect.translate(pos.to_vec2()), 0.0, fill);
+    }
+}
+
+/// The cursor, if it's in this text.
+fn paint_caret(ui: &Ui, text: &TextItem, origin: Pos2, painting: &Painting<'_>) {
+    let (Some(painted), Some(field)) = (&painting.caret, &text.editable) else {
+        return;
+    };
+    let head = painted.caret.head;
+    let Some((_, at)) = field_at(&painted.field, head) else {
+        return;
+    };
+    if !std::ptr::eq(at, field) || !painted.on {
+        return;
+    }
+    if !ui.memory(|memory| memory.has_focus(painted.caret.focus)) {
+        return;
+    }
+    let placed = PlacedField {
+        text,
+        field,
+        origin: origin.to_vec2(),
+    };
+    let rect = placed.cursor_rect(painted.source, head);
+    let stroke = ui.visuals().text_cursor.stroke;
+    ui.painter().vline(rect.min.x, rect.y_range(), stroke);
 }
 
 fn paint_widget(
@@ -989,6 +1279,7 @@ mod tests {
             scroll_to: None,
             compact: false,
             hits: None,
+            caret: None,
         };
         let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
             // As a click in the menus does it: before the page, in the same pass.

@@ -64,7 +64,11 @@
 - [ ] A diagram can't be stopped once started: a big one keeps a core busy (flowcharts: 200 nodes, 15 s), and on the web stops the page, hence fewer lines allowed there (`diagram.rs`). A worker would fix both. Mindmaps overlap their nodes, and pie titles sit close to the pie: the crate's layout
 - [x] Editing while reading: double-click a block in Preview to edit its markdown in place, with the formatting commands; a double-click below the last one adds a paragraph (`block_edit.rs`). One splice of the source per block, and one undo step
 - [ ] Editing a list or quote is of the whole of it: smaller blocks, down to the item, would jump less
-- [ ] WYSIWYG: edit the rendered text itself, with a cursor in the page rather than its markdown in a box. Still only splices the source: untouched bytes never change. Double-click block editing stays. Live view isn't needed: block editing covers it
+- [x] WYSIWYG: a mode editing the rendered text itself, with a cursor in the page (`wysiwyg.rs`, `editor/page.rs`). Each char knows the bytes it came from, every key is a splice of the source, and untouched bytes never change. What's typed is markdown as written, so `**` and `# ` work. Ctrl+click follows links; a double-click on what isn't text, like a formula, opens its markdown in place. Live view isn't needed
+- [ ] WYSIWYG, what isn't editable on the page: callout titles and frontmatter (double-click them), and empty table cells, which have no place in the source to go by
+- [ ] WYSIWYG: text being composed with an input method only shows once it's committed; check an IME, and the on-screen keyboard on Android and phones (only tried with a keyboard, on X11 and in Firefox)
+- [ ] WYSIWYG on touchscreens: a tap places the cursor, but nothing selects yet, and the cursor has no handle. Dragging past the edge of the view doesn't scroll
+- [ ] WYSIWYG: the setting for what "Edit" opens has no place in the settings to choose this mode (`Prefs::edit_mode`); find looks through the source there, as in Split
 - [ ] Phase 6: updating links in documents when files move in the app
 - [ ] Raw HTML: a subset (img, br, details/summary, kbd, sub/sup, center); shown as written, dimmed, until then
 - [ ] Export (HTML, rich text, PDF)

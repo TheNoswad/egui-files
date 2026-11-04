@@ -15,13 +15,14 @@ pub mod math;
 pub mod parse;
 pub mod table;
 pub mod view;
+pub mod wysiwyg;
 
 use serde::{Deserialize, Serialize};
 
 pub use self::{
     images::Images,
     links::{Target, is_markdown},
-    view::{BlockEditor, Click, MdView, Options},
+    view::{BlockEditor, Caret, Click, MdView, Options},
 };
 
 /// What to do about pictures in documents that are on other servers.
@@ -41,6 +42,8 @@ pub enum Mode {
     Split,
     #[default]
     Preview,
+    /// The page itself is what's edited.
+    Wysiwyg,
 }
 
 impl Mode {
@@ -49,6 +52,7 @@ impl Mode {
             Self::Source => "Source",
             Self::Split => "Split",
             Self::Preview => "Preview",
+            Self::Wysiwyg => "WYSIWYG",
         }
     }
 

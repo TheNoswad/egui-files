@@ -174,6 +174,8 @@ pub struct InlineImage {
     pub title: String,
     /// Where its [`IMAGE_CHAR`] is in the text.
     pub at: usize,
+    /// The whole of it, in the source.
+    pub source: Range<usize>,
 }
 
 /// How much there is to read.
@@ -715,6 +717,7 @@ impl Builder<'_> {
                         alt,
                         title: title.to_string(),
                         at,
+                        source: range.clone(),
                     });
                     out.push(IMAGE_CHAR.encode_utf8(&mut placeholder), range, style, link);
                 }

@@ -216,6 +216,7 @@ pub fn show(
                         scroll_to: None,
                         compact: true,
                         hits: None,
+                        caret: None,
                     };
                     ui.with_layout(Layout::top_down(Align::Min), |ui| {
                         let id = egui::Id::new(("preview-markdown", &entry.path));

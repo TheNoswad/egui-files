@@ -22,8 +22,10 @@ use super::{
     diagram::Colors,
     drawing::{self, svg_color},
     parse::{
-        Block, BlockKind, Callout, CalloutFold, Document, IMAGE_CHAR, Inlines, Link, Style, Task,
+        Block, BlockKind, Callout, CalloutFold, Document, IMAGE_CHAR, Inlines, Link, Run, Style,
+        Task,
     },
+    wysiwyg::{self, Editable, FieldKind},
 };
 use crate::editor::highlight::{self, LineSpans};
 
@@ -226,6 +228,8 @@ pub struct TextItem {
     pub links: Vec<(Range<usize>, Link)>,
     /// Images over the text's placeholders.
     pub images: Vec<PlacedImage>,
+    /// Where its chars came from, when the page is being edited.
+    pub editable: Option<Editable>,
 }
 
 impl TextItem {
@@ -388,6 +392,11 @@ pub struct Inputs {
     pub allow_remote: bool,
     /// The source range being edited, and how tall its editor is.
     pub editing: Option<(Range<usize>, f32)>,
+    /// Whether the page's text is being edited: chars then know where they
+    /// came from.
+    pub wysiwyg: bool,
+    /// A cursor with no block to be in, on a line of its own there.
+    pub gap: Option<usize>,
 }
 
 #[derive(Default)]
@@ -420,6 +429,21 @@ impl Layout {
         self.items.iter().any(|item| match item {
             Item::Widget { rect, .. } => rect.contains(pos),
             Item::Text(text) => text.link_at(pos).is_some(),
+            _ => false,
+        })
+    }
+
+    /// Whether this point is on a tick box or a fold.
+    pub fn is_widget_at(&self, pos: egui::Pos2) -> bool {
+        self.items
+            .iter()
+            .any(|item| matches!(item, Item::Widget { rect, .. } if rect.contains(pos)))
+    }
+
+    /// Whether this point is on a button that shows over a block.
+    pub fn is_button_at(&self, pos: egui::Pos2) -> bool {
+        self.items.iter().any(|item| match item {
+            Item::CopyCode { rect, .. } | Item::Enlarge { rect, .. } => rect.contains(pos),
             _ => false,
         })
     }
@@ -481,6 +505,215 @@ impl Layout {
         let along = (y - from_y) / (to_y - from_y).max(1.0);
         from_source + ((to_source - from_source) as f32 * along.clamp(0.0, 1.0)) as usize
     }
+}
+
+/// Text that can be edited, and where it is on the page.
+pub struct PlacedField<'a> {
+    pub text: &'a TextItem,
+    pub field: &'a Editable,
+    /// What its position is relative to: a sideways scroller's start.
+    pub origin: Vec2,
+}
+
+impl PlacedField<'_> {
+    /// Its text's rectangle on the page.
+    pub fn rect(&self) -> Rect {
+        self.text.rect().translate(self.origin)
+    }
+
+    /// The char nearest this point on the page.
+    pub fn char_at_pos(&self, pos: egui::Pos2) -> usize {
+        let local = pos - self.text.pos - self.origin;
+        self.text.galley.cursor_from_pos(local).index.0
+    }
+
+    /// Where the cursor shows at this source offset, on the page. Spaces
+    /// typed after the text don't show, but the cursor should move for them.
+    pub fn cursor_rect(&self, source: &str, offset: usize) -> Rect {
+        let mut cursor = CCursor::new(self.field.char_at(offset));
+        cursor.prefer_next_row = true;
+        let mut rect = self.text.galley.pos_from_cursor(cursor);
+        if let Some(after) = source.get(self.field.high()..offset) {
+            let spaces = after.chars().filter(|c| *c == ' ').count() as f32;
+            rect = rect.translate(egui::vec2(spaces * rect.height() * 0.2, 0.0));
+        }
+        rect.translate(self.text.pos.to_vec2() + self.origin)
+    }
+}
+
+impl Layout {
+    /// What can be edited, in the order it's on the page.
+    pub fn placed_fields(&self) -> Vec<PlacedField<'_>> {
+        let mut out = Vec::new();
+        for item in &self.items {
+            match item {
+                Item::Text(text) => {
+                    if let Some(field) = &text.editable {
+                        out.push(PlacedField {
+                            text,
+                            field,
+                            origin: Vec2::ZERO,
+                        });
+                    }
+                }
+                Item::Sideways { rect, items, .. } => {
+                    for inner in items {
+                        if let Item::Text(text) = inner
+                            && let Some(field) = &text.editable
+                        {
+                            out.push(PlacedField {
+                                text,
+                                field,
+                                origin: rect.min.to_vec2(),
+                            });
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// The source offset nearest this point on the page.
+    pub fn offset_at_pos(&self, pos: egui::Pos2) -> Option<usize> {
+        let fields = self.placed_fields();
+        let field = nearest_field(&fields, pos)?;
+        Some(field.field.offset_at(field.char_at_pos(pos)))
+    }
+
+    /// Where the cursor goes from this one, a row up or down, keeping to `x`.
+    pub fn offset_vertically(
+        &self,
+        source: &str,
+        offset: usize,
+        x: f32,
+        down: bool,
+    ) -> Option<usize> {
+        let fields = self.placed_fields();
+        let refs: Vec<&Editable> = fields.iter().map(|placed| placed.field).collect();
+        let (index, _) = wysiwyg::field_at(&refs, offset)?;
+        let rect = fields[index].cursor_rect(source, offset);
+        let target = if down {
+            rect.max.y + rect.height() / 2.0
+        } else {
+            rect.min.y - rect.height() / 2.0
+        };
+        // Within its own text, or else the nearest in that direction.
+        let this = fields[index].rect();
+        let field = if this.y_range().contains(target) {
+            &fields[index]
+        } else {
+            let distance = |placed: &PlacedField<'_>| {
+                let rect = placed.rect();
+                let across = (rect.min.x - x).max(x - rect.max.x).max(0.0);
+                let along = if down {
+                    rect.min.y - this.max.y
+                } else {
+                    this.min.y - rect.max.y
+                };
+                (along.max(0.0), across)
+            };
+            fields
+                .iter()
+                .filter(|placed| {
+                    let rect = placed.rect();
+                    if down {
+                        rect.min.y >= this.max.y - 1.0
+                    } else {
+                        rect.max.y <= this.min.y + 1.0
+                    }
+                })
+                .min_by(|a, b| {
+                    distance(a)
+                        .partial_cmp(&distance(b))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })?
+        };
+        // Into the row of a tall text at the edge it was come to.
+        let rect = field.rect();
+        // A thin row has no room to keep off its edges.
+        let y = target.min(rect.max.y - 1.0).max(rect.min.y + 1.0);
+        let pos = egui::pos2(x, y);
+        Some(field.field.offset_at(field.char_at_pos(pos)))
+    }
+
+    /// The start or end of the row this cursor is on.
+    pub fn row_edge(&self, offset: usize, end: bool) -> Option<usize> {
+        let fields = self.placed_fields();
+        let refs: Vec<&Editable> = fields.iter().map(|placed| placed.field).collect();
+        let (index, field) = wysiwyg::field_at(&refs, offset)?;
+        let galley = &fields[index].text.galley;
+        let mut cursor = CCursor::new(field.char_at(offset));
+        cursor.prefer_next_row = true;
+        let edge = if end {
+            galley.cursor_end_of_row(&cursor)
+        } else {
+            galley.cursor_begin_of_row(&cursor)
+        };
+        Some(field.offset_at(edge.index.0))
+    }
+
+    /// The word around this cursor.
+    pub fn word_around(&self, offset: usize) -> Option<Range<usize>> {
+        let fields = self.placed_fields();
+        let refs: Vec<&Editable> = fields.iter().map(|placed| placed.field).collect();
+        let (index, field) = wysiwyg::field_at(&refs, offset)?;
+        let chars: Vec<char> = fields[index].text.galley.text().chars().collect();
+        let (start, end) = wysiwyg::word_chars(&chars, field.char_at(offset));
+        let from = field
+            .spans
+            .get(start)
+            .map_or(field.high(), |span| span.start);
+        Some(from..field.offset_at(end))
+    }
+
+    /// The cursor one char or word along, going on to the next text at the end.
+    pub fn offset_along(&self, offset: usize, back: bool, word: bool) -> Option<usize> {
+        let fields = self.placed_fields();
+        let refs: Vec<&Editable> = fields.iter().map(|placed| placed.field).collect();
+        let (index, field) = wysiwyg::field_at(&refs, offset)?;
+        let chars: Vec<char> = fields[index].text.galley.text().chars().collect();
+        let at = field.char_at(offset);
+        if back {
+            if at == 0 {
+                return index.checked_sub(1).map(|i| refs[i].high());
+            }
+            let to = if word {
+                wysiwyg::word_back(&chars, at)
+            } else {
+                at - 1
+            };
+            return Some(field.spans.get(to).map_or(field.high(), |span| span.start));
+        }
+        if at >= field.spans.len() {
+            return refs.get(index + 1).map(|next| next.low());
+        }
+        let to = if word {
+            wysiwyg::word_forward(&chars, at)
+        } else {
+            at + 1
+        };
+        Some(field.offset_at(to))
+    }
+}
+
+/// The text at this point, or the one nearest going down the page and then across.
+fn nearest_field<'a, 'b>(
+    fields: &'b [PlacedField<'a>],
+    pos: egui::Pos2,
+) -> Option<&'b PlacedField<'a>> {
+    let distance = |field: &PlacedField<'_>| {
+        let rect = field.rect();
+        let down = (rect.min.y - pos.y).max(pos.y - rect.max.y).max(0.0);
+        let across = (rect.min.x - pos.x).max(pos.x - rect.max.x).max(0.0);
+        (down, across)
+    };
+    fields.iter().min_by(|a, b| {
+        distance(a)
+            .partial_cmp(&distance(b))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    })
 }
 
 /// A find match in the rendered text.
@@ -605,6 +838,8 @@ pub struct Params<'a> {
     /// The last layout's drawings: while the one in its place is being drawn,
     /// as it will be for each key typed, that's what shows.
     pub previous_drawings: &'a [String],
+    /// The source, for finding where each char came from when editing.
+    pub source: Option<&'a str>,
 }
 
 pub fn layout(document: &Document, params: Params<'_>) -> Layout {
@@ -616,6 +851,7 @@ pub fn layout(document: &Document, params: Params<'_>) -> Layout {
         code_spans,
         toggled,
         previous_drawings,
+        source,
     } = params;
     let mut builder = Builder {
         ctx,
@@ -626,6 +862,10 @@ pub fn layout(document: &Document, params: Params<'_>) -> Layout {
         code_spans,
         toggled,
         previous_drawings,
+        source: source.filter(|_| inputs.wysiwyg),
+        block_source: 0..0,
+        field_kind: FieldKind::Inline,
+        gap: inputs.gap,
         out: Layout::default(),
         y: 0.0,
         list_depth: 0,
@@ -662,6 +902,11 @@ struct Builder<'a> {
     code_spans: &'a CodeSpans,
     toggled: &'a HashSet<usize>,
     previous_drawings: &'a [String],
+    source: Option<&'a str>,
+    /// Where what's being laid out is in the source.
+    block_source: Range<usize>,
+    field_kind: FieldKind,
+    gap: Option<usize>,
     out: Layout,
     y: f32,
     /// How many lists this is inside of, which varies their bullets.
@@ -673,8 +918,14 @@ fn overlaps(a: &Range<usize>, b: &Range<usize>) -> bool {
     a.start < b.end && b.start < a.end
 }
 
-/// Inline text laid out: its galley, its links by char, and its images.
-type LaidOut = (Arc<Galley>, Vec<(Range<usize>, Link)>, Vec<PlacedImage>);
+/// Inline text laid out: its galley, its links by char, its images, and when
+/// the page is being edited, where its chars came from.
+type LaidOut = (
+    Arc<Galley>,
+    Vec<(Range<usize>, Link)>,
+    Vec<PlacedImage>,
+    Option<Editable>,
+);
 
 /// How to set a piece of inline text.
 #[derive(Clone, Copy)]
@@ -710,6 +961,9 @@ impl Builder<'_> {
         let mut placed = in_footnote || editing.is_none();
         let mut first = true;
         for block in &document.blocks {
+            if self.gap.is_some_and(|gap| block.source.start >= gap) {
+                self.gap_line(&mut first, width);
+            }
             let replaced = editing
                 .as_ref()
                 .is_some_and(|(range, _)| overlaps(&block.source, range));
@@ -744,6 +998,32 @@ impl Builder<'_> {
             }
             self.editor(range, *height, width);
         }
+        self.gap_line(&mut first, width);
+    }
+
+    /// A quote or list item with nothing in it, while editing, has a line for
+    /// the cursor: it would be nowhere, and the keys would go to its neighbor.
+    fn empty_line(&mut self, children: &[Block], x: f32, width: f32) {
+        if children.is_empty() && self.source.is_some() {
+            let style = self.body();
+            self.text(&Inlines::default(), x, width, style);
+        }
+    }
+
+    /// An empty line for a cursor that has no block to be in.
+    fn gap_line(&mut self, first: &mut bool, width: f32) {
+        let Some(gap) = self.gap.take() else {
+            return;
+        };
+        if !*first {
+            self.y += self.theme.gap();
+        }
+        *first = false;
+        self.block_source = gap..gap;
+        let style = self.body();
+        let top = self.y;
+        self.text(&Inlines::default(), 0.0, width, style);
+        self.out.map.push((gap, top));
     }
 
     fn editor(&mut self, range: &Range<usize>, height: f32, width: f32) {
@@ -766,6 +1046,7 @@ impl Builder<'_> {
     }
 
     fn block(&mut self, block: &Block, x: f32, width: f32) {
+        self.block_source = block.source.clone();
         self.out.map.push((block.source.start, self.y));
         match &block.kind {
             BlockKind::Paragraph(inlines) => {
@@ -1000,6 +1281,7 @@ impl Builder<'_> {
             galley,
             links: Vec::new(),
             images: Vec::new(),
+            editable: None,
         }));
         self.y += height;
     }
@@ -1013,6 +1295,7 @@ impl Builder<'_> {
             radius: 1.5,
         });
         let indent = self.theme.size * 0.95;
+        self.empty_line(children, x + indent, width - indent);
         self.blocks(children, x + indent, width - indent);
         self.out.items[bar] = Item::Fill {
             rect: Rect::from_min_max(egui::pos2(x, top), egui::pos2(x + 3.0, self.y)),
@@ -1085,6 +1368,7 @@ impl Builder<'_> {
             galley: title,
             links: Vec::new(),
             images: Vec::new(),
+            editable: None,
         }));
         if foldable {
             self.out.items.push(Item::Widget {
@@ -1184,6 +1468,8 @@ impl Builder<'_> {
                     });
                 }
             }
+            self.block_source = item.source.clone();
+            self.empty_line(&item.children, x + gutter, width - gutter);
             for (child, block) in item.children.iter().enumerate() {
                 if child > 0 {
                     // A list in an item is part of it, not a new thought.
@@ -1221,11 +1507,15 @@ impl Builder<'_> {
             radius: 4.0,
         });
         let content_width = text_size.x + padding * 2.0;
+        let editable = self
+            .source
+            .map(|source| code_field(source, &self.block_source, code));
         let text = Item::Text(TextItem {
             pos: egui::pos2(padding, padding),
             galley,
             links: Vec::new(),
             images: Vec::new(),
+            editable,
         });
         if content_width > width {
             self.out.items.push(Item::Sideways {
@@ -1311,7 +1601,11 @@ impl Builder<'_> {
                         _ => Align::LEFT,
                     };
                     let style = TextStyle { halign, ..style };
-                    let (galley, links, images) = self.inline_job(cell, *width, style);
+                    self.field_kind = FieldKind::Cell;
+                    let (galley, links, images, editable) = self.inline_job(cell, *width, style);
+                    self.field_kind = FieldKind::Inline;
+                    // An empty cell has no place in the source to go by.
+                    let editable = editable.filter(|field| !field.spans.is_empty());
                     height = height.max(galley.size().y);
                     // A galley aligned to the center or right is drawn around
                     // its position, which is why it's put in the cell's middle.
@@ -1325,6 +1619,7 @@ impl Builder<'_> {
                         galley,
                         links,
                         images,
+                        editable,
                     });
                 }
                 cell_x += width + padding * 2.0;
@@ -1442,12 +1737,14 @@ impl Builder<'_> {
                 galley: key,
                 links: Vec::new(),
                 images: Vec::new(),
+                editable: None,
             }));
             self.out.items.push(Item::Text(TextItem {
                 pos: egui::pos2(x + padding + key_width + gap, self.y),
                 galley: value,
                 links: Vec::new(),
                 images: Vec::new(),
+                editable: None,
             }));
             self.y += height;
         }
@@ -1519,6 +1816,7 @@ impl Builder<'_> {
                         },
                     )],
                     images: Vec::new(),
+                    editable: None,
                 }));
             }
             self.blocks(&footnote.blocks, gutter, width - gutter - size * 1.5);
@@ -1527,7 +1825,7 @@ impl Builder<'_> {
     }
 
     fn text(&mut self, inlines: &Inlines, x: f32, width: f32, style: TextStyle) {
-        let (galley, links, images) = self.inline_job(inlines, width, style);
+        let (galley, links, images, editable) = self.inline_job(inlines, width, style);
         // A formula can reach below its row, as it does below its baseline.
         let height = images.iter().fold(galley.size().y, |height, image| {
             height.max(image.rect.max.y)
@@ -1543,6 +1841,7 @@ impl Builder<'_> {
             galley,
             links,
             images,
+            editable,
         }));
         self.y += height;
     }
@@ -1665,9 +1964,17 @@ impl Builder<'_> {
         let mut placed: Vec<Placing> = Vec::new();
         let mut chars = 0;
         let mut images = inlines.images.iter().enumerate().peekable();
+        let source = self.source;
+        let mut spans: Vec<Range<usize>> = Vec::new();
+        let mut source_cursor = 0;
         for run in &inlines.runs {
             let start_chars = chars;
             let text = &inlines.text[run.range.clone()];
+            // Where each of the run's chars came from.
+            let map = source.map_or_else(Vec::new, |source| {
+                run_spans(inlines, run, text, source, &mut source_cursor)
+            });
+            let mut map_at = 0;
             let mut format = self.format(style, run.style);
             if run.link.is_some() {
                 format.color = self.theme.link;
@@ -1702,6 +2009,9 @@ impl Builder<'_> {
                     space.extra_letter_spacing = scaled.x;
                     push(&mut job, "\u{A0}", space);
                     chars += 2;
+                    if let Some(span) = map.first() {
+                        spans.extend([span.clone(), span.clone()]);
+                    }
                     if let Some(link) = &run.link {
                         links.push((start_chars..chars, link.clone()));
                     }
@@ -1716,8 +2026,11 @@ impl Builder<'_> {
             for (offset, _) in text.match_indices(IMAGE_CHAR) {
                 let before = &text[plain_start..offset];
                 push(&mut job, before, format.clone());
-                chars += before.chars().count();
+                let count = before.chars().count();
+                chars += count;
+                extend_spans(&mut spans, &map, &mut map_at, count);
                 plain_start = offset + IMAGE_CHAR.len_utf8();
+                let chars_before_image = chars;
                 let absolute = run.range.start + offset;
                 let image = images.next_if(|(_, image)| image.at == absolute);
                 let Some((_, image)) = image else {
@@ -1767,10 +2080,17 @@ impl Builder<'_> {
                         }
                     }
                 }
+                // However it shows, all of it is the image.
+                if let Some(span) = map.get(map_at) {
+                    spans.extend((chars_before_image..chars).map(|_| span.clone()));
+                    map_at += 1;
+                }
             }
             let rest = &text[plain_start..];
             push(&mut job, rest, format);
-            chars += rest.chars().count();
+            let count = rest.chars().count();
+            chars += count;
+            extend_spans(&mut spans, &map, &mut map_at, count);
             if let Some(link) = &run.link {
                 links.push((start_chars..chars, link.clone()));
             }
@@ -1805,8 +2125,87 @@ impl Builder<'_> {
                 }
             })
             .collect();
-        (galley, links, placed)
+        // With no text, the cursor goes after the block's marker, on its line.
+        let editable = source.map(|source| {
+            let end = self.block_source.end.min(source.len());
+            let line = source[..end].trim_end_matches(['\r', '\n']);
+            let start = line.len().max(self.block_source.start.min(end));
+            Editable::new(spans, start, self.field_kind, source)
+        });
+        (galley, links, placed, editable)
     }
+}
+
+fn extend_spans(
+    spans: &mut Vec<Range<usize>>,
+    map: &[Range<usize>],
+    map_at: &mut usize,
+    count: usize,
+) {
+    let end = (*map_at + count).min(map.len());
+    if let Some(part) = map.get(*map_at..end) {
+        spans.extend_from_slice(part);
+    }
+    *map_at = end;
+}
+
+/// Where a run's chars came from. A formula and an image are one thing.
+fn run_spans(
+    inlines: &Inlines,
+    run: &Run,
+    text: &str,
+    source: &str,
+    cursor: &mut usize,
+) -> Vec<Range<usize>> {
+    if run.style.math {
+        *cursor = (*cursor).max(run.source.end);
+        return text.chars().map(|_| run.source.clone()).collect();
+    }
+    let mut map = Vec::with_capacity(text.len());
+    let mut plain_start = 0;
+    for (offset, _) in text.match_indices(IMAGE_CHAR) {
+        let before = &text[plain_start..offset];
+        let image = inlines
+            .images
+            .iter()
+            .find(|image| image.at == run.range.start + offset);
+        let until = image.map_or(run.source.end, |image| image.source.start);
+        map.extend(wysiwyg::spans(
+            before,
+            source,
+            run.source.start..until,
+            cursor,
+        ));
+        if let Some(image) = image {
+            map.push(image.source.clone());
+            *cursor = (*cursor).max(image.source.end);
+        }
+        plain_start = offset + IMAGE_CHAR.len_utf8();
+    }
+    map.extend(wysiwyg::spans(
+        &text[plain_start..],
+        source,
+        run.source.clone(),
+        cursor,
+    ));
+    map
+}
+
+/// The field of a code block, whose source starts with a fence if it's fenced.
+fn code_field(source: &str, block: &Range<usize>, code: &str) -> Editable {
+    let end = block.end.min(source.len());
+    let start = block.start.min(end);
+    let head = source[start..end].trim_start();
+    let content = if head.starts_with("```") || head.starts_with("~~~") {
+        source[start..end]
+            .find('\n')
+            .map_or(end, |at| start + at + 1)
+    } else {
+        start
+    };
+    let mut cursor = content;
+    let spans = wysiwyg::spans(code, source, content..end, &mut cursor);
+    Editable::new(spans, content, FieldKind::Code, source)
 }
 
 /// A picture in text, once its room is made and before the text is laid out.
@@ -1959,6 +2358,8 @@ mod tests {
             fold_generation: 0,
             allow_remote: false,
             editing: None,
+            wysiwyg: false,
+            gap: None,
         }
     }
 
@@ -1981,6 +2382,7 @@ mod tests {
                         code_spans: &CodeSpans::new(),
                         toggled: &HashSet::new(),
                         previous_drawings: &[],
+                        source: None,
                     },
                 ));
             }
@@ -2190,6 +2592,7 @@ mod tests {
                     code_spans: &CodeSpans::new(),
                     toggled: &HashSet::new(),
                     previous_drawings: &[],
+                    source: None,
                 },
             ));
         });
@@ -2367,6 +2770,7 @@ mod tests {
                         code_spans: &CodeSpans::new(),
                         toggled: &toggled,
                         previous_drawings: &[],
+                        source: None,
                     },
                 );
                 heights.push(layout.height);
@@ -2499,5 +2903,247 @@ mod tests {
         assert!(layout.drawings[1].ends_with('b'));
         assert!(layout.drawings[2].ends_with('c'));
         assert!(drawing::is_diagram(&layout.drawings[3]));
+    }
+
+    fn fields_of(source: &str) -> Layout {
+        let ctx = Context::default();
+        let document = parse(source);
+        let mut cache = GalleyCache::default();
+        let mut result = None;
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let mut wide = inputs(ui.ctx(), 700.0);
+            wide.wysiwyg = true;
+            result = Some(layout(
+                &document,
+                Params {
+                    ctx: ui.ctx(),
+                    inputs: &wide,
+                    images: &mut NoImages,
+                    cache: &mut cache,
+                    code_spans: &CodeSpans::new(),
+                    toggled: &HashSet::new(),
+                    previous_drawings: &[],
+                    source: Some(source),
+                },
+            ));
+        });
+        output.textures_delta.clear();
+        result.expect("ran a frame")
+    }
+
+    /// Everything on the page goes back to the bytes it came from: what the
+    /// cursor and every edit depend on.
+    #[test]
+    fn every_char_of_the_showcase_maps_to_its_source() {
+        let source = include_str!("../../samples/markdown/showcase.md");
+        let laid_out = fields_of(source);
+        let fields = laid_out.placed_fields();
+        assert!(fields.len() > 100, "{}", fields.len());
+        let mut chars_seen = 0;
+        let mut exact = 0;
+        for placed in &fields {
+            let field = placed.field;
+            let text: Vec<char> = placed.text.galley.text().chars().collect();
+            assert_eq!(
+                field.spans.len(),
+                text.len(),
+                "{:?}",
+                placed.text.galley.text()
+            );
+            for (index, span) in field.spans.iter().enumerate() {
+                assert!(source.is_char_boundary(span.start) && source.is_char_boundary(span.end));
+                assert!(span.start <= span.end && span.end <= source.len());
+                if let Some(next) = field.spans.get(index + 1) {
+                    assert!(
+                        span.end <= next.start || span == next,
+                        "in order: {span:?} {next:?} in {:?}",
+                        placed.text.galley.text()
+                    );
+                }
+                chars_seen += 1;
+                let mine = text[index];
+                if source[span.clone()].contains(mine) {
+                    exact += 1;
+                }
+            }
+        }
+        // Only what isn't written as itself differs: emoji, entities, images,
+        // formulas waiting to be drawn, soft breaks.
+        let share = f64::from(exact) / f64::from(chars_seen);
+        assert!(share > 0.97, "{exact} of {chars_seen}");
+    }
+
+    #[test]
+    fn hidden_markup_is_not_part_of_any_char() {
+        let source = "A **bold** [link](http://x) `code` *it* ~~no~~ \\* &amp; end\n";
+        let laid_out = fields_of(source);
+        let fields = laid_out.placed_fields();
+        assert_eq!(fields.len(), 1);
+        let shown: String = fields[0]
+            .field
+            .spans
+            .iter()
+            .map(|span| &source[span.clone()])
+            .collect();
+        assert_eq!(shown, "A bold link code it no \\* &amp; end");
+    }
+
+    #[test]
+    fn a_blocks_marker_is_not_part_of_its_text() {
+        for (source, text) in [
+            ("## Head\n", "Head"),
+            ("- item\n", "item"),
+            ("1. item\n", "item"),
+            ("> quoted\n", "quoted"),
+            ("- [ ] task\n", "task"),
+            ("```\ncode\n```\n", "code"),
+            ("| a |\n|---|\n| b |\n", "a"),
+        ] {
+            let laid_out = fields_of(source);
+            let fields = laid_out.placed_fields();
+            let span = fields[0].field.low()..fields[0].field.high();
+            assert_eq!(&source[span], text, "{source:?}");
+        }
+    }
+
+    #[test]
+    fn a_quoted_paragraphs_line_break_takes_the_next_lines_marker() {
+        let source = "> one\n> two\n";
+        let laid_out = fields_of(source);
+        let fields = laid_out.placed_fields();
+        let shown: Vec<&str> = fields[0]
+            .field
+            .spans
+            .iter()
+            .map(|span| &source[span.clone()])
+            .collect();
+        assert_eq!(shown, ["o", "n", "e", "\n> ", "t", "w", "o"]);
+    }
+
+    #[test]
+    fn the_cursor_goes_along_the_page_and_between_blocks() {
+        let source = "ab\n\n## cd\n";
+        let laid_out = fields_of(source);
+        assert_eq!(laid_out.offset_along(0, false, false), Some(1));
+        assert_eq!(
+            laid_out.offset_along(2, false, false),
+            Some(7),
+            "past the marker"
+        );
+        assert_eq!(laid_out.offset_along(7, true, false), Some(2));
+        assert_eq!(laid_out.offset_along(0, true, false), None);
+        assert_eq!(laid_out.offset_along(9, false, false), None);
+    }
+
+    #[test]
+    fn the_cursor_goes_up_and_down_between_blocks_at_its_place_across() {
+        let source = "abcdef\n\nabcdef\n";
+        let laid_out = fields_of(source);
+        let fields = laid_out.placed_fields();
+        let x = fields[0].cursor_rect(source, 3).min.x;
+        let down = laid_out.offset_vertically(source, 3, x, true).unwrap();
+        assert_eq!(down, 11);
+        assert_eq!(laid_out.offset_vertically(source, down, x, false), Some(3));
+        assert_eq!(laid_out.offset_vertically(source, 3, x, false), None);
+    }
+
+    #[test]
+    fn a_click_finds_the_source_past_hidden_markup() {
+        let source = "**bold**\n";
+        let laid_out = fields_of(source);
+        let fields = laid_out.placed_fields();
+        let at = fields[0].cursor_rect(source, 4).center();
+        assert_eq!(laid_out.offset_at_pos(at), Some(4));
+        // Well to the right of the text: its end.
+        let far = egui::pos2(600.0, at.y);
+        assert_eq!(laid_out.offset_at_pos(far), Some(6));
+    }
+
+    #[test]
+    fn a_formula_is_one_thing_to_the_cursor() {
+        let source = "a $x^2$ b\n";
+        let laid_out = fields_of(source);
+        let fields = laid_out.placed_fields();
+        let field = fields[0].field;
+        let formula = field.spans.iter().find(|span| span.len() > 1).unwrap();
+        assert_eq!(&source[formula.clone()], "$x^2$");
+    }
+
+    /// Whatever's done wherever in the showcase: never a panic or a cut through
+    /// a character, the cursor stays in the text, and what comes before and
+    /// after the edit isn't touched.
+    #[test]
+    fn every_edit_everywhere_keeps_the_rest_of_the_source() {
+        use crate::markdown::wysiwyg::{self, Change};
+        let source = include_str!("../../samples/markdown/showcase.md");
+        let laid_out = fields_of(source);
+        let placed = laid_out.placed_fields();
+        let fields: Vec<&Editable> = placed.iter().map(|placed| placed.field).collect();
+        let check = |what: &str, at: usize, change: &Change| {
+            assert!(
+                change.text.is_char_boundary(change.cursor),
+                "{what} at {at}: cursor {}",
+                change.cursor
+            );
+            let common_start = source
+                .bytes()
+                .zip(change.text.bytes())
+                .take_while(|(a, b)| a == b)
+                .count();
+            let common_end = source
+                .bytes()
+                .rev()
+                .zip(change.text.bytes().rev())
+                .take_while(|(a, b)| a == b)
+                .count();
+            // Only one place changes, and only by a little: a char or two,
+            // its marks, and the blank lines of a join.
+            let changed = source.len().saturating_sub(common_start + common_end);
+            assert!(changed < 400, "{what} at {at} changed {changed} bytes");
+        };
+        let mut offsets: Vec<usize> = fields
+            .iter()
+            .flat_map(|field| {
+                let mut all: Vec<usize> = field.spans.iter().map(|span| span.start).collect();
+                all.push(field.high());
+                all
+            })
+            .collect();
+        offsets.sort_unstable();
+        offsets.dedup();
+        // Every tenth, as each is a copy of the document: it's still thousands.
+        let mut edits = 0;
+        for &at in offsets.iter().step_by(10) {
+            if let Some(change) = wysiwyg::backspace(source, &fields, at) {
+                check("backspace", at, &change);
+                edits += 1;
+            }
+            if let Some(change) = wysiwyg::delete_forward(source, &fields, at) {
+                check("delete", at, &change);
+                edits += 1;
+            }
+            if let Some(change) = wysiwyg::enter(source, &fields, at..at) {
+                check("enter", at, &change);
+                edits += 1;
+            }
+            if let Some(change) = wysiwyg::line_break(source, &fields, at..at) {
+                check("line break", at, &change);
+            }
+            let end = (at + 7).min(source.len());
+            let end = (end..source.len())
+                .find(|&end| source.is_char_boundary(end))
+                .unwrap_or(source.len());
+            if end - at < 60
+                && let Some(change) = wysiwyg::delete_selection(source, &fields, at..end)
+            {
+                check("selection", at, &change);
+            }
+            let _ = laid_out.offset_along(at, false, true);
+            let _ = laid_out.offset_along(at, true, true);
+            let _ = laid_out.row_edge(at, true);
+            let _ = laid_out.word_around(at);
+            let _ = laid_out.offset_vertically(source, at, 100.0, true);
+        }
+        assert!(edits > 500, "{edits}");
     }
 }

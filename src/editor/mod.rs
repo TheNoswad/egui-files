@@ -4,6 +4,7 @@
 pub mod document;
 pub mod highlight;
 pub mod ops;
+mod page;
 
 use std::{
     collections::HashSet,
@@ -457,6 +458,12 @@ struct MarkdownState {
     block: Option<BlockEditor>,
     /// A click outside it: it's done.
     block_done: bool,
+    /// Keys for the page being edited, waiting for it to be laid out anew.
+    waiting_keys: Vec<egui::Event>,
+    /// How far across the page's cursor stays, going up and down.
+    caret_x: Option<f32>,
+    /// Scroll to the page's cursor.
+    reveal: bool,
 }
 
 /// Where the source pane is scrolled, for keeping the panes together.
@@ -896,17 +903,22 @@ impl EditorTab {
             Some(syntax) => highlight::syntax_name(syntax) == "Markdown",
             None => markdown::is_markdown(&self.edit),
         };
-        let mode = if is_markdown {
-            self.mode.at_width(ui.available_width())
-        } else {
-            Mode::Source
+        let mode = match self.mode.at_width(ui.available_width()) {
+            _ if !is_markdown => Mode::Source,
+            // What can't be changed can only be read.
+            Mode::Wysiwyg if buffer.read_only.is_some() => Mode::Preview,
+            mode => mode,
         };
+        // Coming to it, the keys come with it.
+        if mode == Mode::Wysiwyg && self.shown_mode != Mode::Wysiwyg {
+            self.focus_text = true;
+        }
         self.shown_mode = mode;
         if self.md.image_folder != shared.editor.markdown.image_folder {
             self.md.image_folder = shared.editor.markdown.image_folder.clone();
         }
         // Colors for source that isn't shown can wait until it is.
-        if mode != Mode::Preview {
+        if matches!(mode, Mode::Source | Mode::Split) {
             update_highlighter(&ctx, buffer, syntax, &theme);
         }
 
@@ -914,13 +926,13 @@ impl EditorTab {
         let text_focused =
             ctx.memory(|m| m.has_focus(text_id(self.id)) || m.has_focus(block_id(self.id)));
         let editable = buffer.read_only.is_none();
-        let source_shown = mode != Mode::Preview;
+        let source_shown = matches!(mode, Mode::Source | Mode::Split);
         // Leaving Preview leaves the block being edited in it.
         if source_shown && self.md.block.is_some() {
             self.finish_block(&ctx);
         }
         let editing_block = self.md.block.is_some();
-        let can_edit_text = source_shown || editing_block;
+        let can_edit_text = source_shown || editing_block || mode == Mode::Wysiwyg;
         let commands = if focused {
             shortcuts(
                 &ctx,
@@ -929,6 +941,7 @@ impl EditorTab {
                 self.md.view.lightbox_is_open(),
                 is_markdown && editable && !ctx.egui_wants_keyboard_input(),
                 editing_block,
+                mode == Mode::Wysiwyg && !editing_block,
             )
         } else {
             Vec::new()
@@ -952,6 +965,9 @@ impl EditorTab {
             {
                 self.run(&ctx, command);
             }
+        }
+        if self.editing_page() {
+            self.page_input(&ctx);
         }
 
         let cursor = self.selection(&ctx).start;
@@ -1061,6 +1077,8 @@ impl EditorTab {
         }
         let mut clicks = Vec::new();
         let mut preview_rect = None;
+        let caret = (mode == Mode::Wysiwyg && self.md.block.is_none())
+            .then(|| page::caret(&ctx, self.id, &buffer.text));
         if mode != Mode::Source && !outline_only {
             let mut show = |ui: &mut Ui| {
                 preview_rect = Some(ui.max_rect());
@@ -1075,6 +1093,7 @@ impl EditorTab {
                         editable,
                         prefs: &shared.editor.markdown,
                         keyboard: focused && !text_focused,
+                        caret,
                         hits: self
                             .find
                             .as_ref()
@@ -1100,8 +1119,14 @@ impl EditorTab {
                     .show(ui, |ui| show(ui));
             }
         }
+        // After laying out: where it is now.
+        if std::mem::take(&mut self.md.reveal)
+            && let Some(caret) = caret
+        {
+            self.md.preview_to = self.md.view.offset_to_show(&buffer.text, caret.head);
+        }
         let mut source_scroll = None;
-        if mode != Mode::Preview && !outline_only {
+        if matches!(mode, Mode::Source | Mode::Split) && !outline_only {
             CentralPanel::default()
                 .frame(egui::Frame::NONE.fill(colors.background))
                 .show(ui, |ui| {
@@ -1322,8 +1347,10 @@ impl EditorTab {
                 let target = markdown::links::resolve(&link, &dir);
                 self.follow(ctx, target, new_tab, actions);
             }
+            Click::Caret { offset, extend } => self.page_clicked(ctx, offset, extend),
+            Click::SelectWord(offset) => self.page_select_word(ctx, offset),
             Click::EditBlock { source, word } => {
-                if self.shown_mode == Mode::Preview {
+                if matches!(self.shown_mode, Mode::Preview | Mode::Wysiwyg) {
                     self.start_block(source, word);
                 } else if let (Some(source), Doc::Ready(buffer)) = (source, &self.doc) {
                     // With the source showing, that's where to edit it.
@@ -1495,7 +1522,8 @@ impl EditorTab {
                 self.mode = match self.mode {
                     Mode::Source => Mode::Split,
                     Mode::Split => Mode::Preview,
-                    Mode::Preview => Mode::Source,
+                    Mode::Preview => Mode::Wysiwyg,
+                    Mode::Wysiwyg => Mode::Source,
                 };
             }
             Command::Back => self.go_back(true),
@@ -1833,6 +1861,7 @@ fn shortcuts(
     lightbox_open: bool,
     takes_paste: bool,
     editing_block: bool,
+    editing_page: bool,
 ) -> Vec<Command> {
     use crate::keymap::Command as Global;
     let cmd = Modifiers::COMMAND;
@@ -1901,7 +1930,7 @@ fn shortcuts(
             commands.push(Command::FinishBlock);
         }
         // With no text field, undo is for the document's text.
-        if takes_paste && !text_focused {
+        if editing_page || (takes_paste && !text_focused) {
             if i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z)
                 || i.consume_key(Modifiers::COMMAND, Key::Y)
             {
@@ -1945,7 +1974,7 @@ fn shortcuts(
                     pressed,
                     modifiers,
                     ..
-                } if !modifiers.command && !modifiers.alt => {
+                } if !editing_page && !modifiers.command && !modifiers.alt => {
                     if *pressed {
                         commands.push(Command::Indent {
                             outdent: modifiers.shift,
@@ -1958,7 +1987,7 @@ fn shortcuts(
                     pressed,
                     modifiers,
                     ..
-                } if modifiers.is_none() => {
+                } if !editing_page && modifiers.is_none() => {
                     if *pressed {
                         commands.push(Command::Newline);
                     }
@@ -2040,6 +2069,7 @@ fn toolbar(
                 (Mode::Source, icon::CODE),
                 (Mode::Split, icon::COLUMNS),
                 (Mode::Preview, icon::BOOK_OPEN),
+                (Mode::Wysiwyg, icon::PENCIL_SIMPLE_LINE),
             ];
             for (mode, glyph) in modes {
                 if mode == Mode::Split && !markdown.has_room {
@@ -2655,6 +2685,7 @@ struct Rendered<'a> {
     /// Takes the keys that scroll, as no text field does.
     keyboard: bool,
     hits: Option<(&'a [Hit], Option<usize>)>,
+    caret: Option<markdown::Caret>,
 }
 
 /// The rendered document, and the bar offering its remote pictures.
@@ -2720,6 +2751,7 @@ fn rendered(
         scroll_to,
         compact: false,
         hits: rendered.hits,
+        caret: rendered.caret,
     };
     let clicks = md
         .view
@@ -2994,6 +3026,400 @@ mod tests {
         h.tab.focus_text = true;
         h.frame(vec![]);
         h.frame(vec![]);
+    }
+
+    /// A document open with its page being edited, and the cursor at this
+    /// text in it.
+    fn page(name: &str, contents: &str, at: &str) -> Harness {
+        let mut h = Harness::with_file(name, "a.md", contents);
+        h.tab.mode = Mode::Wysiwyg;
+        h.frame(vec![]);
+        h.until(|h| matches!(h.tab.doc, Doc::Ready(_)));
+        h.frame(vec![]);
+        h.frame(vec![]);
+        let byte = contents.find(at).unwrap_or(contents.len()) + at.len();
+        let char = contents[..byte].chars().count();
+        select(&mut h, char..char);
+        h
+    }
+
+    fn pressed(key: Key, modifiers: Modifiers) -> Event {
+        Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    /// One thing per frame, as they take the page being laid out anew.
+    fn keys(h: &mut Harness, keys: &[Key]) {
+        for key in keys {
+            h.frame(vec![pressed(*key, Modifiers::NONE)]);
+            h.frame(vec![]);
+        }
+    }
+
+    #[test]
+    fn typing_on_the_page_splices_the_source_where_the_cursor_is() {
+        let mut h = page("page-type", "# Title\n\nSome **bold** text\n", "bo");
+        h.frame(vec![Event::Text("XY".into())]);
+        h.frame(vec![]);
+        assert_eq!(h.text(), "# Title\n\nSome **boXYld** text\n");
+    }
+
+    #[test]
+    fn typing_goes_in_after_a_click_on_the_page() {
+        let mut h = page("page-click", "abcdef\n", "");
+        let pos = {
+            let view = &h.tab.md.view;
+            let fields = view.layout().placed_fields();
+            fields[0].rect().center() + view.page_origin.to_vec2()
+        };
+        let button = |pressed| Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        h.frame(vec![Event::PointerMoved(pos)]);
+        h.frame(vec![button(true)]);
+        h.frame(vec![button(false)]);
+        h.frame(vec![]);
+        assert!(h.tab.selection(&h.ctx).start > 0, "the cursor went there");
+        assert!(
+            h.ctx.memory(|m| m.has_focus(text_id(h.tab.id))),
+            "the page still has the keys"
+        );
+        h.frame(vec![Event::Text("X".into())]);
+        h.frame(vec![]);
+        assert!(h.text().contains('X'), "{:?}", h.text());
+    }
+
+    #[test]
+    fn keys_all_in_one_frame_all_go_in_order() {
+        let mut h = page("page-queue", "ab\n", "ab");
+        h.frame(vec![
+            Event::Text("c".into()),
+            pressed(Key::Backspace, Modifiers::NONE),
+            Event::Text("d".into()),
+            Event::Text("e".into()),
+        ]);
+        for _ in 0..6 {
+            h.frame(vec![]);
+        }
+        assert_eq!(h.text(), "abde\n");
+    }
+
+    #[test]
+    fn backspace_on_the_page_leaves_the_markup_alone() {
+        let mut h = page("page-back", "a **bc** d\n", "bc");
+        keys(&mut h, &[Key::Backspace]);
+        assert_eq!(h.text(), "a **b** d\n");
+        keys(&mut h, &[Key::Backspace]);
+        assert_eq!(h.text(), "a  d\n", "and goes when there's nothing in it");
+    }
+
+    #[test]
+    fn arrows_pass_over_what_does_not_show() {
+        let mut h = page("page-arrows", "ab **cd** ef\n", "ab");
+        // Past the space and into the bold, past its marks: c is what's next.
+        keys(&mut h, &[Key::ArrowRight, Key::ArrowRight]);
+        h.frame(vec![Event::Text("X".into())]);
+        h.frame(vec![]);
+        assert_eq!(h.text(), "ab **cXd** ef\n");
+    }
+
+    #[test]
+    fn enter_on_the_page_makes_a_paragraph_and_typing_goes_in_it() {
+        let mut h = page("page-enter", "abcd\n", "ab");
+        keys(&mut h, &[Key::Enter]);
+        assert_eq!(h.text(), "ab\n\ncd\n");
+        h.frame(vec![Event::Text("X".into())]);
+        h.frame(vec![]);
+        assert_eq!(h.text(), "ab\n\nXcd\n");
+    }
+
+    #[test]
+    fn enter_at_the_end_leaves_a_line_to_type_on() {
+        let mut h = page("page-gap", "ab\n", "ab");
+        keys(&mut h, &[Key::End, Key::Enter]);
+        assert_eq!(h.text(), "ab\n\n\n");
+        let fields = h.tab.md.view.layout().placed_fields().len();
+        assert_eq!(fields, 2, "a line of its own for the cursor");
+        h.frame(vec![Event::Text("next".into())]);
+        h.frame(vec![]);
+        h.frame(vec![]);
+        assert_eq!(h.text(), "ab\n\nnext\n");
+    }
+
+    #[test]
+    fn lists_go_on_with_enter_on_the_page() {
+        let mut h = page("page-list", "- one\n", "one");
+        keys(&mut h, &[Key::Enter]);
+        assert_eq!(h.text(), "- one\n- \n");
+        h.frame(vec![Event::Text("two".into())]);
+        h.frame(vec![]);
+        assert_eq!(h.text(), "- one\n- two\n");
+    }
+
+    #[test]
+    fn writing_markdown_on_the_page_is_markdown() {
+        let mut h = page("page-write", "", "");
+        for typed in ["#", " ", "T"] {
+            h.frame(vec![Event::Text(typed.into())]);
+            h.frame(vec![]);
+            h.frame(vec![]);
+        }
+        assert_eq!(h.text(), "# T");
+        let doc = h.tab.md.view.document();
+        assert!(matches!(
+            doc.blocks[0].kind,
+            markdown::parse::BlockKind::Heading { .. }
+        ));
+    }
+
+    #[test]
+    fn undo_on_the_page_goes_back_and_keeps_bytes_alone() {
+        let contents = "one  \n\n\n* two\r\n";
+        let mut h = page("page-undo", contents, "one");
+        h.frame(vec![Event::Text("X".into())]);
+        h.frame(vec![]);
+        assert_eq!(h.text(), "oneX  \n\n\n* two\r\n", "untouched bytes stay");
+        h.tab.undo(&h.ctx.clone(), false);
+        h.frame(vec![]);
+        assert_eq!(h.text(), contents);
+    }
+
+    #[test]
+    fn what_was_typed_goes_together_when_undone() {
+        let mut h = page("page-undo-typing", "ab\n", "ab");
+        for typed in ["c", "d", "e"] {
+            h.frame(vec![Event::Text(typed.into())]);
+            h.frame(vec![]);
+        }
+        keys(&mut h, &[Key::Backspace]);
+        assert_eq!(h.text(), "abcd\n");
+        h.key(Modifiers::COMMAND, Key::Z);
+        h.frame(vec![]);
+        assert_eq!(h.text(), "ab\n");
+        h.key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z);
+        h.frame(vec![]);
+        assert_eq!(h.text(), "abcd\n", "and comes back");
+    }
+
+    #[test]
+    fn enter_in_a_quote_is_a_new_paragraph_in_it() {
+        let mut h = page("page-quote", "> abcd\n", "ab");
+        keys(&mut h, &[Key::Enter]);
+        assert_eq!(h.text(), "> ab\n>\n> cd\n");
+    }
+
+    #[test]
+    fn the_documents_ends_are_where_its_text_is() {
+        let mut h = page("page-ends", "# Title\n\nlast\n", "Ti");
+        h.key(Modifiers::COMMAND, Key::End);
+        h.frame(vec![]);
+        h.frame(vec![Event::Text("X".into())]);
+        h.frame(vec![]);
+        assert_eq!(h.text(), "# Title\n\nlastX\n", "not on a line of its own");
+        h.frame(vec![]);
+        h.key(Modifiers::COMMAND, Key::Home);
+        h.frame(vec![]);
+        h.frame(vec![Event::Text("Y".into())]);
+        h.frame(vec![]);
+        assert_eq!(
+            h.text(),
+            "# YTitle\n\nlastX\n",
+            "not before the heading's marks"
+        );
+    }
+
+    /// Backspace, a frame at a time, and what the source is after each.
+    fn backspaces(h: &mut Harness, count: usize) -> Vec<String> {
+        (0..count)
+            .map(|_| {
+                keys(h, &[Key::Backspace]);
+                h.text().to_owned()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_heading_can_be_backspaced_away() {
+        let mut h = page("page-del-head", "one\n\n## ab\n\ntwo\n", "ab");
+        let steps = backspaces(&mut h, 4);
+        assert_eq!(steps[0], "one\n\n## a\n\ntwo\n");
+        assert_eq!(steps[1], "one\n\n## \n\ntwo\n");
+        assert_eq!(steps[2], "one\n\n\n\ntwo\n", "its marks");
+        assert_eq!(steps[3], "one\n\ntwo\n", "and its line");
+        h.frame(vec![Event::Text("X".into())]);
+        h.frame(vec![]);
+        assert_eq!(
+            h.text(),
+            "oneX\n\ntwo\n",
+            "the cursor is where it was taken to"
+        );
+    }
+
+    #[test]
+    fn a_heading_at_the_top_can_be_backspaced_away() {
+        let mut h = page("page-del-top", "# a\n\ntwo\n", "a");
+        let steps = backspaces(&mut h, 3);
+        assert_eq!(steps[0], "# \n\ntwo\n");
+        assert_eq!(steps[1], "\n\ntwo\n");
+        assert_eq!(steps[2], "two\n");
+    }
+
+    #[test]
+    fn a_quote_can_be_backspaced_away() {
+        let mut h = page("page-del-quote", "one\n\n> ab\n\ntwo\n", "ab");
+        let steps = backspaces(&mut h, 4);
+        assert_eq!(steps[1], "one\n\n> \n\ntwo\n");
+        assert_eq!(steps[2], "one\n\n\n\ntwo\n");
+        assert_eq!(steps[3], "one\n\ntwo\n");
+    }
+
+    #[test]
+    fn backspace_at_the_start_of_a_quote_ends_the_quote() {
+        let mut h = page("page-unquote", "> ab\n", "> ");
+        assert_eq!(backspaces(&mut h, 1)[0], "ab\n");
+    }
+
+    #[test]
+    fn a_list_item_can_be_backspaced_away() {
+        let mut h = page("page-del-item", "- a\n- b\n- c\n", "b");
+        let steps = backspaces(&mut h, 2);
+        assert_eq!(steps[0], "- a\n- \n- c\n");
+        assert_eq!(
+            steps[1], "- a\n- c\n",
+            "and its line, there being no room for one"
+        );
+        h.frame(vec![Event::Text("X".into())]);
+        h.frame(vec![]);
+        assert_eq!(h.text(), "- aX\n- c\n");
+    }
+
+    #[test]
+    fn a_tasks_box_goes_whole() {
+        let mut h = page("page-del-task", "- [ ] ab\n", "- [ ] ");
+        assert_eq!(backspaces(&mut h, 1)[0], "- ab\n");
+    }
+
+    #[test]
+    fn what_has_no_text_goes_with_a_backspace_after_it() {
+        for block in [
+            "---",
+            "$$\nx\n$$",
+            "```mermaid\nflowchart LR\n A --> B\n```",
+        ] {
+            let contents = format!("one\n\n{block}\n\ntwo\n");
+            let mut h = page("page-del-block", &contents, "\n\ntwo");
+            // A diagram is text until it's drawn.
+            let start = web_time::Instant::now();
+            while h.tab.md.view.layout().placed_fields().len() != 2 {
+                assert!(start.elapsed() < Duration::from_secs(30), "{block}");
+                h.shared.markdown_images.begin_frame(&h.ctx.clone());
+                h.frame(vec![]);
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            // At the start of "two".
+            keys(&mut h, &[Key::Home]);
+            assert_eq!(backspaces(&mut h, 1)[0], "one\n\ntwo\n", "{block}");
+            h.frame(vec![Event::Text("X".into())]);
+            h.frame(vec![]);
+            assert_eq!(h.text(), "one\n\nXtwo\n", "{block}");
+        }
+    }
+
+    #[test]
+    fn what_has_no_text_goes_with_a_delete_before_it() {
+        let mut h = page("page-del-next", "one\n\n---\n\ntwo\n", "one");
+        keys(&mut h, &[Key::Delete]);
+        assert_eq!(h.text(), "one\n\ntwo\n");
+    }
+
+    #[test]
+    fn an_emptied_code_block_goes() {
+        let mut h = page("page-del-code", "one\n\n```\nab\n```\n\ntwo\n", "ab");
+        let steps = backspaces(&mut h, 3);
+        assert_eq!(steps[1], "one\n\n```\n\n```\n\ntwo\n");
+        assert_eq!(steps[2], "one\n\ntwo\n");
+    }
+
+    #[test]
+    fn backspace_after_code_goes_into_it_and_takes_nothing() {
+        let mut h = page("page-after-code", "```\nab\n```\n\ntwo\n", "\n\ntwo");
+        keys(&mut h, &[Key::Home, Key::Backspace]);
+        assert_eq!(h.text(), "```\nab\n```\n\ntwo\n");
+        h.frame(vec![Event::Text("X".into())]);
+        h.frame(vec![]);
+        assert_eq!(h.text(), "```\nabX\n```\n\ntwo\n");
+    }
+
+    #[test]
+    fn an_empty_blocks_cursor_is_in_that_block() {
+        for contents in ["one\n\n> \n\ntwo\n", "- a\n- \n- c\n", "one\n\n# \n\ntwo\n"] {
+            let at = match contents
+                .find("> ")
+                .or(contents.find("- \n"))
+                .or(contents.find("# "))
+            {
+                Some(at) => &contents[at..at + 2],
+                None => unreachable!(),
+            };
+            let mut h = page("page-empty", contents, at);
+            h.frame(vec![Event::Text("X".into())]);
+            h.frame(vec![]);
+            assert_eq!(h.text(), contents.replacen(at, &format!("{at}X"), 1));
+        }
+    }
+
+    /// Words have spaces, which don't show at the end of a line.
+    #[test]
+    fn blocks_of_several_words_can_be_backspaced_away() {
+        let rest = "Top.\n\nNext words.\n\nEnd.\n";
+        for (block, at) in [
+            ("# A heading", "A heading"),
+            ("> A quote here", "A quote here"),
+        ] {
+            let doc = format!("Top.\n\n{block}\n\nNext words.\n\nEnd.\n");
+            let mut h = page("page-words", &doc, at);
+            // Its text, its marker, and its line.
+            backspaces(&mut h, at.chars().count() + 2);
+            assert_eq!(h.text(), rest, "{block}");
+            h.frame(vec![Event::Text("X".into())]);
+            h.frame(vec![]);
+            assert_eq!(h.text(), "Top.X\n\nNext words.\n\nEnd.\n", "{block}");
+        }
+        let doc = "- one\n- item two\n\nEnd.\n";
+        let mut h = page("page-words-list", doc, "item two");
+        backspaces(&mut h, "item two".len() + 1);
+        assert_eq!(h.text(), "- one\n\nEnd.\n");
+    }
+
+    #[test]
+    fn typing_after_a_trailing_space_stays_in_its_block() {
+        let mut h = page("page-space", "ab\n\n# next\n", "ab");
+        h.frame(vec![Event::Text(" ".into())]);
+        h.frame(vec![]);
+        h.frame(vec![Event::Text("c".into())]);
+        h.frame(vec![]);
+        assert_eq!(h.text(), "ab c\n\n# next\n");
+    }
+
+    #[test]
+    fn a_read_only_document_can_only_be_read() {
+        let mut h = page("page-read-only", "ab\n", "ab");
+        if let Doc::Ready(buffer) = &mut h.tab.doc {
+            buffer.read_only = Some(document::ReadOnly::Permissions);
+        }
+        h.frame(vec![]);
+        assert_eq!(h.tab.shown_mode, Mode::Preview);
+        h.frame(vec![Event::Text("X".into())]);
+        h.frame(vec![]);
+        assert_eq!(h.text(), "ab\n");
     }
 
     #[test]
