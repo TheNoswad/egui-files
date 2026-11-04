@@ -102,6 +102,8 @@ pub enum AppAction {
 
 /// Everything a view or toolbar can ask the tab to do.
 pub enum Action {
+    /// Show this in its folder.
+    Reveal(PathBuf),
     /// Index into the visible list.
     Select {
         index: usize,
@@ -1366,6 +1368,7 @@ impl BrowserTab {
                 self.scroll_to = Some(index);
             }
             Action::Activate(path) => self.activate(path, &mut shared.app_actions),
+            Action::Reveal(path) => shared.app_actions.push(AppAction::Reveal(path)),
             Action::ActivateCursor => {
                 if let Some(&i) = self.cursor.and_then(|c| visible.get(c)) {
                     self.activate(self.entries()[i].path.clone(), &mut shared.app_actions);

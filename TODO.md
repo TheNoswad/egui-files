@@ -84,6 +84,7 @@
 - [ ] Bare email addresses aren't linked (`<a@b.c>` is)
 - [ ] Text selection in rendered documents on touchscreens (dragging scrolls there)
 - [ ] Check on a real Android device: web links opening through `android::open_url` (compiled, never run). Tapping links and pictures, broken because a lifted finger leaves no pointer, is fixed and covered by tests with those events
+- [x] Links in the preview pane: a heading scrolls the pane to it, and a program is shown in its folder
 - [x] Links on a touchscreen while editing the page: a tap puts the cursor there, and a button by it opens the link, as there's no Ctrl
 
 ## Web demo

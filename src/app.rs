@@ -2777,6 +2777,7 @@ impl FilesApp {
                     }
                 }
                 tab::Action::Edit(path) => app_actions.push(AppAction::Edit(path)),
+                tab::Action::Reveal(path) => app_actions.push(AppAction::Reveal(path)),
                 _ => {}
             }
         }

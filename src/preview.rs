@@ -220,11 +220,23 @@ pub fn show(
                     };
                     ui.with_layout(Layout::top_down(Align::Min), |ui| {
                         let id = egui::Id::new(("preview-markdown", &entry.path));
+                        let top = ui.next_widget_position();
                         let clicks = view.show_inline(ui, id, &options, markdown_images);
                         for click in clicks {
-                            if let markdown::Click::Link { link, .. } = click {
-                                follow_link(ui.ctx(), &link, &dir, actions);
+                            let markdown::Click::Link { link, .. } = click else {
+                                continue;
+                            };
+                            let target = markdown::links::resolve(&link, &dir);
+                            // A heading in what's showing: the pane scrolls to it.
+                            if let markdown::Target::Anchor(anchor) = &target {
+                                if let Some(y) = view.anchor_y(anchor) {
+                                    let at = top + egui::vec2(0.0, y);
+                                    let rect = egui::Rect::from_min_size(at, egui::vec2(1.0, 1.0));
+                                    ui.scroll_to_rect(rect, Some(egui::Align::Min));
+                                }
+                                continue;
                             }
+                            follow_link(ui.ctx(), target, actions);
                         }
                         if preview.truncated {
                             ui.weak("…");
@@ -274,23 +286,20 @@ pub fn show(
     editable
 }
 
-/// Follows a link in a previewed document, where there's no place to go to
-/// within it: another document or file opens as if it was chosen.
-fn follow_link(
-    ctx: &egui::Context,
-    link: &markdown::parse::Link,
-    dir: &Path,
-    actions: &mut Vec<Action>,
-) {
-    match markdown::links::resolve(link, dir) {
+/// Follows a link in a previewed document: another document or file opens as
+/// if it was chosen, and a program is shown in its folder rather than run.
+fn follow_link(ctx: &egui::Context, target: markdown::Target, actions: &mut Vec<Action>) {
+    match target {
         markdown::Target::Web(url) => markdown::links::open_web(ctx, url),
         markdown::Target::Document(path, _) => actions.push(Action::Activate(path)),
         markdown::Target::File(path) => {
             let run =
                 disk::metadata(&path).is_ok_and(|meta| markdown::links::is_program(&path, &meta));
-            if !run {
-                actions.push(Action::Activate(path));
-            }
+            actions.push(if run {
+                Action::Reveal(path)
+            } else {
+                Action::Activate(path)
+            });
         }
         markdown::Target::Anchor(_) | markdown::Target::Refused => {}
     }

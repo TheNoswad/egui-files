@@ -194,6 +194,16 @@ impl MdView {
         self.inputs = None;
     }
 
+    /// How far down the page a heading or footnote is.
+    pub fn anchor_y(&self, anchor: &str) -> Option<f32> {
+        let key = anchor.strip_prefix('#').unwrap_or(anchor);
+        self.layout
+            .anchors
+            .get(key)
+            .or_else(|| self.layout.anchors.get(&parse::slug(key)))
+            .copied()
+    }
+
     /// Whether what's parsed and laid out is this text.
     pub fn is_current(&self, text: &str) -> bool {
         self.parsed.as_deref() == Some(text) && self.inputs.is_some()
@@ -696,12 +706,7 @@ impl MdView {
 
     /// How far down an anchor is, for scrolling to it.
     pub fn anchor_offset(&self, anchor: &str) -> Option<f32> {
-        let key = anchor.strip_prefix('#').unwrap_or(anchor);
-        self.layout
-            .anchors
-            .get(key)
-            .or_else(|| self.layout.anchors.get(&parse::slug(key)))
-            .map(|y| (y + MARGIN - 8.0).max(0.0))
+        self.anchor_y(anchor).map(|y| (y + MARGIN - 8.0).max(0.0))
     }
 
     /// The height in the scrolling view that shows this source offset.
@@ -1350,6 +1355,78 @@ mod tests {
         });
         output.textures_delta.clear();
         view.layout_generation
+    }
+
+    /// A page shown inside something that scrolls, as in the preview pane, with
+    /// the events of a finger: when it lifts, there's no pointer.
+    #[test]
+    fn a_tap_on_a_link_in_a_scrolled_page_is_a_click() {
+        let ctx = Context::default();
+        crate::touch::set_touch(&ctx, true);
+        let mut view = MdView::default();
+        let mut images = Images::default();
+        let options = Options {
+            dir: std::path::Path::new("/"),
+            syntax_theme: "",
+            code_fg: Color32::WHITE,
+            code_bg: Color32::BLACK,
+            allow_remote: false,
+            editable: false,
+            scroll_to: None,
+            compact: true,
+            hits: None,
+            caret: None,
+        };
+        let mut frame = |events: Vec<egui::Event>, view: &mut MdView| {
+            let mut clicks = Vec::new();
+            let mut top = Pos2::ZERO;
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 600.0))),
+                events,
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| {
+                ScrollArea::vertical()
+                    .scroll_source(crate::touch::scroll_source(ui.ctx()))
+                    .auto_shrink(false)
+                    .show(ui, |ui| {
+                        top = ui.next_widget_position();
+                        view.sync(ui.ctx(), "See [the other](other.md) one.\n");
+                        clicks = view.show_inline(ui, Id::new("t"), &options, &mut images);
+                    });
+            });
+            output.textures_delta.clear();
+            (clicks, top)
+        };
+        let (_, top) = frame(vec![], &mut view);
+        frame(vec![], &mut view);
+        let pos = view.layout().items.iter().find_map(|item| match item {
+            Item::Text(text) => {
+                let (chars, _) = text.links.first()?;
+                let rects = row_rects(&text.galley, chars);
+                Some(rects[0].center() + text.pos.to_vec2() + top.to_vec2())
+            }
+            _ => None,
+        });
+        let pos = pos.expect("a link");
+        let button = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(
+            vec![egui::Event::PointerMoved(pos), button(true)],
+            &mut view,
+        );
+        let (clicks, _) = frame(vec![button(false), egui::Event::PointerGone], &mut view);
+        assert!(
+            clicks
+                .iter()
+                .any(|click| matches!(click, Click::Link { .. })),
+            "{}",
+            clicks.len()
+        );
     }
 
     /// egui starts its font atlas over the pass after the theme changes, by
