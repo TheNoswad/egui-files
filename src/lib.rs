@@ -75,6 +75,7 @@ mod windows_drag;
 mod windows_frame;
 #[cfg(target_os = "linux")]
 mod x11_dnd;
+mod zoom;
 
 /// Runs the desktop app.
 #[cfg(not(target_arch = "wasm32"))]

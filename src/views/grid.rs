@@ -8,7 +8,7 @@ use crate::{
     video,
 };
 
-/// The icon sizes to choose from, by the slider or a pinch.
+/// The icon sizes to choose from, by the slider, Ctrl and the wheel, or a pinch.
 pub const ICON_SIZES: std::ops::RangeInclusive<f32> = 32.0..=192.0;
 
 pub fn show(
@@ -19,9 +19,6 @@ pub fn show(
     drag_select: bool,
     actions: &mut Vec<Action>,
 ) {
-    // A pinch over the grid resizes the icons, as the slider in the menu does.
-    let area = ui.available_rect_before_wrap();
-    crate::touch::pinch(ui, area, &mut shared.icon_size, ICON_SIZES);
     let icon_size = shared.icon_size;
     let cell = vec2(icon_size + 32.0, icon_size + 40.0);
     let colors = crate::theme::colors(ui.ctx());

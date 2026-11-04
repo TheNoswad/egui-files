@@ -656,7 +656,7 @@ impl Themes {
             ui.horizontal(|ui| {
                 if ui
                     .add(egui::Slider::new(&mut zoom, 0.5..=3.0).fixed_decimals(2))
-                    .on_hover_text("Ctrl and +, - or 0 also zoom")
+                    .on_hover_text("Ctrl and +, - also zoom; Ctrl+0 goes back to 100%")
                     .changed()
                 {
                     ui.ctx().set_zoom_factor(zoom);

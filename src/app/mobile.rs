@@ -686,6 +686,9 @@ fn menu(ui: &mut Ui, mobile: &mut Mobile, viewer: &mut Viewer, requests: &mut Ve
                 .show(ui, |ui| {
                     ui.checkbox(&mut viewer.shared.show_hidden, "Show hidden files");
                     ui.checkbox(&mut viewer.shared.show_thumbnails, "Show thumbnails");
+                    if !crate::zoom::is_default(ui.ctx()) {
+                        crate::zoom::controls(ui);
+                    }
                 });
             ui.separator();
             let commands = [

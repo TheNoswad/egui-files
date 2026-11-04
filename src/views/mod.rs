@@ -8,6 +8,9 @@ mod marquee;
 
 pub(crate) use grid::ICON_SIZES;
 
+/// How far the Details and Columns lists can scale from the theme's text size.
+pub(crate) const LIST_SCALES: std::ops::RangeInclusive<f32> = 0.75..=2.0;
+
 use egui::{Modifiers, Response, Ui};
 use egui_phosphor::regular as icon;
 use serde::{Deserialize, Serialize};
@@ -46,8 +49,18 @@ pub fn show(
     drag_select: bool,
     actions: &mut Vec<Action>,
 ) {
+    // Ctrl and the wheel, or a pinch, over the items resizes them, as the
+    // sliders in the menu do. Gentler for text, which a notch of the wheel
+    // would otherwise change by more than a quarter.
+    let area = ui.available_rect_before_wrap();
+    if tab.view == ViewMode::Grid {
+        crate::touch::zoom_gesture(ui, area, &mut shared.icon_size, ICON_SIZES, 1.0);
+    } else {
+        crate::touch::zoom_gesture(ui, area, &mut shared.list_scale, LIST_SCALES, 0.4);
+    }
     match tab.view {
         ViewMode::Details => {
+            scale_text(ui, shared.list_scale);
             let sizes = shared.usage.folder_sizes(ui.ctx(), &tab.path);
             let menu = MenuContext::new(shared);
             details::show(
@@ -62,6 +75,14 @@ pub fn show(
         }
         ViewMode::Grid => grid::show(ui, tab, visible, shared, drag_select, actions),
         ViewMode::Columns => columns::show(ui, tab, visible, shared, drag_select, actions),
+    }
+}
+
+/// Scales the text in `ui`, and with it the rows sized to it. In half points,
+/// so a wheel's or a pinch's many sizes don't each fill the font atlas.
+fn scale_text(ui: &mut Ui, scale: f32) {
+    for font in ui.style_mut().text_styles.values_mut() {
+        font.size = (font.size * scale * 2.0).round() / 2.0;
     }
 }
 

@@ -34,6 +34,9 @@ pub fn show(
 ) {
     let show_hidden = shared.show_hidden;
     let height = ui.available_height();
+    // The lists scale; a file's preview in the last column keeps its text size.
+    let scale = shared.list_scale;
+    let width = COLUMN_WIDTH * scale;
     ScrollArea::horizontal()
         .scroll_source(crate::touch::scroll_source(ui.ctx()))
         .id_salt(("columns", tab.id))
@@ -44,17 +47,20 @@ pub fn show(
                 let mut chain: Vec<&Path> = crate::remote::ancestors(&tab.path).collect();
                 chain.reverse();
                 for pair in chain.windows(2) {
-                    column(ui, height, |ui| {
+                    column(ui, width, height, |ui| {
+                        super::scale_text(ui, scale);
                         ancestor_column(ui, tab, pair[0], pair[1], show_hidden, actions);
                     });
                 }
                 let menu = super::MenuContext::new(shared);
-                column(ui, height, |ui| {
+                column(ui, width, height, |ui| {
+                    super::scale_text(ui, scale);
                     current_column(ui, tab, visible, menu, drag_select, actions)
                 });
                 if let Some(entry) = tab.preview_entry() {
-                    column(ui, height, |ui| {
+                    column(ui, width, height, |ui| {
                         if entry.is_dir {
+                            super::scale_text(ui, scale);
                             preview_folder(ui, tab, entry, show_hidden, actions);
                         } else {
                             preview_file(ui, tab, entry, shared, actions);
@@ -65,13 +71,13 @@ pub fn show(
         });
 }
 
-fn column(ui: &mut Ui, height: f32, add_contents: impl FnOnce(&mut Ui)) {
+fn column(ui: &mut Ui, width: f32, height: f32, add_contents: impl FnOnce(&mut Ui)) {
     ui.allocate_ui_with_layout(
-        vec2(COLUMN_WIDTH, height),
+        vec2(width, height),
         Layout::top_down_justified(Align::Min),
         |ui| {
-            ui.set_min_size(vec2(COLUMN_WIDTH, height));
-            ui.set_max_width(COLUMN_WIDTH);
+            ui.set_min_size(vec2(width, height));
+            ui.set_max_width(width);
             add_contents(ui);
         },
     );

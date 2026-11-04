@@ -162,7 +162,20 @@ fn general(ui: &mut Ui, app: &mut Access) {
              not on network drives or FUSE mounts (a disk usage tab still can)",
         );
     crate::dates::checkbox(ui);
-    ui.add(egui::Slider::new(&mut shared.icon_size, crate::views::ICON_SIZES).text("Icon size"));
+    ui.add(
+        egui::Slider::new(&mut shared.icon_size, crate::views::ICON_SIZES)
+            .fixed_decimals(0)
+            .text("Icon size"),
+    )
+    .on_hover_text("In the Icons view; Ctrl and the wheel over the items also change it");
+    ui.add(
+        egui::Slider::new(&mut shared.list_scale, crate::views::LIST_SCALES)
+            .fixed_decimals(2)
+            .text("List size"),
+    )
+    .on_hover_text(
+        "In the Details and Columns views; Ctrl and the wheel over the items also change it",
+    );
 
     group(ui, "New tabs");
     new_tabs(ui, app.new_tabs);

@@ -401,13 +401,17 @@ pub fn item_sense(ctx: &egui::Context) -> egui::Sense {
     }
 }
 
-/// Scales `value` by a pinch (or Ctrl and the scroll wheel, on the
-/// desktop) over `rect` in the mobile layout, keeping it within `range`.
-/// Returns whether it changed.
-pub fn pinch(ui: &egui::Ui, rect: egui::Rect, value: &mut f32, range: RangeInclusive<f32>) -> bool {
-    if !is_touch(ui.ctx()) {
-        return false;
-    }
+/// Scales `value` by a pinch or Ctrl and the scroll wheel over `rect`,
+/// keeping it within `range`; a `strength` under 1 takes more of the gesture to
+/// change it as much. A window or menu over `rect` keeps the gesture for
+/// itself. Returns whether it changed.
+pub fn zoom_gesture(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    value: &mut f32,
+    range: RangeInclusive<f32>,
+    strength: f32,
+) -> bool {
     let (zoom, at) = ui.input(|i| {
         let at = i
             .multi_touch()
@@ -415,10 +419,12 @@ pub fn pinch(ui: &egui::Ui, rect: egui::Rect, value: &mut f32, range: RangeInclu
             .or(i.pointer.latest_pos());
         (i.zoom_delta(), at)
     });
-    if zoom == 1.0 || !at.is_some_and(|at| rect.contains(at)) {
+    let over =
+        at.is_some_and(|at| rect.contains(at) && ui.ctx().layer_id_at(at) == Some(ui.layer_id()));
+    if zoom == 1.0 || !over {
         return false;
     }
-    let scaled = (*value * zoom).clamp(*range.start(), *range.end());
+    let scaled = (*value * zoom.powf(strength)).clamp(*range.start(), *range.end());
     let changed = scaled != *value;
     if changed && (scaled == *range.start() || scaled == *range.end()) {
         crate::haptics::play(Haptic::Limit);

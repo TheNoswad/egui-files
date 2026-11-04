@@ -697,6 +697,7 @@ mod tests {
             show_hidden: false,
             show_thumbnails: true,
             icon_size: 64.0,
+            list_scale: 1.0,
             clipboard: None,
             focused_tab: None,
             preview_shown: true,

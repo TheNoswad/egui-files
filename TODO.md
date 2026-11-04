@@ -40,7 +40,7 @@
     - [x] Touch in the trash and archive tabs: a tap opens (archive) or adds to the selection (trash, or the archive while selecting); back clears it
     - [x] Touch drag selection in the icon grid selects in reading order between the two items
     - [x] Moving files by touch: while selecting, a long press on a selected item drags the selection onto a folder
-    - [x] Pinch to zoom: icon size in the grid, text size in the terminal (Ctrl+scroll in the mobile layout on the desktop)
+    - [x] Pinch to zoom: item size in the file views (also Ctrl+scroll on the desktop), text size in the terminal (Ctrl+scroll in the mobile layout on the desktop)
     - [x] Open files in other apps: `ACTION_VIEW` with the file's media store `content://` URI (no FileProvider: the APK has no Java code); "Open with" shows Android's chooser. Files from archives extract to `Android/media/<package>` so they can be shared. Checked on the Pixel: a PDF in Firefox, text through the chooser, an image from a zip in Files by Google
     - [x] Trash tab's toolbar overflows at phone width
     - [x] Hide the bottom bar while the on-screen keyboard is up

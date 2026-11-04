@@ -79,6 +79,8 @@ struct Persisted {
     show_thumbnails: bool,
     #[serde(default = "default_icon_size")]
     icon_size: f32,
+    #[serde(default = "default_list_scale")]
+    list_scale: f32,
     #[serde(default)]
     show_terminal: bool,
     #[serde(default)]
@@ -137,6 +139,10 @@ fn default_icon_size() -> f32 {
     64.0
 }
 
+fn default_list_scale() -> f32 {
+    1.0
+}
+
 fn default_volume() -> f64 {
     crate::video::DEFAULT_VOLUME
 }
@@ -151,6 +157,7 @@ struct PersistedRef<'a> {
     tree: &'a FolderTree,
     show_thumbnails: bool,
     icon_size: f32,
+    list_scale: f32,
     terminal: &'a TerminalPanel,
     video_volume: f64,
     video_quality: Quality,
@@ -475,6 +482,7 @@ impl FilesApp {
                 tree: FolderTree::default(),
                 show_thumbnails: default_true(),
                 icon_size: default_icon_size(),
+                list_scale: default_list_scale(),
                 show_terminal: false,
                 terminal: TerminalPanel::default(),
                 video_volume: default_volume(),
@@ -505,6 +513,7 @@ impl FilesApp {
             tree,
             show_thumbnails,
             icon_size,
+            list_scale,
             show_terminal,
             mut terminal,
             video_volume,
@@ -552,6 +561,7 @@ impl FilesApp {
                 show_hidden,
                 show_thumbnails,
                 icon_size,
+                list_scale,
                 images: ImageCache::new(&cc.egui_ctx),
                 videos: {
                     let mut videos = Videos::new(&cc.egui_ctx);
@@ -1650,7 +1660,17 @@ impl FilesApp {
                     ui.checkbox(&mut self.shared.show_thumbnails, "Show thumbnails");
                     ui.add(
                         egui::Slider::new(&mut self.shared.icon_size, crate::views::ICON_SIZES)
+                            .fixed_decimals(0)
                             .text("Icon size"),
+                    );
+                    ui.add(
+                        egui::Slider::new(&mut self.shared.list_scale, crate::views::LIST_SCALES)
+                            .fixed_decimals(2)
+                            .text("List size"),
+                    );
+                    ui.menu_button(
+                        format!("{} Zoom the whole app: {}", icon::MAGNIFYING_GLASS, crate::zoom::label(&ctx)),
+                        egui::gui_zoom::zoom_menu_buttons,
                     );
                     ui.separator();
                     ui.menu_button(format!("{} Theme", icon::PAINT_BRUSH), |ui| {
@@ -1728,6 +1748,7 @@ impl FilesApp {
                         ui.close();
                     }
                 });
+                crate::zoom::indicator(ui);
                 ui.cursor().left()
             })
             .inner
@@ -3003,6 +3024,7 @@ impl FilesApp {
             tree: &self.sidebar.tree,
             show_thumbnails: self.shared.show_thumbnails,
             icon_size: self.shared.icon_size,
+            list_scale: self.shared.list_scale,
             terminal: &self.terminal,
             video_volume: self.shared.videos.volume(),
             video_quality: self.shared.videos.quality(),

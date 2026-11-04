@@ -180,7 +180,9 @@ impl Terminal {
         // A pinch sizes the text, for every terminal.
         let scale_id = Id::new("terminal_text_scale");
         let mut scale = ui.data_mut(|d| *d.get_persisted_mut_or(scale_id, 1.0_f32));
-        if crate::touch::pinch(ui, rect, &mut scale, 0.5..=3.0) {
+        if crate::touch::is_touch(ui.ctx())
+            && crate::touch::zoom_gesture(ui, rect, &mut scale, 0.5..=3.0, 1.0)
+        {
             ui.data_mut(|d| d.insert_persisted(scale_id, scale));
         }
         let mut font = TextStyle::Monospace.resolve(ui.style());

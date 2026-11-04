@@ -37,6 +37,7 @@ pub enum Command {
     ToggleHidden,
     Extract,
     ExtractTo,
+    PreviewItem,
 }
 
 /// The commands under a heading each, as the settings list them.
@@ -66,6 +67,7 @@ pub const GROUPS: [(&str, &[Command]); 3] = [
     (
         "Files",
         &[
+            Command::PreviewItem,
             Command::Properties,
             Command::Edit,
             Command::Rename,
@@ -105,6 +107,7 @@ impl Command {
             Self::ToggleHidden => "Show hidden files",
             Self::Extract => "Extract here",
             Self::ExtractTo => "Extract to…",
+            Self::PreviewItem => "Preview the item",
         }
     }
 
@@ -112,6 +115,7 @@ impl Command {
     pub fn note(self) -> Option<&'static str> {
         match self {
             Self::Trash => Some("In the trash, deletes for good"),
+            Self::PreviewItem => Some("Opens the preview pane on it; again closes the pane"),
             Self::Extract => {
                 Some("Into a folder named after the archive when it has more than one item")
             }
@@ -146,6 +150,7 @@ impl Command {
             Self::ToggleHidden => &[(cmd, Key::H)],
             Self::Extract => &[(cmd, Key::E)],
             Self::ExtractTo => &[(cmd_shift, Key::E)],
+            Self::PreviewItem => &[(none, Key::Space)],
         };
         keys.iter()
             .map(|&(m, k)| KeyboardShortcut::new(m, k))
@@ -156,7 +161,7 @@ impl Command {
 /// Shortcuts that can't be changed, listed in the settings so the list is
 /// complete. Copy, cut and paste reach the app as clipboard events rather
 /// than key presses, and the arrows and the like move around lists.
-pub const FIXED: [(&str, Modifiers, Key); 9] = [
+pub const FIXED: [(&str, Modifiers, Key); 13] = [
     ("Copy", Modifiers::COMMAND, Key::C),
     ("Cut", Modifiers::COMMAND, Key::X),
     ("Paste", Modifiers::COMMAND, Key::V),
@@ -170,6 +175,10 @@ pub const FIXED: [(&str, Modifiers, Key); 9] = [
     ("Extend the selection", Modifiers::SHIFT, Key::ArrowDown),
     ("First item", Modifiers::NONE, Key::Home),
     ("Last item", Modifiers::NONE, Key::End),
+    ("Zoom the whole app in", Modifiers::COMMAND, Key::Plus),
+    ("Zoom the whole app in", Modifiers::COMMAND, Key::Equals),
+    ("Zoom the whole app out", Modifiers::COMMAND, Key::Minus),
+    ("Reset the zoom", Modifiers::COMMAND, Key::Num0),
 ];
 
 /// Keys that keep their own meaning without modifiers: list movement,
@@ -308,16 +317,44 @@ impl Keymap {
     /// Whether one of `command`'s shortcuts was pressed this frame; takes
     /// the key press so nothing else sees it.
     pub fn pressed(&self, input: &mut InputState, command: Command) -> bool {
+        let (any, _) = self.take_presses(input, command);
+        any
+    }
+
+    /// Like [`Self::pressed`], but holding the key down counts once: for
+    /// what would flicker if it repeated.
+    pub fn pressed_once(&self, input: &mut InputState, command: Command) -> bool {
+        let (_, first) = self.take_presses(input, command);
+        first
+    }
+
+    /// Takes `command`'s key presses; returns whether there were any, and
+    /// whether one of them wasn't the key repeating.
+    fn take_presses(&self, input: &mut InputState, command: Command) -> (bool, bool) {
         if self.capturing {
-            return false;
+            return (false, false);
         }
         let shortcuts = self.shortcuts(command);
-        let before = input.events.len();
-        input.events.retain(|event| {
-            !matches!(event, Event::Key { key, modifiers, pressed: true, .. }
-                if shortcuts.iter().any(|s| s.logical_key == *key && modifiers.matches_exact(s.modifiers)))
+        let mut any = false;
+        let mut first = false;
+        input.events.retain(|event| match event {
+            Event::Key {
+                key,
+                modifiers,
+                pressed: true,
+                repeat,
+                ..
+            } if shortcuts
+                .iter()
+                .any(|s| s.logical_key == *key && modifiers.matches_exact(s.modifiers)) =>
+            {
+                any = true;
+                first |= !repeat;
+                false
+            }
+            _ => true,
         });
-        input.events.len() != before
+        (any, first)
     }
 }
 
@@ -517,6 +554,6 @@ mod tests {
             }
         }
         let listed: usize = GROUPS.iter().map(|(_, c)| c.len()).sum();
-        assert_eq!(listed, 22, "every command is listed once");
+        assert_eq!(listed, 23, "every command is listed once");
     }
 }

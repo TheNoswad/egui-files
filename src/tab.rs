@@ -32,6 +32,8 @@ pub struct Shared {
     pub show_thumbnails: bool,
     /// Icon/thumbnail size in the grid view, in points.
     pub icon_size: f32,
+    /// The text size of the Details and Columns lists, over the theme's.
+    pub list_scale: f32,
     pub clipboard: Option<FileClipboard>,
     pub focused_tab: Option<u64>,
     /// The preview pane is open somewhere in the dock.
@@ -168,6 +170,9 @@ pub enum Action {
     TogglePreview,
     /// Show the preview of the selection, opening it if it's closed.
     ShowPreview,
+    /// Opens the preview on the one item selected or under the cursor; with
+    /// the preview open, closes it.
+    PreviewItem,
     /// Open the selection with an app, or ask which when `None`.
     OpenWith(Option<open_with::Target>),
     /// Open the selected files in editor tabs.
@@ -725,6 +730,8 @@ impl BrowserTab {
         if keymap.is_capturing() {
             return;
         }
+        // Tabbed to a button, say, whose press Space is.
+        let widget_focused = ctx.memory(|m| m.focused().is_some());
         ctx.input_mut(|i| {
             // The user's shortcuts first: the fixed keys below match
             // loosely, so Alt+Down would otherwise move the cursor.
@@ -751,6 +758,9 @@ impl BrowserTab {
                 if keymap.pressed(i, command) {
                     actions.push(action);
                 }
+            }
+            if !widget_focused && keymap.pressed_once(i, C::PreviewItem) {
+                actions.push(Action::PreviewItem);
             }
             let mut key = |mods, key| i.consume_key(mods, key);
             if self.view == ViewMode::Columns {
@@ -1775,6 +1785,20 @@ impl BrowserTab {
             Action::ToggleHidden => shared.show_hidden = !shared.show_hidden,
             Action::TogglePreview => shared.app_actions.push(AppAction::TogglePreview),
             Action::ShowPreview => shared.app_actions.push(AppAction::ShowPreview),
+            Action::PreviewItem => {
+                if !shared.preview_shown {
+                    if self.selection.is_empty() {
+                        // Selection cleared, cursor still there: that item.
+                        if let Some(index) = self.cursor.filter(|&c| c < visible.len()) {
+                            self.select(index, Modifiers::NONE, &visible);
+                        }
+                    }
+                    if self.preview_entry().is_none() {
+                        return;
+                    }
+                }
+                shared.app_actions.push(AppAction::TogglePreview);
+            }
         }
     }
 
@@ -1992,6 +2016,7 @@ mod tests {
             show_hidden: false,
             show_thumbnails: true,
             icon_size: 64.0,
+            list_scale: 1.0,
             clipboard: None,
             focused_tab: Some(tab.id),
             preview_shown: false,
@@ -2242,6 +2267,117 @@ mod tests {
         let mut other = BrowserTab::new(2, root.clone());
         run_frame(&ctx, &mut other, &mut shared, &[]);
         assert!(shared.usage.folder_sizes(&ctx, &root).is_none());
+        disk::remove_dir_all(root).unwrap();
+    }
+
+    /// Sends Space going down or up, returning whether that asked to toggle
+    /// the preview. egui counts a press while it's down as the key repeating.
+    fn space_key(ctx: &Context, tab: &mut BrowserTab, shared: &mut Shared, pressed: bool) -> bool {
+        let event = egui::Event::Key {
+            key: Key::Space,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        };
+        run_events(ctx, tab, shared, vec![event]);
+        std::mem::take(&mut shared.app_actions)
+            .iter()
+            .any(|action| matches!(action, AppAction::TogglePreview))
+    }
+
+    fn space(ctx: &Context, tab: &mut BrowserTab, shared: &mut Shared) -> bool {
+        let toggled = space_key(ctx, tab, shared, true);
+        space_key(ctx, tab, shared, false);
+        toggled
+    }
+
+    #[test]
+    fn space_previews_the_item() {
+        let root = fixture("space");
+        let ctx = Context::default();
+        let mut tab = BrowserTab::new(1, root.join("a"));
+        let mut shared = shared(&ctx, &tab);
+        run_frame(&ctx, &mut tab, &mut shared, &[]);
+
+        // No item to preview.
+        assert!(!space(&ctx, &mut tab, &mut shared));
+
+        run_frame(&ctx, &mut tab, &mut shared, &[Key::ArrowDown]);
+        assert!(space(&ctx, &mut tab, &mut shared));
+        // Holding it down doesn't flicker the pane.
+        assert!(space_key(&ctx, &mut tab, &mut shared, true));
+        assert!(!space_key(&ctx, &mut tab, &mut shared, true));
+        space_key(&ctx, &mut tab, &mut shared, false);
+
+        // A cleared selection leaves the cursor, which it then selects.
+        tab.selection.clear();
+        assert!(space(&ctx, &mut tab, &mut shared));
+        assert_eq!(tab.selection.len(), 1);
+
+        // Several items have no one preview, unless it's open to close.
+        tab.selection = tab.entries().iter().map(|e| e.path.clone()).collect();
+        assert!(tab.selection.len() > 1);
+        assert!(!space(&ctx, &mut tab, &mut shared));
+        shared.preview_shown = true;
+        assert!(space(&ctx, &mut tab, &mut shared));
+
+        // A focused button takes Space for itself.
+        ctx.memory_mut(|m| m.request_focus(egui::Id::new("a button")));
+        run_frame(&ctx, &mut tab, &mut shared, &[]);
+        ctx.memory_mut(|m| m.request_focus(egui::Id::new("a button")));
+        assert!(!space(&ctx, &mut tab, &mut shared));
+
+        disk::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ctrl_and_the_wheel_resize_the_items_under_the_pointer() {
+        let root = fixture("item-size");
+        let ctx = Context::default();
+        let mut tab = BrowserTab::new(1, root.join("a"));
+        let mut shared = shared(&ctx, &tab);
+        // A few frames with the wheel turned over `pos`, as egui eases it in.
+        let wheel = |tab: &mut BrowserTab, shared: &mut Shared, pos, y: f32| {
+            for frame in 0..10 {
+                let mut events = vec![egui::Event::PointerMoved(pos)];
+                if frame == 0 {
+                    events.push(egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: egui::vec2(0.0, y),
+                        phase: egui::TouchPhase::Move,
+                        modifiers: Modifiers::CTRL,
+                    });
+                }
+                run_events(&ctx, tab, shared, events);
+            }
+        };
+        let over = egui::pos2(300.0, 300.0);
+        for _ in 0..3 {
+            run_frame(&ctx, &mut tab, &mut shared, &[]);
+        }
+
+        // The Details view scales its list, and the icons stay.
+        wheel(&mut tab, &mut shared, over, 100.0);
+        assert!(shared.list_scale > 1.0, "{}", shared.list_scale);
+        assert_eq!(shared.icon_size, 64.0);
+
+        // The Icons view resizes its icons, down too, and the list stays.
+        let scale = shared.list_scale;
+        tab.view = ViewMode::Grid;
+        wheel(&mut tab, &mut shared, over, -100.0);
+        assert!(shared.icon_size < 64.0, "{}", shared.icon_size);
+        assert_eq!(shared.list_scale, scale);
+
+        // As far as the range goes.
+        wheel(&mut tab, &mut shared, over, -100_000.0);
+        assert_eq!(shared.icon_size, *crate::views::ICON_SIZES.start());
+
+        // Not over the toolbar.
+        let size = shared.icon_size;
+        wheel(&mut tab, &mut shared, egui::pos2(300.0, 2.0), 100.0);
+        assert_eq!(shared.icon_size, size);
+
         disk::remove_dir_all(root).unwrap();
     }
 

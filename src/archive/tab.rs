@@ -1033,6 +1033,7 @@ mod tests {
             show_hidden: false,
             show_thumbnails: false,
             icon_size: 64.0,
+            list_scale: 1.0,
             clipboard: None,
             focused_tab: Some(1),
             preview_shown: false,
