@@ -57,24 +57,139 @@ struct State {
     started: bool,
     /// The button is down after a long press, or was let go this frame.
     holding: bool,
+    /// A swipe in from the screen's edge ended this frame: the system's back.
+    back_swiped: bool,
 }
 
 fn state_id() -> Id {
     Id::new("touch_long_press")
 }
 
+/// How near the screen's sides a press may be the system's back gesture.
+const EDGE: f32 = 24.0;
+/// A finger still for this long at the edge isn't going to swipe.
+const EDGE_STILL: Duration = Duration::from_millis(150);
+
+/// A press at the screen's edge, not yet shown to egui.
+struct EdgePress {
+    pos: Pos2,
+    modifiers: egui::Modifiers,
+    since: Instant,
+}
+
 /// Follows the primary button for long presses.
 #[derive(Default)]
 pub struct LongPress {
     press: Option<Press>,
+    /// Waiting to see which way it goes.
+    edge: Option<EdgePress>,
+    /// It went sideways: the rest of it is the system's.
+    edge_swipe: bool,
+    /// And it's over.
+    edge_swipe_ended: bool,
+}
+
+impl LongPress {
+    /// Android's back gesture starts as a touch like any other, that it then
+    /// cancels, and that would be a tap at the edge of the page, or a grab of
+    /// the scroll bar that's there. So a press at the edge isn't shown to egui
+    /// until it's clear what it is: if it goes sideways it never is, and if it
+    /// goes along the edge, is let go, or stays still, it's shown as it was.
+    fn hold_back_edge_presses(&mut self, raw: &mut RawInput) {
+        let Some(screen) = raw.screen_rect else {
+            return;
+        };
+        let press_event = |edge: &EdgePress, pressed| Event::PointerButton {
+            pos: edge.pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: edge.modifiers,
+        };
+        let mut events = Vec::with_capacity(raw.events.len());
+        for event in raw.events.drain(..) {
+            match &event {
+                Event::PointerButton {
+                    button: PointerButton::Primary,
+                    pressed: true,
+                    pos,
+                    modifiers,
+                } if pos.x < screen.min.x + EDGE || pos.x > screen.max.x - EDGE => {
+                    self.edge = Some(EdgePress {
+                        pos: *pos,
+                        modifiers: *modifiers,
+                        since: Instant::now(),
+                    });
+                    self.edge_swipe = false;
+                    // The move that says where it is goes with it, later.
+                    events
+                        .retain(|earlier| !matches!(earlier, Event::PointerMoved(at) if at == pos));
+                }
+                Event::PointerMoved(_) if self.edge_swipe => {}
+                Event::PointerMoved(pos) => match &self.edge {
+                    Some(edge) if edge.pos.distance(*pos) <= SLOP => {}
+                    Some(edge) => {
+                        let moved = *pos - edge.pos;
+                        if moved.x.abs() > moved.y.abs() {
+                            self.edge = None;
+                            self.edge_swipe = true;
+                        } else {
+                            events.push(Event::PointerMoved(edge.pos));
+                            events.push(press_event(edge, true));
+                            events.push(event);
+                            self.edge = None;
+                        }
+                    }
+                    None => events.push(event),
+                },
+                Event::PointerButton {
+                    button: PointerButton::Primary,
+                    pressed: false,
+                    ..
+                } if self.edge_swipe => {
+                    self.edge_swipe = false;
+                    self.edge_swipe_ended = true;
+                }
+                Event::PointerButton {
+                    button: PointerButton::Primary,
+                    pressed: false,
+                    ..
+                } => {
+                    // A tap: just as late as it had to be.
+                    if let Some(edge) = self.edge.take() {
+                        events.push(Event::PointerMoved(edge.pos));
+                        events.push(press_event(&edge, true));
+                    }
+                    events.push(event);
+                }
+                Event::PointerGone => {
+                    self.edge = None;
+                    self.edge_swipe_ended |= std::mem::take(&mut self.edge_swipe);
+                    events.push(event);
+                }
+                _ => events.push(event),
+            }
+        }
+        if let Some(edge) = &self.edge
+            && edge.since.elapsed() >= EDGE_STILL
+        {
+            events.push(Event::PointerMoved(edge.pos));
+            events.push(press_event(edge, true));
+            self.edge = None;
+        }
+        raw.events = events;
+    }
 }
 
 impl LongPress {
     /// Watches `raw` for presses; call from `raw_input_hook` every frame
     /// in the mobile layout.
     pub fn hook(&mut self, ctx: &egui::Context, raw: &mut RawInput) {
+        self.hold_back_edge_presses(raw);
         let now = Instant::now();
-        let mut state = State::default();
+        let mut state = State {
+            back_swiped: std::mem::take(&mut self.edge_swipe_ended),
+            ..State::default()
+        };
         let mut events = Vec::with_capacity(raw.events.len());
         for event in raw.events.drain(..) {
             let mut right_click = None;
@@ -161,6 +276,9 @@ impl LongPress {
     /// Wakes the app when a press held still becomes long; call during the
     /// frame (repaints asked for in `raw_input_hook` are lost).
     pub fn wake(&self, ctx: &egui::Context) {
+        if let Some(edge) = &self.edge {
+            ctx.request_repaint_after(EDGE_STILL.saturating_sub(edge.since.elapsed()));
+        }
         if let Some(press) = &self.press
             && !press.long
             && !press.moved
@@ -223,6 +341,54 @@ pub fn scroll_source(ctx: &egui::Context) -> ScrollSource {
         drag: drag_scroll(ctx),
         ..ScrollSource::default()
     }
+}
+
+/// How long after a swipe hid the keyboard its back key is still that swipe's.
+const BACK_KEY_GRACE: f64 = 1.0;
+
+fn keyboard_dismissed_id() -> Id {
+    Id::new("touch_keyboard_dismissed")
+}
+
+/// Hides the keyboard for a back swipe, which Android's own way of doing it
+/// doesn't always: it starts an animation of the keyboard that needs the view
+/// system to draw, which a native activity doesn't use, and it can take a second
+/// swipe. Text fields let go of the keys, which takes the keyboard down, and a
+/// tap on one brings it back. Call once a frame.
+pub fn hide_keyboard_for_back_swipe(ctx: &egui::Context) {
+    if !state(ctx).back_swiped || keyboard_up(ctx) != Some(true) {
+        return;
+    }
+    ctx.memory_mut(|memory| {
+        if let Some(focused) = memory.focused() {
+            memory.surrender_focus(focused);
+        }
+    });
+    let now = ctx.input(|i| i.time);
+    ctx.data_mut(|d| d.insert_temp(keyboard_dismissed_id(), now));
+}
+
+/// Whether a back key now is from the swipe that just hid the keyboard, when
+/// Android goes on to send one as well: it shouldn't also leave the document.
+pub fn back_key_was_for_keyboard(ctx: &egui::Context) -> bool {
+    let at: Option<f64> = ctx.data(|d| d.get_temp(keyboard_dismissed_id()));
+    let now = ctx.input(|i| i.time);
+    at.is_some_and(|at| now - at < BACK_KEY_GRACE)
+}
+
+fn keyboard_id() -> Id {
+    Id::new("touch_keyboard_up")
+}
+
+/// Says whether the on-screen keyboard is up, where that can be told.
+#[cfg(any(target_os = "android", test))]
+pub fn set_keyboard_up(ctx: &egui::Context, up: bool) {
+    ctx.data_mut(|d| d.insert_temp(keyboard_id(), up));
+}
+
+/// Whether the on-screen keyboard is up, where that can be told.
+pub fn keyboard_up(ctx: &egui::Context) -> Option<bool> {
+    ctx.data(|d| d.get_temp(keyboard_id()))
 }
 
 /// What list items sense: in the mobile layout only taps, so a drag
@@ -386,5 +552,173 @@ mod tests {
         );
         assert_eq!(right_clicks(&events), 0);
         assert!(!long_press_started(&ctx));
+    }
+}
+
+#[cfg(test)]
+mod edge_tests {
+    use egui::{Rect, pos2, vec2};
+
+    use super::*;
+
+    fn input(events: Vec<Event>) -> RawInput {
+        RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 800.0))),
+            events,
+            ..Default::default()
+        }
+    }
+
+    fn button(pos: Pos2, pressed: bool) -> Event {
+        Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    /// Runs frames of events, and returns what egui would get of them.
+    fn through(frames: Vec<Vec<Event>>) -> Vec<Event> {
+        let ctx = egui::Context::default();
+        let mut press = LongPress::default();
+        let mut out = Vec::new();
+        for events in frames {
+            let mut raw = input(events);
+            press.hook(&ctx, &mut raw);
+            out.extend(raw.events);
+        }
+        out
+    }
+
+    fn presses(events: &[Event]) -> usize {
+        events
+            .iter()
+            .filter(|event| matches!(event, Event::PointerButton { pressed: true, .. }))
+            .count()
+    }
+
+    #[test]
+    fn a_swipe_in_from_the_edge_is_the_systems() {
+        let start = pos2(395.0, 300.0);
+        let out = through(vec![
+            vec![Event::PointerMoved(start), button(start, true)],
+            vec![Event::PointerMoved(pos2(370.0, 302.0))],
+            vec![Event::PointerMoved(pos2(340.0, 303.0))],
+            // Android cancels it, which comes as letting go.
+            vec![button(pos2(340.0, 303.0), false), Event::PointerGone],
+        ]);
+        assert_eq!(presses(&out), 0, "{out:?}");
+        assert!(
+            !out.iter()
+                .any(|event| matches!(event, Event::PointerButton { .. }))
+        );
+    }
+
+    #[test]
+    fn a_drag_along_the_edge_reaches_the_scroll_bar() {
+        let start = pos2(395.0, 300.0);
+        let out = through(vec![
+            vec![Event::PointerMoved(start), button(start, true)],
+            vec![Event::PointerMoved(pos2(395.0, 340.0))],
+            vec![Event::PointerMoved(pos2(395.0, 380.0))],
+            vec![button(pos2(395.0, 380.0), false)],
+        ]);
+        assert_eq!(presses(&out), 1, "{out:?}");
+        // From where it started, in order.
+        let first = out
+            .iter()
+            .position(|e| matches!(e, Event::PointerButton { .. }))
+            .unwrap();
+        assert!(matches!(out[first], Event::PointerButton { pos, .. } if pos == start));
+        assert!(
+            out[first + 1..]
+                .iter()
+                .any(|e| matches!(e, Event::PointerMoved(p) if p.y == 380.0))
+        );
+    }
+
+    fn swipe_in(ctx: &egui::Context, press: &mut LongPress) {
+        let start = pos2(395.0, 300.0);
+        for events in [
+            vec![Event::PointerMoved(start), button(start, true)],
+            vec![Event::PointerMoved(pos2(360.0, 301.0))],
+            vec![button(pos2(360.0, 301.0), false), Event::PointerGone],
+            vec![],
+        ] {
+            let mut raw = input(events);
+            press.hook(ctx, &mut raw);
+        }
+    }
+
+    #[test]
+    fn a_back_swipe_is_known_for_the_frame_it_ends() {
+        let ctx = egui::Context::default();
+        let mut press = LongPress::default();
+        let start = pos2(395.0, 300.0);
+        let mut hook = |events| {
+            let mut raw = input(events);
+            press.hook(&ctx, &mut raw);
+            state(&ctx).back_swiped
+        };
+        assert!(!hook(vec![Event::PointerMoved(start), button(start, true)]));
+        assert!(!hook(vec![Event::PointerMoved(pos2(360.0, 301.0))]));
+        assert!(hook(vec![
+            button(pos2(360.0, 301.0), false),
+            Event::PointerGone
+        ]));
+        assert!(!hook(vec![]), "once");
+    }
+
+    #[test]
+    fn a_swipe_with_the_keyboard_down_is_just_back() {
+        let ctx = egui::Context::default();
+        let mut press = LongPress::default();
+        set_keyboard_up(&ctx, false);
+        swipe_in(&ctx, &mut press);
+        hide_keyboard_for_back_swipe(&ctx);
+        assert!(!back_key_was_for_keyboard(&ctx));
+    }
+
+    #[test]
+    fn a_tap_at_the_edge_is_a_tap() {
+        let start = pos2(5.0, 300.0);
+        let out = through(vec![
+            vec![Event::PointerMoved(start), button(start, true)],
+            vec![button(start, false), Event::PointerGone],
+        ]);
+        let kinds: Vec<bool> = out
+            .iter()
+            .filter_map(|event| match event {
+                Event::PointerButton { pressed, .. } => Some(*pressed),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(kinds, [true, false], "{out:?}");
+    }
+
+    #[test]
+    fn a_finger_held_at_the_edge_is_let_through_in_time() {
+        let start = pos2(395.0, 300.0);
+        let ctx = egui::Context::default();
+        let mut press = LongPress::default();
+        let mut raw = input(vec![Event::PointerMoved(start), button(start, true)]);
+        press.hook(&ctx, &mut raw);
+        assert_eq!(presses(&raw.events), 0, "not yet");
+        std::thread::sleep(EDGE_STILL + Duration::from_millis(10));
+        let mut raw = input(vec![]);
+        press.hook(&ctx, &mut raw);
+        assert_eq!(presses(&raw.events), 1);
+    }
+
+    #[test]
+    fn what_starts_away_from_the_edge_is_as_it_was() {
+        let start = pos2(200.0, 300.0);
+        let out = through(vec![
+            vec![Event::PointerMoved(start), button(start, true)],
+            vec![Event::PointerMoved(pos2(150.0, 300.0))],
+            vec![button(pos2(150.0, 300.0), false)],
+        ]);
+        assert_eq!(out.len(), 4, "{out:?}");
     }
 }

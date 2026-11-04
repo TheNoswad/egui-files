@@ -2562,7 +2562,10 @@ impl FilesApp {
         let mut mobile_tab = self.mobile.enabled.then(|| self.mobile_current()).flatten();
         if self.mobile.enabled {
             self.track_openers(mobile_tab);
-            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::BrowserBack)) {
+            crate::touch::hide_keyboard_for_back_swipe(&ctx);
+            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::BrowserBack))
+                && !crate::touch::back_key_was_for_keyboard(&ctx)
+            {
                 self.mobile_back(&ctx, mobile_tab);
                 mobile_tab = self.mobile_current();
             }
@@ -2810,6 +2813,15 @@ impl FilesApp {
         for (window, action) in actions.chain(window_actions) {
             self.act(&ctx, window, action);
         }
+        // Whatever was copied, in a text field or anywhere, for other apps too.
+        #[cfg(target_os = "android")]
+        ctx.output(|output| {
+            for command in &output.commands {
+                if let egui::OutputCommand::CopyText(text) = command {
+                    crate::android::copy_text(text);
+                }
+            }
+        });
         self.confirm_close_ui(&ctx);
         let unsaved: Vec<std::path::PathBuf> = self
             .all_tabs()
@@ -2873,6 +2885,7 @@ impl FilesApp {
         {
             self.insets.hook(ctx, raw_input);
             self.mobile.keyboard = self.insets.keyboard();
+            crate::touch::set_keyboard_up(ctx, self.mobile.keyboard);
         }
         if let Some(theme) = self.system_theme.get() {
             raw_input.system_theme = Some(theme);

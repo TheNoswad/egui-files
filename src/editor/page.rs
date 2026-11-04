@@ -12,13 +12,23 @@ use egui::{Context, Event, Key, Modifiers, text::CCursor, text::CCursorRange};
 
 use super::{Doc, Edit, EditorTab, TextEditState, ops, text_id};
 use crate::markdown::{
-    Caret, Mode, block_edit, format,
+    Caret, Mode, PageCommand, block_edit, format,
     layout::Layout,
     wysiwyg::{self, Change, Editable, FieldKind},
 };
 
 /// How many rows Page Up and Page Down go.
 const PAGE_ROWS: usize = 20;
+
+/// Gives the page the keys, if it hasn't got them. Asking when it has would
+/// interrupt the input method, and on Android that's the keyboard going down
+/// and up again.
+fn take_keys(ctx: &Context, tab: u64) {
+    let id = text_id(tab);
+    if !ctx.memory(|memory| memory.has_focus(id)) {
+        ctx.memory_mut(|memory| memory.request_focus(id));
+    }
+}
 
 /// The cursor in the source, in bytes.
 pub(super) fn caret(ctx: &Context, tab: u64, text: &str) -> Caret {
@@ -76,6 +86,13 @@ impl EditorTab {
     /// Carries out what was asked of the page since last frame.
     pub(super) fn page_input(&mut self, ctx: &Context) {
         self.feed_undo(ctx);
+        // The keyboard came up, or the view shrank some other way: what's being
+        // typed at shouldn't end up under it.
+        let height = self.md.view.viewport_height;
+        if height < self.md.page_height - 1.0 {
+            self.md.reveal = true;
+        }
+        self.md.page_height = height;
         // What other things ask for: going to a line, or a match found.
         if let Some(select) = self.select.take() {
             let id = text_id(self.id);
@@ -91,7 +108,7 @@ impl EditorTab {
             self.md.reveal = true;
         }
         if std::mem::take(&mut self.focus_text) {
-            ctx.memory_mut(|memory| memory.request_focus(text_id(self.id)));
+            take_keys(ctx, self.id);
         }
         if !ctx.memory(|memory| memory.has_focus(text_id(self.id))) {
             return;
@@ -239,7 +256,51 @@ impl EditorTab {
         };
         self.md.caret_x = None;
         self.set_page_caret(ctx, anchor, offset);
-        ctx.memory_mut(|memory| memory.request_focus(text_id(self.id)));
+        take_keys(ctx, self.id);
+        // Sent away with Back, it comes back for a tap. Only then: interrupting
+        // is what brings it back, and with it up, is a flicker. What says it's
+        // up is a moment behind, so it's asked for once while it's on its way.
+        const COMING: f64 = 1.5;
+        let now = ctx.input(|i| i.time);
+        let asked = self.md.keyboard_asked.is_some_and(|at| now - at < COMING);
+        if crate::touch::keyboard_up(ctx) == Some(false) && !asked {
+            self.md.keyboard_asked = Some(now);
+            ctx.memory_mut(egui::Memory::interrupt_ime);
+        }
+    }
+
+    /// A selection dragged out on a touchscreen: where it's going is in sight.
+    pub(super) fn page_selection(&mut self, ctx: &Context, anchor: usize, head: usize) {
+        self.md.caret_x = None;
+        self.set_page_caret(ctx, anchor, head);
+        self.md.reveal = false;
+        take_keys(ctx, self.id);
+    }
+
+    /// A button of the bar over a selection.
+    pub(super) fn page_command(&mut self, ctx: &Context, command: PageCommand) {
+        match command {
+            PageCommand::Copy => self.md.waiting_keys.push(Event::Copy),
+            PageCommand::Cut => self.md.waiting_keys.push(Event::Cut),
+            PageCommand::SelectAll => {
+                if let Doc::Ready(buffer) = &self.doc {
+                    let end = buffer.text.len();
+                    self.set_page_caret(ctx, 0, end);
+                    self.md.reveal = false;
+                }
+            }
+            PageCommand::Paste => {
+                // Comes back as an event, except from Android's own clipboard.
+                #[cfg(target_os = "android")]
+                if let Some(text) = crate::android::clipboard_text() {
+                    self.md.waiting_keys.push(Event::Paste(text));
+                }
+                #[cfg(not(target_os = "android"))]
+                ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+            }
+        }
+        take_keys(ctx, self.id);
+        ctx.request_repaint();
     }
 
     /// A double-click: the word there.

@@ -67,7 +67,7 @@
 - [x] WYSIWYG: a mode editing the rendered text itself, with a cursor in the page (`wysiwyg.rs`, `editor/page.rs`). Each char knows the bytes it came from, every key is a splice of the source, and untouched bytes never change. What's typed is markdown as written, so `**` and `# ` work. Ctrl+click follows links; a double-click on what isn't text, like a formula, opens its markdown in place. Live view isn't needed
 - [ ] WYSIWYG, what isn't editable on the page: callout titles and frontmatter (double-click them), and empty table cells, which have no place in the source to go by
 - [ ] WYSIWYG: text being composed with an input method only shows once it's committed; check an IME, and the on-screen keyboard on Android and phones (only tried with a keyboard, on X11 and in Firefox)
-- [ ] WYSIWYG on touchscreens: a tap places the cursor, but nothing selects yet, and the cursor has no handle. Dragging past the edge of the view doesn't scroll
+- [x] WYSIWYG on touchscreens: a long press selects a word and dragging goes on from it, handles move each end, and a bar has Cut, Copy, Paste and All. A tap gives the cursor a handle, to drag it, or tap it for Paste at the cursor. On Android these use the system's clipboard, as does all copying in the app
 - [ ] WYSIWYG: the setting for what "Edit" opens has no place in the settings to choose this mode (`Prefs::edit_mode`); find looks through the source there, as in Split
 - [x] Phase 6: links in documents follow files moved or renamed in the app (`relink.rs`): the git repository or vault around the move is looked through, or without one the folders moved from and to, and what would change is shown first. Only link destinations' bytes change, and links already broken are left. Editor tabs go with their files
 - [x] What's looked at when links update: raw HTML's `src` and `href` too, hidden folders but not tools' own (`.git`, `node_modules`), and documents up to 64 MiB; what can't be read is named in the list, as is what has unsaved changes
@@ -83,7 +83,7 @@
 - [ ] Check fallback fonts on Windows and Android: only run on Linux and in Firefox so far (Android loads `/system/fonts` itself, as fontdb doesn't)
 - [ ] Bare email addresses aren't linked (`<a@b.c>` is)
 - [ ] Text selection in rendered documents on touchscreens (dragging scrolls there)
-- [ ] Check on a real Android device: web links opening through `android::open_url` (compiled, never run). Tapping links and pictures, broken because a lifted finger leaves no pointer, is fixed and covered by tests with those events
+- [x] Web links, and tapping links and pictures, checked on a real Android device
 - [x] Links in the preview pane: a heading scrolls the pane to it, and a program is shown in its folder
 - [x] Links on a touchscreen while editing the page: a tap puts the cursor there, and a button by it opens the link, as there's no Ctrl
 

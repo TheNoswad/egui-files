@@ -466,6 +466,10 @@ struct MarkdownState {
     reveal: bool,
     /// Asked to repair the links around this document.
     repair_links: bool,
+    /// When the on-screen keyboard was last asked to come back.
+    keyboard_asked: Option<f64>,
+    /// How tall the page's view was last frame.
+    page_height: f32,
 }
 
 /// Where the source pane is scrolled, for keeping the panes together.
@@ -1369,6 +1373,8 @@ impl EditorTab {
             }
             Click::Caret { offset, extend } => self.page_clicked(ctx, offset, extend),
             Click::SelectWord(offset) => self.page_select_word(ctx, offset),
+            Click::Selection { anchor, head } => self.page_selection(ctx, anchor, head),
+            Click::Page(command) => self.page_command(ctx, command),
             Click::EditBlock { source, word } => {
                 if matches!(self.shown_mode, Mode::Preview | Mode::Wysiwyg) {
                     self.start_block(source, word);
@@ -2896,6 +2902,13 @@ mod tests {
         tab: EditorTab,
         path: PathBuf,
         dir: PathBuf,
+        /// What's been put on the clipboard.
+        copied: Vec<String>,
+        /// For each frame, whether it asked for the on-screen keyboard.
+        keyboard_wanted: Vec<bool>,
+        /// How many frames took the keyboard down and up: Android hides and
+        /// shows it for an interrupted input method.
+        keyboard_flickers: usize,
     }
 
     impl Harness {
@@ -2937,6 +2950,9 @@ mod tests {
                 tab: EditorTab::new(1, path.clone()),
                 path,
                 dir,
+                copied: Vec::new(),
+                keyboard_wanted: Vec::new(),
+                keyboard_flickers: 0,
             };
             harness.until(|h| matches!(h.tab.doc, Doc::Ready(_)));
             harness
@@ -2952,6 +2968,19 @@ mod tests {
                 .ctx
                 .run_ui(input, |ui| self.tab.ui(ui, &mut self.shared));
             output.textures_delta.clear();
+            self.keyboard_wanted
+                .push(output.platform_output.ime.is_some());
+            self.keyboard_flickers += usize::from(
+                output
+                    .platform_output
+                    .ime
+                    .is_some_and(|ime| ime.should_interrupt_composition),
+            );
+            for command in output.platform_output.commands {
+                if let egui::OutputCommand::CopyText(text) = command {
+                    self.copied.push(text);
+                }
+            }
         }
 
         /// Runs frames until `done`. Waits by the clock, not a count of
@@ -3532,6 +3561,448 @@ mod tests {
         let link = first_link(&h);
         tap(&mut h, link);
         assert!(h.tab.md.view.open_link_rect.is_none(), "it has Ctrl");
+    }
+
+    /// A frame with the long press followed, as the app does on all of them.
+    fn touch_frame(h: &mut Harness, press: &mut crate::touch::LongPress, events: Vec<Event>) {
+        let mut input = RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(900.0, 600.0))),
+            events,
+            ..Default::default()
+        };
+        press.hook(&h.ctx, &mut input);
+        let mut output = h.ctx.run_ui(input, |ui| h.tab.ui(ui, &mut h.shared));
+        output.textures_delta.clear();
+    }
+
+    /// A finger held still on the page for long enough, and then lifted.
+    fn long_press(h: &mut Harness, pos: egui::Pos2) {
+        let mut press = crate::touch::LongPress::default();
+        let button = |pressed| Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        touch_frame(h, &mut press, vec![Event::PointerMoved(pos), button(true)]);
+        std::thread::sleep(crate::touch::LONG_PRESS + Duration::from_millis(20));
+        touch_frame(h, &mut press, vec![]);
+        touch_frame(h, &mut press, vec![]);
+        touch_frame(h, &mut press, vec![button(false), Event::PointerGone]);
+        touch_frame(h, &mut press, vec![]);
+        touch_frame(h, &mut press, vec![]);
+    }
+
+    /// The bytes selected on the page.
+    fn page_selection_text(h: &Harness) -> String {
+        let caret = page::caret(&h.ctx, h.tab.id, h.text());
+        h.text()[caret.anchor.min(caret.head)..caret.anchor.max(caret.head)].to_owned()
+    }
+
+    fn touch_page(name: &str, contents: &str) -> (Harness, egui::Pos2) {
+        let mut h = page(name, contents, "");
+        crate::touch::set_touch(&h.ctx, true);
+        for _ in 0..3 {
+            h.frame(vec![]);
+        }
+        let view = &h.tab.md.view;
+        let fields = view.layout().placed_fields();
+        let at = |offset| fields[0].cursor_rect(contents, offset).center();
+        let word = contents.find("second").unwrap() + 2;
+        let pos = at(word) + view.page_origin.to_vec2();
+        (h, pos)
+    }
+
+    #[test]
+    fn a_long_press_selects_the_word_and_a_lift_leaves_it() {
+        let (mut h, pos) = touch_page("touch-word", "first second third\n");
+        long_press(&mut h, pos);
+        assert_eq!(page_selection_text(&h), "second");
+        assert_eq!(page_selection_text(&h), "second", "lifting isn't a tap");
+        let controls = &h.tab.md.view.touch_controls;
+        assert!(controls.anchor.is_some() && controls.head.is_some());
+        assert_eq!(controls.buttons.len(), 4);
+    }
+
+    #[test]
+    fn a_handle_drags_its_end_of_the_selection() {
+        let (mut h, pos) = touch_page("touch-handle", "first second third\n");
+        long_press(&mut h, pos);
+        let handle = h
+            .tab
+            .md
+            .view
+            .touch_controls
+            .head
+            .expect("a handle")
+            .center();
+        // To the right, along the line above the finger, past the next word.
+        let to = handle + vec2(300.0, 0.0);
+        h.frame(vec![Event::PointerMoved(handle)]);
+        h.frame(vec![Event::PointerButton {
+            pos: handle,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+        }]);
+        for step in 1..=4 {
+            h.frame(vec![Event::PointerMoved(
+                handle + (to - handle) * (step as f32 / 4.0),
+            )]);
+        }
+        h.frame(vec![]);
+        assert_eq!(page_selection_text(&h), "second third");
+        h.frame(vec![
+            Event::PointerButton {
+                pos: to,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Modifiers::NONE,
+            },
+            Event::PointerGone,
+        ]);
+        h.frame(vec![]);
+        assert_eq!(page_selection_text(&h), "second third");
+    }
+
+    #[test]
+    fn the_bars_buttons_do_what_they_say() {
+        let press = |h: &mut Harness, wanted: markdown::PageCommand| {
+            let (_, rect) = *h
+                .tab
+                .md
+                .view
+                .touch_controls
+                .buttons
+                .iter()
+                .find(|(command, _)| *command == wanted)
+                .expect("the button");
+            tap(h, rect.center());
+            for _ in 0..3 {
+                h.frame(vec![]);
+            }
+        };
+        let (mut h, pos) = touch_page("touch-bar", "first second third\n");
+        long_press(&mut h, pos);
+        press(&mut h, markdown::PageCommand::Copy);
+        assert_eq!(h.copied.last().map(String::as_str), Some("second"));
+        assert_eq!(h.text(), "first second third\n", "copying changes nothing");
+        press(&mut h, markdown::PageCommand::Cut);
+        assert_eq!(h.text(), "first  third\n");
+        assert_eq!(h.copied.last().map(String::as_str), Some("second"));
+
+        let (mut h, pos) = touch_page("touch-all", "first second third\n");
+        long_press(&mut h, pos);
+        press(&mut h, markdown::PageCommand::SelectAll);
+        assert_eq!(page_selection_text(&h), "first second third\n");
+    }
+
+    #[test]
+    fn a_tap_ends_a_selection() {
+        let (mut h, pos) = touch_page("touch-tap", "first second third\n");
+        long_press(&mut h, pos);
+        tap(&mut h, pos);
+        assert_eq!(page_selection_text(&h), "");
+        let controls = &h.tab.md.view.touch_controls;
+        assert!(controls.anchor.is_none(), "the cursor's is all that's left");
+        assert!(controls.buttons.is_empty());
+    }
+
+    #[test]
+    fn a_mouse_has_no_touch_controls() {
+        let mut h = page("mouse-no-controls", "first second third\n", "first");
+        h.tab.select = Some(0..5);
+        for _ in 0..3 {
+            h.frame(vec![]);
+        }
+        assert_eq!(page_selection_text(&h), "first");
+        assert!(h.tab.md.view.touch_controls.buttons.is_empty());
+    }
+
+    #[test]
+    fn dragging_on_from_a_long_press_selects_on_from_the_word() {
+        let (mut h, pos) = touch_page("touch-drag", "first second third\n");
+        let mut press = crate::touch::LongPress::default();
+        let button = |pressed| Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        touch_frame(
+            &mut h,
+            &mut press,
+            vec![Event::PointerMoved(pos), button(true)],
+        );
+        std::thread::sleep(crate::touch::LONG_PRESS + Duration::from_millis(20));
+        touch_frame(&mut h, &mut press, vec![]);
+        touch_frame(&mut h, &mut press, vec![]);
+        assert_eq!(page_selection_text(&h), "second");
+        // Back past the word's start: it stays selected, going the other way.
+        let back = pos - vec2(300.0, 0.0);
+        touch_frame(&mut h, &mut press, vec![Event::PointerMoved(back)]);
+        touch_frame(&mut h, &mut press, vec![]);
+        touch_frame(&mut h, &mut press, vec![]);
+        assert_eq!(page_selection_text(&h), "first second");
+        touch_frame(&mut h, &mut press, vec![button(false), Event::PointerGone]);
+    }
+
+    fn drag(h: &mut Harness, from: egui::Pos2, to: egui::Pos2) {
+        h.frame(vec![Event::PointerMoved(from)]);
+        h.frame(vec![Event::PointerButton {
+            pos: from,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+        }]);
+        for step in 1..=4 {
+            h.frame(vec![Event::PointerMoved(
+                from + (to - from) * (step as f32 / 4.0),
+            )]);
+        }
+        h.frame(vec![
+            Event::PointerButton {
+                pos: to,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Modifiers::NONE,
+            },
+            Event::PointerGone,
+        ]);
+        h.frame(vec![]);
+        h.frame(vec![]);
+    }
+
+    /// A frame without it, or interrupting it, and Android takes the keyboard
+    /// down and back up. What `tap` and such do goes through egui's focus, which
+    /// is what did that.
+    #[test]
+    fn the_keyboard_stays_through_tapping_and_selecting() {
+        let (mut h, pos) = touch_page("touch-keyboard", "first second third\n");
+        crate::touch::set_keyboard_up(&h.ctx, true);
+        h.frame(vec![]);
+        h.keyboard_wanted.clear();
+        h.keyboard_flickers = 0;
+        tap(&mut h, pos);
+        tap(&mut h, pos + vec2(40.0, 0.0));
+        long_press(&mut h, pos);
+        let handle = h
+            .tab
+            .md
+            .view
+            .touch_controls
+            .head
+            .expect("a handle")
+            .center();
+        drag(&mut h, handle, handle + vec2(100.0, 0.0));
+        tap(&mut h, pos);
+        assert!(!h.keyboard_wanted.is_empty());
+        // The cursor's handle, dragged.
+        let cursor = h
+            .tab
+            .md
+            .view
+            .touch_controls
+            .head
+            .expect("its handle")
+            .center();
+        drag(&mut h, cursor, cursor + vec2(30.0, 0.0));
+        let dropped = h.keyboard_wanted.iter().filter(|wanted| !**wanted).count();
+        assert_eq!(dropped, 0, "of {} frames", h.keyboard_wanted.len());
+        assert_eq!(
+            h.keyboard_flickers,
+            0,
+            "of {} frames",
+            h.keyboard_wanted.len()
+        );
+        assert!(
+            h.ctx.memory(|m| m.has_focus(text_id(h.tab.id))),
+            "and has the keys"
+        );
+    }
+
+    #[test]
+    fn a_tap_brings_back_a_keyboard_that_was_sent_away() {
+        let (mut h, pos) = touch_page("touch-keyboard-back", "first second third\n");
+        crate::touch::set_keyboard_up(&h.ctx, false);
+        h.frame(vec![]);
+        h.keyboard_flickers = 0;
+        tap(&mut h, pos);
+        assert!(h.keyboard_flickers >= 1, "asked for again");
+    }
+
+    /// What says it's up is behind what's on the screen, while it slides up.
+    #[test]
+    fn taps_while_the_keyboard_comes_back_dont_ask_again() {
+        let (mut h, pos) = touch_page("touch-keyboard-once", "first second third\n");
+        crate::touch::set_keyboard_up(&h.ctx, false);
+        h.frame(vec![]);
+        h.keyboard_flickers = 0;
+        for offset in [0.0, 20.0, 40.0, 60.0] {
+            tap(&mut h, pos + vec2(offset, 0.0));
+        }
+        assert_eq!(h.keyboard_flickers, 1);
+    }
+
+    #[test]
+    fn the_keyboard_goes_to_what_else_takes_the_keys() {
+        let (mut h, _) = touch_page("touch-other-focus", "first second third\n");
+        h.ctx
+            .memory_mut(|memory| memory.request_focus(egui::Id::new("another text field")));
+        let mut wanted = false;
+        let mut output = h.ctx.run_ui(RawInput::default(), |ui| {
+            let _ = ui.interact(
+                Rect::from_min_size(pos2(0.0, 0.0), vec2(1.0, 1.0)),
+                egui::Id::new("another text field"),
+                egui::Sense::focusable_noninteractive(),
+            );
+            h.tab.ui(ui, &mut h.shared);
+        });
+        output.textures_delta.clear();
+        wanted |= output.platform_output.ime.is_some();
+        assert!(!wanted, "it isn't the page's");
+    }
+
+    #[test]
+    fn a_tap_gives_a_handle_that_offers_paste_at_the_cursor() {
+        let (mut h, pos) = touch_page("touch-paste", "first second third\n");
+        tap(&mut h, pos);
+        let view = &h.tab.md.view;
+        let handle = view
+            .touch_controls
+            .head
+            .expect("a handle under the cursor")
+            .center();
+        assert!(
+            view.touch_controls.buttons.is_empty(),
+            "not until it's asked for"
+        );
+        tap(&mut h, handle);
+        let commands: Vec<markdown::PageCommand> = h
+            .tab
+            .md
+            .view
+            .touch_controls
+            .buttons
+            .iter()
+            .map(|(c, _)| *c)
+            .collect();
+        assert_eq!(
+            commands,
+            [
+                markdown::PageCommand::Paste,
+                markdown::PageCommand::SelectAll
+            ]
+        );
+        assert_eq!(
+            page_selection_text(&h),
+            "",
+            "nothing got selected to paste over"
+        );
+        // What the system gives back for it goes in at the cursor, over nothing.
+        h.frame(vec![Event::Paste("PASTED".into())]);
+        h.frame(vec![]);
+        assert!(h.text().contains("PASTED"), "{}", h.text());
+        assert_eq!(
+            h.text().len(),
+            "first second third\n".len() + 6,
+            "nothing replaced"
+        );
+        let view = &h.tab.md.view;
+        assert!(view.touch_controls.head.is_none(), "typing puts it away");
+        assert!(view.touch_controls.buttons.is_empty());
+    }
+
+    #[test]
+    fn the_cursors_handle_drags_it() {
+        let (mut h, pos) = touch_page("touch-move", "first second third\n");
+        tap(&mut h, pos);
+        let before = page::caret(&h.ctx, h.tab.id, h.text()).head;
+        let handle = h
+            .tab
+            .md
+            .view
+            .touch_controls
+            .head
+            .expect("a handle")
+            .center();
+        drag(&mut h, handle, handle + vec2(60.0, 0.0));
+        let caret = page::caret(&h.ctx, h.tab.id, h.text());
+        assert!(caret.head > before, "{} after {before}", caret.head);
+        assert_eq!(caret.anchor, caret.head, "moved, not selected");
+        assert!(
+            h.tab.md.view.touch_controls.buttons.is_empty(),
+            "a drag isn't a tap"
+        );
+    }
+
+    #[test]
+    fn the_cursor_stays_in_view_when_the_keyboard_comes_up() {
+        let paragraphs: Vec<String> = (0..60).map(|n| format!("Paragraph {n}.")).collect();
+        let contents = paragraphs.join("\n\n") + "\n";
+        let mut h = page("page-keyboard-up", &contents, "Paragraph 11.");
+        for _ in 0..3 {
+            h.frame(vec![]);
+        }
+        assert_eq!(h.tab.md.view.offset, 0.0, "in view to begin with");
+        let caret = page::caret(&h.ctx, h.tab.id, h.text()).head;
+        // The bottom of the screen gets taken up.
+        for _ in 0..12 {
+            let input = RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(900.0, 220.0))),
+                ..Default::default()
+            };
+            let mut output = h.ctx.run_ui(input, |ui| h.tab.ui(ui, &mut h.shared));
+            output.textures_delta.clear();
+        }
+        let text = h.text().to_owned();
+        assert!(h.tab.md.view.offset > 0.0, "it scrolled");
+        assert_eq!(
+            h.tab.md.view.offset_to_show(&text, caret),
+            None,
+            "to the cursor"
+        );
+    }
+
+    /// What the app does for a back swipe, which the keyboard's own animation
+    /// on Android doesn't reliably do; and a tap brings it back.
+    #[test]
+    fn a_back_swipe_hides_the_keyboard_and_a_tap_brings_it_back() {
+        let (mut h, pos) = touch_page("touch-back-swipe", "first second third\n");
+        crate::touch::set_keyboard_up(&h.ctx, true);
+        h.frame(vec![]);
+        assert_eq!(h.keyboard_wanted.last(), Some(&true));
+        let mut press = crate::touch::LongPress::default();
+        let start = pos2(895.0, 300.0);
+        let button = |pos, pressed| Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        let end = pos2(860.0, 301.0);
+        for events in [
+            vec![Event::PointerMoved(start), button(start, true)],
+            vec![Event::PointerMoved(end)],
+            vec![button(end, false), Event::PointerGone],
+            vec![],
+        ] {
+            touch_frame(&mut h, &mut press, events);
+            crate::touch::hide_keyboard_for_back_swipe(&h.ctx);
+        }
+        assert!(crate::touch::back_key_was_for_keyboard(&h.ctx));
+        let before = page::caret(&h.ctx, h.tab.id, h.text()).head;
+        h.frame(vec![]);
+        h.frame(vec![]);
+        assert_eq!(h.keyboard_wanted.last(), Some(&false), "it went down");
+        assert_eq!(
+            page::caret(&h.ctx, h.tab.id, h.text()).head,
+            before,
+            "no tap"
+        );
+        // Sent away, it comes back for a tap.
+        tap(&mut h, pos);
+        assert_eq!(h.keyboard_wanted.last(), Some(&true), "it came back");
     }
 
     #[test]

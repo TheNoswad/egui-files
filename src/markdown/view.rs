@@ -57,6 +57,30 @@ pub enum Click {
     },
     /// Select the word around here.
     SelectWord(usize),
+    /// Select this, without scrolling to it: it's being dragged out.
+    Selection {
+        anchor: usize,
+        head: usize,
+    },
+    /// A button of the page's touch controls.
+    Page(PageCommand),
+}
+
+/// What the bar over a selection on a touchscreen offers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PageCommand {
+    Cut,
+    Copy,
+    Paste,
+    SelectAll,
+}
+
+/// Where the touch controls are, if they're showing.
+#[derive(Clone, Debug, Default)]
+pub struct TouchControls {
+    pub anchor: Option<Rect>,
+    pub head: Option<Rect>,
+    pub buttons: Vec<(PageCommand, Rect)>,
 }
 
 /// A block of the document being edited in place, as its markdown.
@@ -138,6 +162,15 @@ pub struct MdView {
     pub page_origin: Pos2,
     /// Where the button to open the link at the cursor is, if it's showing.
     pub open_link_rect: Option<Rect>,
+    /// The word a long press selected, while it's held to drag out from it.
+    long_press_word: Option<std::ops::Range<usize>>,
+    /// Asked to show what can be done at the cursor, with nothing selected.
+    offer_paste: bool,
+    /// A tap put the cursor here, and it has a handle until the text changes.
+    caret_handle: bool,
+    /// How far to scroll next frame, for a selection dragged to an edge.
+    edge_scroll: f32,
+    pub touch_controls: TouchControls,
 }
 
 /// A picture shown large, over everything.
@@ -187,6 +220,8 @@ impl MdView {
             return;
         }
         crate::theme::fonts::want(text);
+        self.caret_handle = false;
+        self.offer_paste = false;
         self.document = Arc::new(parse::parse(text));
         self.stats = self.document.stats();
         self.parsed = Some(Arc::from(text));
@@ -383,7 +418,10 @@ impl MdView {
             .scroll_source(crate::touch::scroll_source(ui.ctx()));
         if let Some(offset) = options.scroll_to {
             scroll = scroll.vertical_scroll_offset(offset);
+        } else if self.edge_scroll != 0.0 {
+            scroll = scroll.vertical_scroll_offset((self.offset + self.edge_scroll).max(0.0));
         }
+        self.edge_scroll = 0.0;
         let output = scroll.show_viewport(ui, |ui, viewport| {
             ui.set_min_size(vec2(available - scroll_bar, height));
             let x = ((available - scroll_bar - page) / 2.0).max(MARGIN);
@@ -435,18 +473,18 @@ impl MdView {
                 &self.layout,
                 self.parsed.as_deref(),
             );
-            // A click takes the keys from what it isn't on, and the text on the
-            // page is on top of what has them.
+            // Having been somewhere else, as in the find bar.
             let clicked_page = ui.input(|i| {
                 i.pointer.any_click()
                     && i.pointer
                         .interact_pos()
                         .is_some_and(|pos| output.inner_rect.contains(pos))
             });
-            if clicked_page {
+            if clicked_page && !ui.memory(|memory| memory.has_focus(caret.focus)) {
                 ui.memory_mut(|memory| memory.request_focus(caret.focus));
             }
             clicks.extend(self.open_link_button(ui, id, page_origin, caret, output.inner_rect));
+            clicks.extend(self.selection_controls(ui, id, page_origin, caret, output.inner_rect));
         } else if options.editable && editor.is_none() && !self.lightbox_is_open() {
             clicks.extend(self.double_clicked(ui, output.inner_rect, page_origin));
         }
@@ -536,7 +574,8 @@ impl MdView {
         viewport: Rect,
     ) -> Option<Click> {
         self.open_link_rect = None;
-        if !crate::touch::is_touch(ui.ctx()) || caret.anchor != caret.head {
+        // The bar for the cursor goes in the same place.
+        if !crate::touch::is_touch(ui.ctx()) || caret.anchor != caret.head || self.offer_paste {
             return None;
         }
         let source = self.parsed.as_deref()?;
@@ -571,6 +610,174 @@ impl MdView {
         })
     }
 
+    /// A selection being dragged to the top or bottom of the view goes on past it.
+    fn scroll_at_edge(&mut self, ui: &Ui, pos: Pos2, viewport: Rect) {
+        const EDGE: f32 = 48.0;
+        const SPEED: f32 = 10.0;
+        self.edge_scroll = if pos.y < viewport.min.y + EDGE {
+            -SPEED
+        } else if pos.y > viewport.max.y - EDGE {
+            SPEED
+        } else {
+            0.0
+        };
+        if self.edge_scroll != 0.0 {
+            ui.ctx().request_repaint();
+        }
+    }
+
+    /// On a touchscreen: a handle at each end of the selection to drag, and a
+    /// bar with what can be done with it, for want of keys.
+    fn selection_controls(
+        &mut self,
+        ui: &Ui,
+        id: Id,
+        origin: Pos2,
+        caret: Caret,
+        viewport: Rect,
+    ) -> Option<Click> {
+        self.touch_controls = TouchControls::default();
+        let selected = caret.anchor != caret.head;
+        let wanted = selected || self.offer_paste || self.caret_handle;
+        if !crate::touch::is_touch(ui.ctx()) || !wanted {
+            return None;
+        }
+        let source = self.parsed.clone()?;
+        let at = |offset: usize| -> Option<Rect> {
+            let fields = self.layout.placed_fields();
+            let refs: Vec<&Editable> = fields.iter().map(|placed| placed.field).collect();
+            let (index, _) = field_at(&refs, offset)?;
+            let rect = fields[index].cursor_rect(&source, offset);
+            Some(rect.translate(origin.to_vec2()))
+        };
+        let (anchor_rect, head_rect) = (at(caret.anchor)?, at(caret.head)?);
+        let mut click = None;
+        let mut dragging = false;
+        // At each end of a selection, or the one under the cursor.
+        let handles: &[(&str, Rect)] = if selected {
+            &[("anchor", anchor_rect), ("head", head_rect)]
+        } else if self.caret_handle || self.offer_paste {
+            &[("cursor", head_rect)]
+        } else {
+            &[]
+        };
+        let color = ui.visuals().selection.stroke.color;
+        for &(name, rect) in handles {
+            if !viewport.expand(8.0).contains(rect.center_bottom()) {
+                continue;
+            }
+            let size = crate::touch::TOUCH_SIZE;
+            let sense = if name == "cursor" {
+                Sense::click_and_drag()
+            } else {
+                Sense::drag()
+            };
+            let area = egui::Area::new(id.with(("handle", name)))
+                .order(egui::Order::Foreground)
+                .fixed_pos(rect.center_bottom() - vec2(size / 2.0, 0.0))
+                .show(ui.ctx(), |ui| {
+                    let (box_rect, response) = ui.allocate_exact_size(Vec2::splat(size), sense);
+                    let knob = pos2(box_rect.center().x, box_rect.min.y + 10.0);
+                    ui.painter()
+                        .line_segment([box_rect.center_top(), knob], Stroke::new(2.0, color));
+                    ui.painter().circle_filled(knob, 8.0, color);
+                    response
+                });
+            let response = area.inner;
+            if name == "anchor" {
+                self.touch_controls.anchor = Some(response.rect);
+            } else {
+                self.touch_controls.head = Some(response.rect);
+            }
+            if response.clicked() {
+                self.offer_paste = !self.offer_paste;
+            }
+            if response.dragged()
+                && let Some(pointer) = response.interact_pointer_pos()
+            {
+                dragging = true;
+                // Where the finger points, which is hiding what's under it.
+                let aim = pointer - vec2(0.0, size * 0.75) - origin.to_vec2();
+                if let Some(moved) = self.layout.offset_at_pos(aim) {
+                    click = Some(match name {
+                        "anchor" => Click::Selection {
+                            anchor: moved,
+                            head: caret.head,
+                        },
+                        "head" => Click::Selection {
+                            anchor: caret.anchor,
+                            head: moved,
+                        },
+                        _ => Click::Selection {
+                            anchor: moved,
+                            head: moved,
+                        },
+                    });
+                }
+            }
+        }
+        let dragged_to = dragging
+            .then(|| ui.input(|i| i.pointer.interact_pos()))
+            .flatten();
+        if let Some(pointer) = dragged_to {
+            self.scroll_at_edge(ui, pointer, viewport);
+        }
+        // Out of the way while a selection's being made.
+        if dragging || self.long_press_word.is_some() || !(selected || self.offer_paste) {
+            return click;
+        }
+        let top = anchor_rect.min.y.min(head_rect.min.y);
+        let bottom = anchor_rect.max.y.max(head_rect.max.y);
+        let height = crate::touch::TOUCH_SIZE + 12.0;
+        let y = if top - height - 6.0 >= viewport.min.y {
+            top - height - 6.0
+        } else {
+            // Below the handles.
+            (bottom + crate::touch::TOUCH_SIZE + 6.0).min(viewport.max.y - height)
+        };
+        let commands: &[(PageCommand, &str)] = if selected {
+            &[
+                (PageCommand::Cut, "Cut"),
+                (PageCommand::Copy, "Copy"),
+                (PageCommand::Paste, "Paste"),
+                (PageCommand::SelectAll, "All"),
+            ]
+        } else {
+            &[
+                (PageCommand::Paste, "Paste"),
+                (PageCommand::SelectAll, "All"),
+            ]
+        };
+        let mut rects = Vec::new();
+        let area = egui::Area::new(id.with("selection-bar"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(pos2(viewport.min.x + 8.0, y))
+            .constrain(true)
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style())
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let mut chosen = None;
+                            for (command, label) in commands {
+                                let button = ui.button(*label);
+                                rects.push((*command, button.rect));
+                                if button.clicked() {
+                                    chosen = Some(*command);
+                                }
+                            }
+                            chosen
+                        })
+                        .inner
+                    })
+                    .inner
+            });
+        self.touch_controls.buttons = rects;
+        if area.inner.is_some() {
+            self.offer_paste = false;
+        }
+        area.inner.map(Click::Page).or(click)
+    }
+
     /// What the pointer does to the cursor in the page: pressing puts it there,
     /// dragging selects, and a double-click selects a word. A double-click on
     /// what can't be edited on the page opens it as its markdown.
@@ -595,8 +802,29 @@ impl MdView {
         if !down {
             self.dragging_caret = false;
         }
+        // Before anything that needs a pointer: a lifted finger leaves none.
+        if !crate::touch::holding(ui.ctx()) {
+            self.long_press_word = None;
+        }
         let pos = pos?;
         let on_page = pos - origin.to_vec2();
+        if touch {
+            let ctx = ui.ctx();
+            // Held after a long press: dragging out from the word.
+            if crate::touch::holding(ctx)
+                && !crate::touch::long_press_started(ctx)
+                && let Some(word) = self.long_press_word.clone()
+            {
+                self.scroll_at_edge(ui, pos, viewport);
+                let at = self.layout.offset_at_pos(on_page)?;
+                let (anchor, head) = if at < word.start {
+                    (word.end, at)
+                } else {
+                    (word.start, at.max(word.end))
+                };
+                return Some(Click::Selection { anchor, head });
+            }
+        }
         if self.dragging_caret && !touch {
             let offset = self.layout.offset_at_pos(on_page)?;
             return Some(Click::Caret {
@@ -623,6 +851,20 @@ impl MdView {
             .placed_fields()
             .iter()
             .any(|placed| placed.rect().contains(on_page));
+        if touch && crate::touch::long_press_started(ui.ctx()) {
+            let at = self.layout.offset_at_pos(on_page)?;
+            let word = self.layout.word_around(at).unwrap_or(at..at);
+            self.offer_paste = word.is_empty();
+            self.caret_handle = false;
+            self.long_press_word = Some(word.clone());
+            return Some(Click::Selection {
+                anchor: word.start,
+                head: word.end,
+            });
+        }
+        if pressed {
+            self.offer_paste = false;
+        }
         if double {
             self.dragging_caret = false;
             if on_text {
@@ -641,6 +883,7 @@ impl MdView {
             return None;
         }
         self.dragging_caret = !touch;
+        self.caret_handle = touch;
         Some(Click::Caret {
             offset: self.layout.offset_at_pos(on_page)?,
             extend: shift,
@@ -822,21 +1065,40 @@ fn take_keys(
     layout: &Layout,
     source: Option<&str>,
 ) {
+    // A click takes the keys from what it isn't on, and the text on the page is
+    // on top of this. Getting them back would go through `request_focus`, which
+    // interrupts the input method: on Android, the keyboard goes down and up.
+    let surrender = ui.input(|i| i.pointer.any_click());
+    let surrender = surrender.then(|| {
+        ui.ctx().options_mut(|options| {
+            std::mem::replace(
+                &mut options.input_options.surrender_focus_on,
+                egui::SurrenderFocusOn::Never,
+            )
+        })
+    });
     let response = ui.interact(viewport, caret.focus, Sense::focusable_noninteractive());
+    if let Some(surrender) = surrender {
+        ui.ctx()
+            .options_mut(|options| options.input_options.surrender_focus_on = surrender);
+    }
+    if response.has_focus() {
+        ui.memory_mut(|memory| {
+            memory.set_focus_lock_filter(
+                caret.focus,
+                egui::EventFilter {
+                    tab: true,
+                    horizontal_arrows: true,
+                    vertical_arrows: true,
+                    escape: false,
+                },
+            );
+        });
+    }
+    // Only while it has the keys: giving them up is what a back swipe does.
     if !response.has_focus() {
         return;
     }
-    ui.memory_mut(|memory| {
-        memory.set_focus_lock_filter(
-            caret.focus,
-            egui::EventFilter {
-                tab: true,
-                horizontal_arrows: true,
-                vertical_arrows: true,
-                escape: false,
-            },
-        );
-    });
     let fields = layout.placed_fields();
     let refs: Vec<&Editable> = fields.iter().map(|placed| placed.field).collect();
     let at = field_at(&refs, caret.head).map(|(index, _)| &fields[index]);

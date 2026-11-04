@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 pub use self::{
     images::Images,
     links::{Target, is_markdown},
-    view::{BlockEditor, Caret, Click, MdView, Options},
+    view::{BlockEditor, Caret, Click, MdView, Options, PageCommand},
 };
 
 /// What to do about pictures in documents that are on other servers.

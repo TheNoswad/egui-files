@@ -356,6 +356,102 @@ pub fn open_url(url: &str) -> std::io::Result<()> {
     .map_err(std::io::Error::other)
 }
 
+/// The system's clipboard manager.
+fn clipboard_manager<'local>(
+    env: &mut Env<'local>,
+    activity: &JObject,
+) -> jni::errors::Result<JObject<'local>> {
+    let service = env.new_string("clipboard")?;
+    env.call_method(
+        activity,
+        jni_str!("getSystemService"),
+        jni_sig!("(Ljava/lang/String;)Ljava/lang/Object;"),
+        &[JValue::Object(&service)],
+    )?
+    .l()
+}
+
+/// Puts text on the system's clipboard, where other apps can get it. egui's
+/// own on Android goes no further than this app.
+pub fn copy_text(text: &str) {
+    let result = with_activity("copy", |env, activity| {
+        let manager = clipboard_manager(env, activity)?;
+        let label = env.new_string("Text")?;
+        let text = env.new_string(text)?;
+        let clip = env
+            .call_static_method(
+                jni_str!("android/content/ClipData"),
+                jni_str!("newPlainText"),
+                jni_sig!(
+                    "(Ljava/lang/CharSequence;Ljava/lang/CharSequence;)Landroid/content/ClipData;"
+                ),
+                &[JValue::Object(&label), JValue::Object(&text)],
+            )?
+            .l()?;
+        env.call_method(
+            &manager,
+            jni_str!("setPrimaryClip"),
+            jni_sig!("(Landroid/content/ClipData;)V"),
+            &[JValue::Object(&clip)],
+        )?;
+        Ok(())
+    });
+    if let Err(err) = result {
+        log::warn!("{err}");
+    }
+}
+
+/// The text on the system's clipboard, if there is any.
+pub fn clipboard_text() -> Option<String> {
+    let result = with_activity("paste", |env, activity| {
+        let manager = clipboard_manager(env, activity)?;
+        let clip = env
+            .call_method(
+                &manager,
+                jni_str!("getPrimaryClip"),
+                jni_sig!("()Landroid/content/ClipData;"),
+                &[],
+            )?
+            .l()?;
+        if clip.is_null() {
+            return Ok(None);
+        }
+        let item = env
+            .call_method(
+                &clip,
+                jni_str!("getItemAt"),
+                jni_sig!("(I)Landroid/content/ClipData$Item;"),
+                &[JValue::Int(0)],
+            )?
+            .l()?;
+        let text = env
+            .call_method(
+                &item,
+                jni_str!("coerceToText"),
+                jni_sig!("(Landroid/content/Context;)Ljava/lang/CharSequence;"),
+                &[JValue::Object(activity)],
+            )?
+            .l()?;
+        if text.is_null() {
+            return Ok(None);
+        }
+        let text = env
+            .call_method(
+                &text,
+                jni_str!("toString"),
+                jni_sig!("()Ljava/lang/String;"),
+                &[],
+            )?
+            .l()?;
+        let text = env.cast_local::<jni::objects::JString>(text)?;
+        Ok(Some(text.try_to_string(env)?))
+    });
+    result.unwrap_or_else(|err| {
+        log::warn!("{err}");
+        None
+    })
+}
+
 /// The media store's URI for the file at `path`, and its type if the store
 /// knows it. A file it hasn't indexed yet is scanned, and waited for a moment.
 fn media_uri<'local>(
