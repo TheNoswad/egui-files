@@ -2,7 +2,9 @@
 //! decoded, and kept as textures.
 //!
 //! Remote pictures are only fetched for documents that may (see
-//! [`Images::size`]): fetching tells the server someone is reading.
+//! [`Images::size`]): fetching tells the server someone is reading. Formulas
+//! and diagrams come through here too, drawn rather than read (see
+//! [`drawing`](super::drawing)).
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -15,7 +17,10 @@ use std::{
 
 use egui::{ColorImage, Context, TextureHandle, TextureOptions, Vec2};
 
-use super::parse::is_remote;
+use super::{
+    drawing::{self, is_diagram, is_drawing},
+    parse::is_remote,
+};
 
 /// Files or downloads at once.
 const MAX_LOADING: usize = 4;
@@ -34,14 +39,22 @@ enum Slot {
     Ready {
         texture: TextureHandle,
         size: Vec2,
+        /// How far below the baseline it goes.
+        depth: f32,
         last_used: u64,
     },
-    Failed,
+    Failed(String),
 }
 
 struct Done {
     key: String,
-    result: Result<(ColorImage, Vec2), String>,
+    result: Result<Decoded, String>,
+}
+
+struct Decoded {
+    image: ColorImage,
+    size: Vec2,
+    depth: f32,
 }
 
 /// Decoded pictures, by absolute path or URL.
@@ -49,6 +62,9 @@ pub struct Images {
     slots: HashMap<String, Slot>,
     queue: VecDeque<String>,
     loading: usize,
+    /// Whether a diagram is being drawn: they can take seconds each, and
+    /// nothing can stop one.
+    drawing_diagram: bool,
     sender: Sender<Done>,
     results: Receiver<Done>,
     frame: u64,
@@ -63,6 +79,7 @@ impl Default for Images {
             slots: HashMap::new(),
             queue: VecDeque::new(),
             loading: 0,
+            drawing_diagram: false,
             sender,
             results,
             frame: 0,
@@ -78,23 +95,39 @@ impl Images {
         for Done { key, result } in self.results.try_iter().collect::<Vec<_>>() {
             self.loading = self.loading.saturating_sub(1);
             self.generation += 1;
+            if is_diagram(&key) {
+                self.drawing_diagram = false;
+            }
             let slot = match result {
-                Ok((image, size)) => Slot::Ready {
+                Ok(Decoded { image, size, depth }) => Slot::Ready {
                     texture: ctx.load_texture(&key, image, TextureOptions::LINEAR),
                     size,
+                    depth,
                     last_used: self.frame,
                 },
                 Err(err) => {
-                    eprintln!("markdown image {key}: {err}");
-                    Slot::Failed
+                    // A formula being typed is wrong most of the time.
+                    if !is_drawing(&key) {
+                        eprintln!("markdown image {key}: {err}");
+                    }
+                    Slot::Failed(err)
                 }
             };
             self.slots.insert(key, slot);
         }
         while self.loading < MAX_LOADING {
-            let Some(key) = self.queue.pop_back() else {
+            // Drawings are asked for from the top of the document down, and
+            // what's read first should show first.
+            let busy = self.drawing_diagram;
+            let next = self
+                .queue
+                .iter()
+                .position(|key| is_drawing(key) && !(busy && is_diagram(key)))
+                .or_else(|| self.queue.iter().rposition(|key| !is_drawing(key)));
+            let Some(key) = next.and_then(|at| self.queue.remove(at)) else {
                 break;
             };
+            self.drawing_diagram |= is_diagram(&key);
             self.loading += 1;
             start(ctx, key, self.sender.clone());
         }
@@ -110,6 +143,40 @@ impl Images {
         match self.slots.get(key) {
             Some(Slot::Ready { size, .. }) => Some(*size),
             _ => None,
+        }
+    }
+
+    /// A picture's size if it's here, without asking for it.
+    pub fn ready_size(&self, key: &str) -> Option<Vec2> {
+        match self.slots.get(key) {
+            Some(Slot::Ready { size, .. }) => Some(*size),
+            _ => None,
+        }
+    }
+
+    /// How far below the baseline it goes.
+    pub fn depth(&self, key: &str) -> f32 {
+        match self.slots.get(key) {
+            Some(Slot::Ready { depth, .. }) => *depth,
+            _ => 0.0,
+        }
+    }
+
+    /// Why it can't be shown.
+    pub fn error(&self, key: &str) -> Option<&str> {
+        match self.slots.get(key) {
+            Some(Slot::Failed(err)) => Some(err),
+            _ => None,
+        }
+    }
+
+    /// No longer wanted: if it hasn't started, it won't. Whatever else wants
+    /// it asks again when it's laid out anew.
+    pub fn cancel(&mut self, key: &str) {
+        if let Some(at) = self.queue.iter().position(|queued| queued == key) {
+            self.queue.remove(at);
+            self.slots.remove(key);
+            self.generation += 1;
         }
     }
 
@@ -167,6 +234,9 @@ impl Images {
 /// What to load for an image in a document in `dir`. `None` for what can't
 /// be: other schemes, and remote pictures when they aren't allowed.
 pub fn resolve(url: &str, dir: &Path, allow_remote: bool) -> Option<String> {
+    if is_drawing(url) {
+        return Some(url.to_owned());
+    }
     if is_remote(url) {
         return allow_remote.then(|| url.to_owned());
     }
@@ -177,6 +247,15 @@ pub fn resolve(url: &str, dir: &Path, allow_remote: bool) -> Option<String> {
 }
 
 fn start(ctx: &Context, key: String, sender: Sender<Done>) {
+    if is_drawing(&key) {
+        let ctx = ctx.clone();
+        crate::background::spawn("markdown-drawing", move || {
+            let result = draw(&key);
+            let _ = sender.send(Done { key, result });
+            ctx.request_repaint();
+        });
+        return;
+    }
     let finish = {
         let ctx = ctx.clone();
         move |key: String, sender: &Sender<Done>, result: Result<Vec<u8>, String>| {
@@ -251,10 +330,38 @@ fn fetch(
     });
 }
 
+/// Rasterizes a formula or diagram. These crates see whatever's in a document,
+/// so a panic in one is only that picture's problem.
+fn draw(key: &str) -> Result<Decoded, String> {
+    let drawn = std::panic::catch_unwind(|| drawing::draw(key))
+        .map_err(|_| "couldn't be drawn".to_owned())??;
+    let bytes = drawn.svg.as_bytes();
+    let Some(pixels_per_unit) = drawn.pixels_per_unit else {
+        let (image, size) = decode_svg(bytes, SVG_SCALE)?;
+        return Ok(Decoded {
+            image,
+            size,
+            depth: drawn.depth,
+        });
+    };
+    let (image, _) = decode_svg(bytes, pixels_per_unit)?;
+    // Exactly its pixels, so that they land on the screen's.
+    let size = Vec2::new(image.size[0] as f32, image.size[1] as f32) / pixels_per_unit;
+    Ok(Decoded {
+        image,
+        size,
+        depth: drawn.depth,
+    })
+}
+
 /// The picture in the bytes, and the size to show it at, in points.
-fn decode(bytes: &[u8]) -> Result<(ColorImage, Vec2), String> {
+fn decode(bytes: &[u8]) -> Result<Decoded, String> {
     if looks_like_svg(bytes) {
-        return decode_svg(bytes);
+        return decode_svg(bytes, SVG_SCALE).map(|(image, size)| Decoded {
+            image,
+            size,
+            depth: 0.0,
+        });
     }
     let image = image::load_from_memory(bytes).map_err(|err| err.to_string())?;
     let size = Vec2::new(image.width() as f32, image.height() as f32);
@@ -265,10 +372,11 @@ fn decode(bytes: &[u8]) -> Result<(ColorImage, Vec2), String> {
     };
     let rgba = image.to_rgba8();
     let pixels = [rgba.width() as usize, rgba.height() as usize];
-    Ok((
-        ColorImage::from_rgba_unmultiplied(pixels, rgba.as_raw()),
+    Ok(Decoded {
+        image: ColorImage::from_rgba_unmultiplied(pixels, rgba.as_raw()),
         size,
-    ))
+        depth: 0.0,
+    })
 }
 
 fn looks_like_svg(bytes: &[u8]) -> bool {
@@ -279,7 +387,8 @@ fn looks_like_svg(bytes: &[u8]) -> bool {
         || (text.starts_with("<?xml") || text.starts_with("<!--")) && text.contains("<svg")
 }
 
-fn decode_svg(bytes: &[u8]) -> Result<(ColorImage, Vec2), String> {
+/// An SVG at `scale` pixels per unit, or as many as `MAX_SIDE` allows.
+fn decode_svg(bytes: &[u8], scale: f32) -> Result<(ColorImage, Vec2), String> {
     use resvg::{tiny_skia, usvg};
 
     let options = usvg::Options {
@@ -291,7 +400,7 @@ fn decode_svg(bytes: &[u8]) -> Result<(ColorImage, Vec2), String> {
     };
     let tree = usvg::Tree::from_data(bytes, &options).map_err(|err| err.to_string())?;
     let size = tree.size();
-    let scale = SVG_SCALE.min(MAX_SIDE as f32 / size.width().max(size.height()).max(1.0));
+    let scale = scale.min(MAX_SIDE as f32 / size.width().max(size.height()).max(1.0));
     let width = ((size.width() * scale).ceil() as u32).clamp(1, MAX_SIDE);
     let height = ((size.height() * scale).ceil() as u32).clamp(1, MAX_SIDE);
     let mut pixmap = tiny_skia::Pixmap::new(width, height).ok_or_else(|| "bad size".to_owned())?;
@@ -317,9 +426,38 @@ fn svg_fonts() -> Arc<fontdb::Database> {
             fonts.load_font_data(crate::theme::fonts::INTER_REGULAR.to_vec());
             fonts.load_font_data(crate::theme::fonts::INTER_BOLD.to_vec());
             fonts.set_sans_serif_family("Inter");
+            add_math_fonts(&mut fonts);
             Arc::new(fonts)
         })
         .clone()
+}
+
+/// KaTeX's fonts, under the styles their files don't declare.
+fn add_math_fonts(fonts: &mut fontdb::Database) {
+    for file in katex_native::FONTS {
+        fonts.push_face_info(fontdb::FaceInfo {
+            id: fontdb::ID::dummy(),
+            source: fontdb::Source::Binary(Arc::new(file.data)),
+            index: 0,
+            families: vec![(
+                file.font.family.name().to_owned(),
+                fontdb::Language::English_UnitedStates,
+            )],
+            post_script_name: file.postscript_name(),
+            style: if file.font.italic {
+                fontdb::Style::Italic
+            } else {
+                fontdb::Style::Normal
+            },
+            weight: if file.font.bold {
+                fontdb::Weight::BOLD
+            } else {
+                fontdb::Weight::NORMAL
+            },
+            stretch: fontdb::Stretch::Normal,
+            monospaced: false,
+        });
+    }
 }
 
 #[cfg(test)]
@@ -348,7 +486,7 @@ mod tests {
         image::DynamicImage::new_rgba8(3, 2)
             .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
             .unwrap();
-        let (image, size) = decode(&png).unwrap();
+        let Decoded { image, size, .. } = decode(&png).unwrap();
         assert_eq!(size, Vec2::new(3.0, 2.0));
         assert_eq!(image.size, [3, 2]);
         assert!(decode(b"not a picture").is_err());
@@ -358,7 +496,7 @@ mod tests {
     fn svgs_are_drawn_at_twice_their_size() {
         let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10">
             <rect width="20" height="10" fill="red"/></svg>"#;
-        let (image, size) = decode(svg).unwrap();
+        let Decoded { image, size, .. } = decode(svg).unwrap();
         assert_eq!(size, Vec2::new(20.0, 10.0));
         assert_eq!(image.size, [40, 20]);
         assert_eq!(image.pixels[0], egui::Color32::RED);
@@ -369,7 +507,71 @@ mod tests {
     #[test]
     fn huge_pictures_are_limited() {
         let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="100000" height="50"/>"#;
-        let (image, _) = decode(svg).unwrap();
+        let Decoded { image, .. } = decode(svg).unwrap();
         assert!(image.size[0] <= MAX_SIDE as usize);
+    }
+
+    fn inked(image: &ColorImage) -> usize {
+        image.pixels.iter().filter(|p| p.a() > 0).count()
+    }
+
+    #[test]
+    fn formulas_are_drawn_with_their_own_fonts_at_the_screens_pixels() {
+        let key = |tex| drawing::math_key(tex, false, 20.0, egui::Color32::WHITE, 2.0, None);
+        let Decoded { image, size, depth } = draw(&key(r"\frac{a}{b}")).unwrap();
+        assert_eq!(
+            size * 2.0,
+            Vec2::new(image.size[0] as f32, image.size[1] as f32)
+        );
+        assert!(depth > 0.0);
+        assert!(inked(&image) > 0, "the fonts were found");
+        assert!(draw(&key(r"\frac{1")).is_err());
+    }
+
+    #[test]
+    fn a_huge_rule_stays_within_the_limit() {
+        let key = drawing::math_key(
+            r"
+ule{99999em}{99999em}",
+            true,
+            20.0,
+            egui::Color32::WHITE,
+            1.0,
+            None,
+        );
+        let Decoded { image, .. } = draw(&key).unwrap();
+        assert!(image.size[0].max(image.size[1]) <= MAX_SIDE as usize);
+    }
+
+    #[test]
+    fn one_diagram_is_drawn_at_a_time_and_the_unwanted_are_dropped() {
+        let ctx = Context::default();
+        let colors = super::super::diagram::Colors {
+            dark: true,
+            background: "#000000".to_owned(),
+            text: "#ffffff".to_owned(),
+            line: "#888888".to_owned(),
+        };
+        let key = |code: &str| drawing::diagram_key(code, &colors);
+        let (one, two, three) = (
+            key("pie\n\"a\" : 1\n"),
+            key("pie\n\"b\" : 1\n"),
+            key("pie\n\"c\" : 1\n"),
+        );
+        let mut images = Images::default();
+        for key in [&one, &two, &three] {
+            assert_eq!(images.size(key), None);
+        }
+        images.begin_frame(&ctx);
+        assert!(images.drawing_diagram);
+        assert_eq!(images.loading, 1, "only one started");
+        assert_eq!(images.queue.len(), 2);
+        // From the top of the document down, so the first has started.
+        images.cancel(&two);
+        assert_eq!(images.queue.iter().collect::<Vec<_>>(), [&three]);
+        assert!(!images.slots.contains_key(&two));
+        // One that's started can't be stopped, and stays.
+        images.cancel(&one);
+        assert!(images.slots.contains_key(&one));
     }
 }

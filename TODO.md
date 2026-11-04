@@ -46,7 +46,7 @@
 
 ## Markdown
 
-`src/markdown/`: `parse` (pulldown-cmark to blocks with source offsets), `layout` (blocks at a width, to a flat list of items), `view` (draws what's on screen, clicks), `images`, `links`. The editor tab shows it in Source, Split and Preview. The source is the only document: anything that changes it is a splice of its bytes.
+`src/markdown/`: `parse` (pulldown-cmark to blocks with source offsets), `layout` (blocks at a width, to a flat list of items), `view` (draws what's on screen, clicks), `images`, `links`, `drawing` (formulas and diagrams). The editor tab shows it in Source, Split and Preview. The source is the only document: anything that changes it is a splice of its bytes.
 
 - [x] Renderer: CommonMark, GFM, footnotes, alerts and callouts, frontmatter, definition lists, sub/superscript, heading ids, wikilinks, highlights, tags, emoji shortcodes
 - [x] Preview and Split, with scrolling kept together; Open reads, Edit edits; the preview pane renders
@@ -55,7 +55,13 @@
 - [x] Phase 2, editing aids: formatting commands and shortcuts, lists that continue on Enter and nest on Tab, addresses pasted over text become links, table editing (`table.rs`), outline, word count and reading time, find in the rendered view, pasted and dropped pictures (`assets.rs`), a picture's lightbox
 - [ ] Pasting files and pictures (`system_clipboard.rs`), in the file browser and documents: the whole path only tried on X11, and reading the clipboard on KWin Wayland; check Ctrl+V on Wayland and Windows. Android and the browser can't read it: there, pictures come by dropping or the toolbar's template
 - [ ] Clicking a picture in a rendered document on a touchscreen: the lightbox is only checked with a mouse; pinch-to-zoom in it is untested
-- [ ] Phase 3: math and Mermaid (their source is shown until then)
+- [x] Phase 3: math (`math.rs`, katex-native) and Mermaid (`diagram.rs`, mermaid-rs-renderer, patched: see `patches/README.md`), drawn as SVGs through the images store (`drawing.rs`)
+- [ ] Formulas that define macros aren't drawn: an argument doubling itself reaches gigabytes in a second, past KaTeX's limit on expansions, and macros can hide nesting that overflows the stack, which can't be caught. To allow them, KaTeX needs limits on what expansions produce and on depth (`math::refusal`)
+- [ ] Automatic equation numbers (`align`, `equation`) start over in each formula; `layout_numbered` can continue them, once a formula's key can depend on those before it
+- [ ] Formulas and diagrams aren't found by find, and copy as spaces when selected: copy their source
+- [ ] Non-Latin text in formulas (`\text{日本語}`) uses installed fonts, so boxes on the web
+- [ ] `\ce` (mhchem) isn't in katex-rs; `\ce{H2O}` shows as an error
+- [ ] A diagram can't be stopped once started: a big one keeps a core busy (flowcharts: 200 nodes, 15 s), and on the web stops the page, hence fewer lines allowed there (`diagram.rs`). A worker would fix both. Mindmaps overlap their nodes, and pie titles sit close to the pie: the crate's layout
 - [x] Editing while reading: double-click a block in Preview to edit its markdown in place, with the formatting commands; a double-click below the last one adds a paragraph (`block_edit.rs`). One splice of the source per block, and one undo step
 - [ ] Editing a list or quote is of the whole of it: smaller blocks, down to the item, would jump less
 - [ ] WYSIWYG: edit the rendered text itself, with a cursor in the page rather than its markdown in a box. Still only splices the source: untouched bytes never change. Double-click block editing stays. Live view isn't needed: block editing covers it
@@ -85,7 +91,7 @@
 - [x] Bring in files and folders, dropped on the page or through File → Add files/folder (1 GiB per job)
 - [x] Fetch files from the server when they're first opened (`web/demo-files/`, listed in a manifest by `web/demo-files.sh`)
 - [x] Fetch the shown folder's files in the background, smallest first, with pictures waiting for theirs: on a 300 KB/s connection, Pictures stopped the page for up to 10.5 s at a time, and now for 0.2 s
-- [x] Size: 11.5 MB of wasm, 4.3 MB with brotli, down from 18 and 6: built for size, WebGL through glow instead of wgpu, no persistence
+- [x] Size: 17.8 MB of wasm, 5.7 MB with brotli (11.5 and 4.3 before math and diagrams): built for size, WebGL through glow instead of wgpu, no persistence
 - [x] Tried in Firefox: disk usage, compressing (zip, tar.xz, 7z with a password), and saving in the editor
 - [ ] Publishing (GitHub Pages or Cloudflare Pages), from CI; the site is static, with relative URLs. Check the host compresses the wasm, and serves the dotfiles in `demo/files/` (`.profile`, `.gitignore`)
 - [ ] Better content for `web/demo-files/`: real photos and such, instead of pictures drawn by code. `Projects/egui-files` is a copy of some of the source, and `Downloads/` packs some of these files, so they don't follow changes

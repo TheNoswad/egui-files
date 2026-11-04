@@ -16,6 +16,7 @@ use egui_phosphor::regular as icon;
 
 use super::{
     Images,
+    drawing::is_drawing,
     images::resolve,
     layout::{
         self, CodeSpans, Fonts, GalleyCache, Hit, ImageSizes, Inputs, Item, Layout, Params,
@@ -106,6 +107,10 @@ pub struct MdView {
     layout_generation: u64,
     stats: Stats,
     lightbox: Option<Lightbox>,
+    /// The formulas and diagrams of the last layout.
+    drawings: Vec<String>,
+    atlas_fill: f32,
+    atlas_generation: u64,
 }
 
 /// A picture shown large, over everything.
@@ -225,6 +230,13 @@ impl MdView {
         editing: Option<(std::ops::Range<usize>, f32)>,
     ) {
         let ctx = ui.ctx();
+        let (text_options, atlas_fill) =
+            ctx.fonts(|fonts| (*fonts.options(), fonts.font_atlas_fill_ratio()));
+        // It only ever fills up, until egui starts it over.
+        if atlas_fill < self.atlas_fill {
+            self.atlas_generation += 1;
+        }
+        self.atlas_fill = atlas_fill;
         let mut theme = Theme::new(ui.visuals(), options.code_fg, options.code_bg);
         if options.compact {
             theme.size = 13.0;
@@ -235,6 +247,8 @@ impl MdView {
             fonts: Fonts::of(ctx),
             pixels_per_point: ctx.pixels_per_point(),
             font_generation: crate::theme::fonts::generation(ctx),
+            text_options,
+            atlas_generation: self.atlas_generation,
             image_generation: images.generation,
             code_generation: self.code_generation,
             fold_generation: self.fold_generation,
@@ -248,6 +262,8 @@ impl MdView {
         if self.inputs.as_ref().is_none_or(|old| {
             old.font_generation != inputs.font_generation
                 || old.pixels_per_point != inputs.pixels_per_point
+                || old.text_options != inputs.text_options
+                || old.atlas_generation != inputs.atlas_generation
         }) {
             self.cache.clear();
         }
@@ -265,8 +281,16 @@ impl MdView {
                 cache: &mut self.cache,
                 code_spans: &self.code_spans,
                 toggled: &self.toggled,
+                previous_drawings: &self.drawings,
             },
         );
+        // What was being typed a moment ago needn't be drawn anymore.
+        for key in &self.drawings {
+            if !self.layout.drawings.contains(key) {
+                images.cancel(key);
+            }
+        }
+        self.drawings.clone_from(&self.layout.drawings);
         self.inputs = Some(inputs);
         self.layout_generation += 1;
     }
@@ -433,7 +457,10 @@ impl MdView {
                 painter.rect_filled(screen, 0.0, Color32::from_black_alpha(220));
                 let margin = 24.0;
                 let room = screen.shrink(margin).size();
-                let fit = (room.x / size.x).min(room.y / size.y).min(1.0);
+                // A drawing is here to be read, and has the pixels for twice its
+                // size; a picture isn't blown up past its own.
+                let most = if is_drawing(&lightbox.key) { 2.0 } else { 1.0 };
+                let fit = (room.x / size.x).min(room.y / size.y).min(most);
                 let rect = Rect::from_center_size(
                     screen.center() + lightbox.pan,
                     size * fit * lightbox.zoom,
@@ -519,6 +546,18 @@ impl ImageSizes for Sizes<'_> {
     fn size(&mut self, url: &str) -> Option<Vec2> {
         let key = resolve(url, self.dir, self.allow_remote)?;
         self.images.size(&key)
+    }
+
+    fn ready_size(&self, key: &str) -> Option<Vec2> {
+        self.images.ready_size(key)
+    }
+
+    fn depth(&self, key: &str) -> f32 {
+        self.images.depth(key)
+    }
+
+    fn error(&self, key: &str) -> Option<String> {
+        self.images.error(key).map(str::to_owned)
     }
 }
 
@@ -647,6 +686,30 @@ fn paint(
             Item::Widget { rect, widget, on } => {
                 paint_widget(ui, *rect, widget, *on, origin, item_id, painting);
             }
+            Item::Picture { rect, key } => {
+                if let Some(texture) = painting.images.texture(key) {
+                    ui.painter().image(
+                        texture.id(),
+                        snapped(ui, rect.translate(origin.to_vec2())),
+                        Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                        Color32::WHITE,
+                    );
+                }
+            }
+            Item::Enlarge { rect, block, key } => {
+                let by = origin.to_vec2();
+                if ui.rect_contains_pointer(block.translate(by)) {
+                    let button = ui.put(
+                        rect.translate(by),
+                        egui::Button::new(egui_phosphor::regular::ARROWS_OUT),
+                    );
+                    if button.on_hover_text("Enlarge").clicked()
+                        && let Some(opened) = &mut painting.opened
+                    {
+                        **opened = Some(key.clone());
+                    }
+                }
+            }
             Item::CopyCode { rect, block, code } => {
                 let block = block.translate(origin.to_vec2());
                 if ui.rect_contains_pointer(block) {
@@ -692,6 +755,13 @@ fn paint_editor(ui: &mut Ui, rect: Rect, editor: &mut BlockEditor) {
         editor.height = height;
         ui.ctx().request_repaint();
     }
+}
+
+/// On the screen's pixels: a formula drawn at exactly their size stays sharp.
+fn snapped(ui: &Ui, rect: Rect) -> Rect {
+    use egui::emath::GuiRounding as _;
+    let min = rect.min.round_to_pixels(ui.ctx().pixels_per_point());
+    Rect::from_min_size(min, rect.size())
 }
 
 /// Marks what was found in this text.
@@ -754,14 +824,15 @@ fn paint_text(
             let Some(texture) = painting.images.texture(&key) else {
                 continue;
             };
-            let image_rect = image.rect.translate(pos.to_vec2());
+            let image_rect = snapped(ui, image.rect.translate(pos.to_vec2()));
             ui.painter().image(
                 texture.id(),
                 image_rect,
                 Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
                 Color32::WHITE,
             );
-            if ui.rect_contains_pointer(image_rect) {
+            // A formula is part of the line: it has nothing more to show.
+            if ui.rect_contains_pointer(image_rect) && !is_drawing(&key) {
                 image_under = Some(key);
                 if !image.tip.is_empty() {
                     response.clone().on_hover_text(&image.tip);
@@ -905,6 +976,88 @@ pub fn base_dir(path: &std::path::Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Runs a pass laying the document out, returning how many times it has been.
+    fn pass(ctx: &Context, view: &mut MdView, images: &mut Images, dark: bool) -> u64 {
+        let options = Options {
+            dir: std::path::Path::new("/"),
+            syntax_theme: "",
+            code_fg: Color32::WHITE,
+            code_bg: Color32::BLACK,
+            allow_remote: false,
+            editable: false,
+            scroll_to: None,
+            compact: false,
+            hits: None,
+        };
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            // As a click in the menus does it: before the page, in the same pass.
+            let visuals = if dark {
+                egui::Visuals::dark()
+            } else {
+                egui::Visuals::light()
+            };
+            ui.ctx().set_visuals(visuals.clone());
+            *ui.visuals_mut() = visuals;
+            view.update_layout(ui, 400.0, &options, images, None);
+        });
+        output.textures_delta.clear();
+        view.layout_generation
+    }
+
+    /// egui starts its font atlas over the pass after the theme changes, by
+    /// which time the page is laid out with the new colors and the old atlas.
+    /// Kept, those lines draw from the wrong places: garbled.
+    #[test]
+    fn the_page_is_laid_out_again_when_the_font_atlas_starts_over() {
+        let ctx = Context::default();
+        let mut view = MdView {
+            document: std::sync::Arc::new(parse::parse("Some text")),
+            ..MdView::default()
+        };
+        let mut images = Images::default();
+        let mut laid_out = 0;
+        for _ in 0..3 {
+            laid_out = pass(&ctx, &mut view, &mut images, true);
+        }
+        assert_eq!(
+            pass(&ctx, &mut view, &mut images, true),
+            laid_out,
+            "settled"
+        );
+
+        let colors_changed = pass(&ctx, &mut view, &mut images, false);
+        assert!(colors_changed > laid_out);
+        let mut last = colors_changed;
+        let mut later = 0;
+        for _ in 0..3 {
+            let now = pass(&ctx, &mut view, &mut images, false);
+            later += now - last;
+            last = now;
+        }
+        assert!(later >= 1, "laid out again once the atlas had started over");
+        assert_eq!(
+            pass(&ctx, &mut view, &mut images, false),
+            last,
+            "and settles"
+        );
+    }
+
+    #[test]
+    fn a_font_atlas_that_shrinks_has_started_over() {
+        let ctx = Context::default();
+        let mut view = MdView {
+            document: std::sync::Arc::new(parse::parse("Some text")),
+            ..MdView::default()
+        };
+        let mut images = Images::default();
+        let mut laid_out = 0;
+        for _ in 0..3 {
+            laid_out = pass(&ctx, &mut view, &mut images, true);
+        }
+        view.atlas_fill = 2.0;
+        assert!(pass(&ctx, &mut view, &mut images, true) > laid_out);
+    }
 
     #[test]
     fn toggling_a_task_changes_only_its_mark() {

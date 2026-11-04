@@ -42,3 +42,20 @@ places that lock it).
 
 Also passes the key press through when Ctrl+V finds no text on the clipboard,
 instead of dropping it, so a picture can be pasted (`markdown::assets`).
+
+## mermaid-rs-renderer (0.3.1)
+
+Without its tests, benches and examples (2 MB), and their entries in
+`Cargo.toml`. Three changes:
+
+- `layout/mod.rs`, `layout/flowchart/edge_pipeline.rs`, `lib.rs`: `web_time`'s
+  `Instant` on wasm32. Its timings call `std::time::Instant::now()`, which
+  panics in the browser, on every diagram.
+- `text_metrics.rs`: no font cache. Upstream writes a copy of the system font
+  it measures with to `~/.cache/mmdr`, which a file manager shouldn't be doing.
+- `text_metrics.rs`: `register_font`, to measure with the font diagrams are
+  drawn with (`markdown::diagram`), on every platform, without scanning the
+  installed fonts.
+
+To update it: copy the new version from `~/.cargo/registry/src` over this
+folder and redo these.

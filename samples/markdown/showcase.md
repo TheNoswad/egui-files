@@ -492,11 +492,13 @@ A short note[^short], one with blocks in it[^long], and the short one again[^sho
 
 [^unused]: Nothing refers to this one, so it goes last.
 
-## Not rendered yet
+## Math
 
-These show their source for now. Math and diagrams are phase 3, and raw HTML comes later.
+Inline math: $e^{i\pi} + 1 = 0$, and $\frac{a}{b}$ in a sentence, with tall ones like $\sum_{n=1}^{\infty} \frac{1}{n^2}$ keeping to the line. Not math: it costs \$5 or \$10.
 
-Inline math: $e^{i\pi} + 1 = 0$, and $\frac{a}{b}$ in a sentence. Not math: it costs \$5 or \$10.
+A heading takes its color and size:
+
+### The area under $x^2$
 
 Display math:
 
@@ -510,6 +512,45 @@ a &= b + c \\
 d &= e + f
 \end{aligned}
 $$
+
+With a tag, against the right edge:
+
+$$
+\tag{1} E = mc^2
+$$
+
+Wider than the page, which scrolls sideways:
+
+$$
+a_1 + a_2 + a_3 + a_4 + a_5 + a_6 + a_7 + a_8 + a_9 + a_{10} + a_{11} + a_{12} + a_{13} + a_{14} + a_{15} + a_{16} + a_{17} + a_{18} + a_{19} + a_{20} + a_{21} + a_{22} + a_{23} + a_{24} + a_{25} + a_{26} + a_{27} + a_{28} + a_{29} + a_{30}
+$$
+
+In a table:
+
+| Name | Formula |
+|------|---------|
+| Pythagoras | $a^2 + b^2 = c^2$ |
+| Euler | $e^{i\pi} + 1 = 0$ |
+
+What can't be drawn shows its source: inline in red, $\nosuchcommand$, and in display math with why:
+
+$$
+\nosuchcommand{x}
+$$
+
+Unbalanced braces aren't math at all, so these stay as written: $\frac{1$
+
+$$
+\frac{1
+$$
+
+A formula that would use up all the memory if it were run, refused:
+
+$$
+\def\a#1{\a{#1#1}}\a{x}
+$$
+
+## Diagrams
 
 A flowchart:
 
@@ -526,7 +567,33 @@ A sequence diagram:
 sequenceDiagram
     Alice->>Bob: Hello
     Bob-->>Alice: Hi
+    Note over Alice,Bob: A note
 ```
+
+A class diagram, and a pie:
+
+```mermaid
+classDiagram
+    Animal <|-- Duck
+    Animal : +int age
+    Duck : +swim()
+```
+
+```mermaid
+pie title Pets
+    "Dogs" : 386
+    "Cats" : 85
+```
+
+Not a diagram:
+
+```mermaid
+this is not a diagram
+```
+
+## Not rendered yet
+
+Raw HTML comes later.
 
 Inline HTML: <kbd>Ctrl</kbd>+<kbd>C</kbd>, H<sub>2</sub>O, x<sup>2</sup>, and a<br>break.
 

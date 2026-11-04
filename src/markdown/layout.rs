@@ -18,10 +18,18 @@ use egui::{
 };
 use pulldown_cmark::Alignment;
 
-use super::parse::{
-    Block, BlockKind, Callout, CalloutFold, Document, IMAGE_CHAR, Inlines, Link, Style, Task,
+use super::{
+    diagram::Colors,
+    drawing::{self, svg_color},
+    parse::{
+        Block, BlockKind, Callout, CalloutFold, Document, IMAGE_CHAR, Inlines, Link, Style, Task,
+    },
 };
 use crate::editor::highlight::{self, LineSpans};
+
+/// KaTeX's letters look small beside most fonts': its own CSS sets them larger
+/// than the text around them too.
+const MATH_SCALE: f32 = 1.15;
 
 /// Colors and sizes of the rendered document.
 #[derive(Clone, Debug, PartialEq)]
@@ -188,6 +196,25 @@ impl Fonts {
 /// The size of an image, if it can be shown; asked of the image store.
 pub trait ImageSizes {
     fn size(&mut self, url: &str) -> Option<Vec2>;
+    /// Its size if it's here, without asking for it.
+    fn ready_size(&self, _key: &str) -> Option<Vec2> {
+        None
+    }
+    /// How far below the baseline it goes.
+    fn depth(&self, _key: &str) -> f32 {
+        0.0
+    }
+    /// Why it can't be shown.
+    fn error(&self, _key: &str) -> Option<String> {
+        None
+    }
+}
+
+/// How a formula or diagram stands.
+enum Drawn {
+    Ready { key: String, size: Vec2, depth: f32 },
+    Waiting,
+    Failed(String),
 }
 
 /// A piece of text: laid out, placed, and able to answer what's under the
@@ -281,6 +308,18 @@ pub enum Item {
         widget: Widget,
         on: bool,
     },
+    /// A formula or diagram.
+    Picture {
+        rect: Rect,
+        key: String,
+    },
+    /// A button to see a diagram larger, which shows when it's hovered: a
+    /// click on the diagram itself is for double-clicking, to edit it.
+    Enlarge {
+        rect: Rect,
+        block: Rect,
+        key: String,
+    },
     /// Wider than the page: scrolls sideways on its own.
     Sideways {
         rect: Rect,
@@ -310,8 +349,9 @@ impl Item {
             | Item::Square { rect, .. }
             | Item::Widget { rect, .. }
             | Item::Editor { rect }
+            | Item::Picture { rect, .. }
             | Item::Sideways { rect, .. } => *rect,
-            Item::CopyCode { block, .. } => *block,
+            Item::CopyCode { block, .. } | Item::Enlarge { block, .. } => *block,
             Item::Line { from, to, .. } => Rect::from_two_pos(*from, *to).expand(1.0),
             Item::Dot { center, radius, .. } => {
                 Rect::from_center_size(*center, Vec2::splat(*radius * 2.0))
@@ -338,6 +378,10 @@ pub struct Inputs {
     pub fonts: Fonts,
     pub pixels_per_point: f32,
     pub font_generation: u64,
+    /// What's laid out holds places in the font atlas, which egui starts over
+    /// when these change, or when it fills up (which this counts).
+    pub text_options: egui::epaint::text::TextOptions,
+    pub atlas_generation: u64,
     pub image_generation: u64,
     pub code_generation: u64,
     pub fold_generation: u64,
@@ -357,6 +401,8 @@ pub struct Layout {
     /// Each block on the page as a whole: its source, and where it starts and
     /// ends going down. What double-clicking edits.
     pub blocks: Vec<(Range<usize>, f32, f32)>,
+    /// The keys of the formulas and diagrams, in order.
+    pub drawings: Vec<String>,
 }
 
 impl Layout {
@@ -556,6 +602,9 @@ pub struct Params<'a> {
     pub code_spans: &'a CodeSpans,
     /// Callouts folded the other way than they start out.
     pub toggled: &'a HashSet<usize>,
+    /// The last layout's drawings: while the one in its place is being drawn,
+    /// as it will be for each key typed, that's what shows.
+    pub previous_drawings: &'a [String],
 }
 
 pub fn layout(document: &Document, params: Params<'_>) -> Layout {
@@ -566,6 +615,7 @@ pub fn layout(document: &Document, params: Params<'_>) -> Layout {
         cache,
         code_spans,
         toggled,
+        previous_drawings,
     } = params;
     let mut builder = Builder {
         ctx,
@@ -575,6 +625,7 @@ pub fn layout(document: &Document, params: Params<'_>) -> Layout {
         cache,
         code_spans,
         toggled,
+        previous_drawings,
         out: Layout::default(),
         y: 0.0,
         list_depth: 0,
@@ -610,6 +661,7 @@ struct Builder<'a> {
     cache: &'a mut GalleyCache,
     code_spans: &'a CodeSpans,
     toggled: &'a HashSet<usize>,
+    previous_drawings: &'a [String],
     out: Layout,
     y: f32,
     /// How many lists this is inside of, which varies their bullets.
@@ -721,6 +773,9 @@ impl Builder<'_> {
                 self.text(inlines, x, width, style);
             }
             BlockKind::Heading { level, slug, text } => self.heading(*level, slug, text, x, width),
+            BlockKind::Code { lang, code } if lang.as_deref() == Some("mermaid") => {
+                self.diagram(code, x, width);
+            }
             BlockKind::Code { lang, code } => self.code(lang.as_deref(), code, x, width),
             BlockKind::Quote { callout, children } => match callout {
                 Some(callout) => self.callout(callout, children, block.source.start, x, width),
@@ -757,8 +812,7 @@ impl Builder<'_> {
             }
             BlockKind::Frontmatter(fields) => self.frontmatter(fields, x, width),
             BlockKind::Html(html) => self.raw(html.trim_end(), x, width),
-            // Drawn properly by a later change; its source until then.
-            BlockKind::Math(math) => self.raw(math.trim(), x, width),
+            BlockKind::Math(math) => self.display_math(math.trim(), x, width),
         }
     }
 
@@ -796,6 +850,136 @@ impl Builder<'_> {
                 stroke: Stroke::new(1.0, self.theme.border),
             });
             self.y += 2.0;
+        }
+    }
+
+    /// Where a drawing stands, asking for it if it's new.
+    fn drawn(&mut self, key: String) -> Drawn {
+        let index = self.out.drawings.len();
+        self.out.drawings.push(key.clone());
+        if let Some(size) = self.images.size(&key) {
+            let depth = self.images.depth(&key);
+            return Drawn::Ready { key, size, depth };
+        }
+        if let Some(err) = self.images.error(&key) {
+            return Drawn::Failed(err);
+        }
+        let previous = self.previous_drawings.get(index);
+        match previous.and_then(|key| Some((key, self.images.ready_size(key)?))) {
+            Some((key, size)) => Drawn::Ready {
+                key: key.clone(),
+                size,
+                depth: self.images.depth(key),
+            },
+            None => Drawn::Waiting,
+        }
+    }
+
+    /// Why something couldn't be drawn, under its source.
+    fn drawing_error(&mut self, err: &str, x: f32, width: f32) {
+        let size = (self.theme.size * 0.85).round();
+        self.y += self.theme.gap() * 0.3;
+        let job = plain_job(
+            self.ctx,
+            err,
+            FontId::proportional(size),
+            self.theme.callout_color("caution"),
+            width,
+            self.theme.line_height(size),
+        );
+        let galley = self.cache.get(self.ctx, job);
+        let height = galley.size().y;
+        self.out.items.push(Item::Marker {
+            pos: egui::pos2(x, self.y),
+            galley,
+        });
+        self.y += height;
+    }
+
+    fn display_math(&mut self, tex: &str, x: f32, width: f32) {
+        let key = drawing::math_key(
+            tex,
+            true,
+            (self.theme.size * MATH_SCALE).round(),
+            self.theme.text,
+            self.ctx.pixels_per_point(),
+            Some(width),
+        );
+        match self.drawn(key) {
+            Drawn::Ready { key, size, .. } => {
+                let top = self.y;
+                if size.x > width {
+                    let rect = Rect::from_min_size(egui::pos2(x, top), egui::vec2(width, size.y));
+                    let picture = Rect::from_min_size(egui::Pos2::ZERO, size);
+                    self.out.items.push(Item::Sideways {
+                        rect,
+                        content_width: size.x,
+                        items: vec![Item::Picture { rect: picture, key }],
+                    });
+                } else {
+                    let left = x + (width - size.x) / 2.0;
+                    self.out.items.push(Item::Picture {
+                        rect: Rect::from_min_size(egui::pos2(left, top), size),
+                        key,
+                    });
+                }
+                self.y += size.y;
+            }
+            Drawn::Waiting => self.raw(tex, x, width),
+            Drawn::Failed(err) => {
+                self.raw(tex, x, width);
+                self.drawing_error(&err, x, width);
+            }
+        }
+    }
+
+    fn diagram(&mut self, code: &str, x: f32, width: f32) {
+        let colors = Colors {
+            dark: self.theme.dark,
+            background: svg_color(self.theme.code_bg),
+            text: svg_color(self.theme.code_fg),
+            line: svg_color(self.theme.weak),
+        };
+        match self.drawn(drawing::diagram_key(code, &colors)) {
+            Drawn::Ready { key, size, .. } => {
+                let padding = self.theme.size * 0.75;
+                let size = fit(size, width - padding * 2.0);
+                let block = Rect::from_min_size(
+                    egui::pos2(x, self.y),
+                    egui::vec2(width, size.y + padding * 2.0),
+                );
+                self.out.items.push(Item::Fill {
+                    rect: block,
+                    color: self.theme.code_bg,
+                    radius: 4.0,
+                });
+                let left = x + (width - size.x) / 2.0;
+                self.out.items.push(Item::Picture {
+                    rect: Rect::from_min_size(egui::pos2(left, self.y + padding), size),
+                    key: key.clone(),
+                });
+                let button = (self.theme.size * 0.88).round() * 1.6;
+                let inset = self.theme.size * 0.35;
+                let corner = egui::pos2(block.max.x - button - inset, block.min.y + inset);
+                self.out.items.push(Item::Enlarge {
+                    rect: Rect::from_min_size(corner, Vec2::splat(button)),
+                    block,
+                    key,
+                });
+                // To the left of the first, as code blocks have it alone.
+                let copy = corner - egui::vec2(button + inset * 0.5, 0.0);
+                self.out.items.push(Item::CopyCode {
+                    rect: Rect::from_min_size(copy, Vec2::splat(button)),
+                    block,
+                    code: code.strip_suffix('\n').unwrap_or(code).to_owned(),
+                });
+                self.y += block.height();
+            }
+            Drawn::Waiting => self.code(Some("mermaid"), code, x, width),
+            Drawn::Failed(err) => {
+                self.code(Some("mermaid"), code, x, width);
+                self.drawing_error(&err, x, width);
+            }
         }
     }
 
@@ -1344,7 +1528,10 @@ impl Builder<'_> {
 
     fn text(&mut self, inlines: &Inlines, x: f32, width: f32, style: TextStyle) {
         let (galley, links, images) = self.inline_job(inlines, width, style);
-        let height = galley.size().y;
+        // A formula can reach below its row, as it does below its baseline.
+        let height = images.iter().fold(galley.size().y, |height, image| {
+            height.max(image.rect.max.y)
+        });
         for label in &inlines.footnote_refs {
             self.out
                 .anchors
@@ -1371,6 +1558,14 @@ impl Builder<'_> {
             );
             (metrics.ascent, metrics.row_height)
         })
+    }
+
+    /// How far below a line's baseline its row goes.
+    fn below_baseline(&self, style: TextStyle) -> f32 {
+        let line = self.theme.line_height(style.size);
+        let base = FontId::new(style.size, self.fonts.regular.clone());
+        let (ascent, height) = self.metrics(&base);
+        line - (ascent + (line - height) / 2.0)
     }
 
     /// The height that puts this font's baseline where the line's is, or
@@ -1467,7 +1662,7 @@ impl Builder<'_> {
         };
         let mut links: Vec<(Range<usize>, Link)> = Vec::new();
         // Which images to place, by char in the galley, and how big.
-        let mut placed: Vec<(usize, usize, Vec2)> = Vec::new();
+        let mut placed: Vec<Placing> = Vec::new();
         let mut chars = 0;
         let mut images = inlines.images.iter().enumerate().peekable();
         for run in &inlines.runs {
@@ -1477,6 +1672,46 @@ impl Builder<'_> {
             if run.link.is_some() {
                 format.color = self.theme.link;
             }
+            if run.style.math {
+                let key = drawing::math_key(
+                    text,
+                    false,
+                    (style.size * MATH_SCALE).round(),
+                    format.color,
+                    self.ctx.pixels_per_point(),
+                    None,
+                );
+                let drawn = self.drawn(key);
+                if let Drawn::Ready { key, size, depth } = drawn {
+                    let scaled = fit(size, width);
+                    let depth = depth * scaled.y / size.y.max(1.0);
+                    let below = self.below_baseline(style);
+                    let mut space = format.clone();
+                    space.font_id = FontId::new(1.0, self.fonts.regular.clone());
+                    space.background = Color32::TRANSPARENT;
+                    let above = scaled.y - depth + below;
+                    space.line_height = Some(above.max(self.theme.line_height(style.size)));
+                    placed.push(Placing {
+                        char: chars,
+                        url: key,
+                        tip: String::new(),
+                        size: scaled,
+                        lower: depth - below,
+                    });
+                    push(&mut job, "\u{A0}", space.clone());
+                    space.extra_letter_spacing = scaled.x;
+                    push(&mut job, "\u{A0}", space);
+                    chars += 2;
+                    if let Some(link) = &run.link {
+                        links.push((start_chars..chars, link.clone()));
+                    }
+                    continue;
+                }
+                // Its source, until it's here or if it can't be.
+                if matches!(drawn, Drawn::Failed(_)) {
+                    format.color = self.theme.callout_color("caution");
+                }
+            }
             let mut plain_start = 0;
             for (offset, _) in text.match_indices(IMAGE_CHAR) {
                 let before = &text[plain_start..offset];
@@ -1485,7 +1720,7 @@ impl Builder<'_> {
                 plain_start = offset + IMAGE_CHAR.len_utf8();
                 let absolute = run.range.start + offset;
                 let image = images.next_if(|(_, image)| image.at == absolute);
-                let Some((index, image)) = image else {
+                let Some((_, image)) = image else {
                     continue;
                 };
                 match self.images.size(&image.url) {
@@ -1498,7 +1733,17 @@ impl Builder<'_> {
                         space.font_id = FontId::new(1.0, self.fonts.regular.clone());
                         space.background = Color32::TRANSPARENT;
                         space.line_height = Some(size.y.max(self.theme.line_height(style.size)));
-                        placed.push((chars, index, size));
+                        placed.push(Placing {
+                            char: chars,
+                            url: image.url.clone(),
+                            tip: if image.title.is_empty() {
+                                image.alt.clone()
+                            } else {
+                                image.title.clone()
+                            },
+                            size,
+                            lower: 0.0,
+                        });
                         push(&mut job, "\u{A0}", space.clone());
                         space.extra_letter_spacing = size.x;
                         push(&mut job, "\u{A0}", space);
@@ -1543,26 +1788,36 @@ impl Builder<'_> {
         let galley = self.cache.get(self.ctx, job);
         let placed = placed
             .into_iter()
-            .map(|(char, index, size)| {
+            .map(|placing| {
                 // An image starting a row belongs to that row, not the end of
                 // the one before.
-                let mut cursor = CCursor::new(char);
+                let mut cursor = CCursor::new(placing.char);
                 cursor.prefer_next_row = true;
                 let at = galley.pos_from_cursor(cursor);
-                let image = &inlines.images[index];
+                let bottom = at.max.y + placing.lower;
                 PlacedImage {
-                    rect: Rect::from_min_size(egui::pos2(at.min.x, at.max.y - size.y), size),
-                    url: image.url.clone(),
-                    tip: if image.title.is_empty() {
-                        image.alt.clone()
-                    } else {
-                        image.title.clone()
-                    },
+                    rect: Rect::from_min_size(
+                        egui::pos2(at.min.x, bottom - placing.size.y),
+                        placing.size,
+                    ),
+                    url: placing.url,
+                    tip: placing.tip,
                 }
             })
             .collect();
         (galley, links, placed)
     }
+}
+
+/// A picture in text, once its room is made and before the text is laid out.
+struct Placing {
+    /// In the galley.
+    char: usize,
+    url: String,
+    tip: String,
+    size: Vec2,
+    /// How far below the bottom of its row its bottom goes.
+    lower: f32,
 }
 
 fn push(job: &mut LayoutJob, text: &str, format: TextFormat) {
@@ -1656,6 +1911,7 @@ fn offset(item: &mut Item, by: Vec2) {
         | Item::Stroke { rect, .. }
         | Item::Square { rect, .. }
         | Item::Editor { rect }
+        | Item::Picture { rect, .. }
         | Item::Widget { rect, .. } => *rect = rect.translate(by),
         Item::Line { from, to, .. } => {
             *from += by;
@@ -1663,7 +1919,7 @@ fn offset(item: &mut Item, by: Vec2) {
         }
         Item::Dot { center, .. } => *center += by,
         Item::Sideways { rect, .. } => *rect = rect.translate(by),
-        Item::CopyCode { rect, block, .. } => {
+        Item::CopyCode { rect, block, .. } | Item::Enlarge { rect, block, .. } => {
             *rect = rect.translate(by);
             *block = block.translate(by);
         }
@@ -1696,6 +1952,8 @@ mod tests {
             fonts: Fonts::of(ctx),
             pixels_per_point: 1.0,
             font_generation: 0,
+            text_options: ctx.fonts(|fonts| *fonts.options()),
+            atlas_generation: 0,
             image_generation: 0,
             code_generation: 0,
             fold_generation: 0,
@@ -1722,12 +1980,48 @@ mod tests {
                         cache: &mut cache,
                         code_spans: &CodeSpans::new(),
                         toggled: &HashSet::new(),
+                        previous_drawings: &[],
                     },
                 ));
             }
         });
         output.textures_delta.clear();
         result.expect("ran a frame")
+    }
+
+    /// Every drawing here, as this big, reaching this far below the baseline.
+    struct Drawings {
+        size: Vec2,
+        depth: f32,
+    }
+    impl ImageSizes for Drawings {
+        fn size(&mut self, _url: &str) -> Option<Vec2> {
+            Some(self.size)
+        }
+        fn depth(&self, _key: &str) -> f32 {
+            self.depth
+        }
+    }
+
+    struct Failing;
+    impl ImageSizes for Failing {
+        fn size(&mut self, _url: &str) -> Option<Vec2> {
+            None
+        }
+        fn error(&self, _key: &str) -> Option<String> {
+            Some("Bad formula".to_owned())
+        }
+    }
+
+    fn pictures(layout: &Layout) -> Vec<Rect> {
+        layout
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Picture { rect, .. } => Some(*rect),
+                _ => None,
+            })
+            .collect()
     }
 
     fn texts(layout: &Layout) -> Vec<&TextItem> {
@@ -1895,6 +2189,7 @@ mod tests {
                     cache: &mut cache,
                     code_spans: &CodeSpans::new(),
                     toggled: &HashSet::new(),
+                    previous_drawings: &[],
                 },
             ));
         });
@@ -2071,6 +2366,7 @@ mod tests {
                         cache: &mut cache,
                         code_spans: &CodeSpans::new(),
                         toggled: &toggled,
+                        previous_drawings: &[],
                     },
                 );
                 heights.push(layout.height);
@@ -2096,5 +2392,112 @@ mod tests {
         let source = "---\ntitle: x\n---\n\n# H\n\n> quote\n\n> [!tip] T\n> body\n\n1. a\n2. [ ] b\n\nTerm\n: def\n\n| a |\n|---|\n| b |\n\n---\n\n<div>\n\n$$x$$\n\n`c` ==d== #e :rocket: [[f]] ~~g~~ H~2~ x^2^[^n]\n\n[^n]: note\n";
         let layout = run(source, 500.0, &mut NoImages);
         assert!(texts(&layout).len() >= 10);
+    }
+
+    #[test]
+    fn inline_math_sits_on_the_baseline_of_its_line() {
+        let size = egui::vec2(30.0, 30.0);
+        let shallow = Drawings { size, depth: 0.0 };
+        let (mut shallow, mut deep) = (shallow, Drawings { size, depth: 10.0 });
+        let flat = run("a $x$ b", 400.0, &mut shallow);
+        let low = run("a $x$ b", 400.0, &mut deep);
+        // How far its baseline is from the bottom of the row: that of the text.
+        let above_bottom = |layout: &Layout, depth: f32| {
+            let text = texts(layout)[0];
+            text.galley.size().y - (text.images[0].rect.max.y - depth)
+        };
+        assert_eq!(above_bottom(&flat, 0.0), above_bottom(&low, 10.0));
+        assert!(above_bottom(&flat, 0.0) > 0.0);
+        let image = &texts(&flat)[0].images[0];
+        assert_eq!(image.rect.size(), size);
+        assert!(image.url.starts_with('\0'), "not asked for as a file");
+    }
+
+    #[test]
+    fn a_formula_reaching_below_its_row_makes_room_in_the_block() {
+        let mut images = Drawings {
+            size: egui::vec2(30.0, 40.0),
+            depth: 30.0,
+        };
+        let layout = run("$x$", 400.0, &mut images);
+        let text = texts(&layout)[0];
+        assert!(text.images[0].rect.max.y > text.galley.size().y);
+        assert!(layout.height >= text.images[0].rect.max.y);
+    }
+
+    #[test]
+    fn display_math_is_centered_or_scrolls_when_too_wide() {
+        let mut images = Pictures(egui::vec2(100.0, 40.0));
+        let layout = run("$$\nx\n$$\n", 400.0, &mut images);
+        let rects = pictures(&layout);
+        assert_eq!(rects.len(), 1);
+        assert_eq!(rects[0].center().x, 200.0);
+        assert_eq!(layout.height, 40.0);
+
+        let mut images = Pictures(egui::vec2(900.0, 40.0));
+        let layout = run("$$\nx\n$$\n", 400.0, &mut images);
+        assert!(layout.items.iter().any(|item| matches!(
+            item,
+            Item::Sideways { content_width, .. } if *content_width == 900.0
+        )));
+    }
+
+    #[test]
+    fn a_diagram_is_a_picture_scaled_to_fit_that_can_be_enlarged() {
+        let mut images = Pictures(egui::vec2(2000.0, 1000.0));
+        let layout = run(
+            "```mermaid\nflowchart LR\n A --> B\n```\n",
+            400.0,
+            &mut images,
+        );
+        let rects = pictures(&layout);
+        assert_eq!(rects.len(), 1);
+        assert!(rects[0].width() <= 400.0);
+        assert!((rects[0].width() / rects[0].height() - 2.0).abs() < 0.01);
+        assert!(
+            layout
+                .items
+                .iter()
+                .any(|item| matches!(item, Item::Enlarge { .. }))
+        );
+        assert!(
+            layout
+                .items
+                .iter()
+                .any(|item| matches!(item, Item::CopyCode { .. }))
+        );
+    }
+
+    #[test]
+    fn what_is_not_drawn_yet_shows_its_source() {
+        let layout = run(
+            "$$\nx^2\n$$\n\n```mermaid\npie\n```\n",
+            400.0,
+            &mut NoImages,
+        );
+        let shown: Vec<&str> = texts(&layout).iter().map(|t| t.galley.text()).collect();
+        assert_eq!(shown, ["x^2", "pie"]);
+        assert!(pictures(&layout).is_empty());
+    }
+
+    #[test]
+    fn what_cannot_be_drawn_shows_its_source_and_why() {
+        let layout = run("$$\n\\bad\n$$\n", 400.0, &mut Failing);
+        assert_eq!(texts(&layout)[0].galley.text(), "\\bad");
+        assert!(layout.items.iter().any(|item| matches!(
+            item,
+            Item::Marker { galley, .. } if galley.text() == "Bad formula"
+        )));
+    }
+
+    #[test]
+    fn layout_lists_its_drawings_in_order() {
+        let source = "$a$ and $b$\n\n$$\nc\n$$\n\n```mermaid\npie\n```\n";
+        let layout = run(source, 400.0, &mut NoImages);
+        assert_eq!(layout.drawings.len(), 4);
+        assert!(layout.drawings[0].ends_with('a'));
+        assert!(layout.drawings[1].ends_with('b'));
+        assert!(layout.drawings[2].ends_with('c'));
+        assert!(drawing::is_diagram(&layout.drawings[3]));
     }
 }

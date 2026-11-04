@@ -5,10 +5,13 @@
 
 pub mod assets;
 pub mod block_edit;
+pub mod diagram;
+pub mod drawing;
 pub mod format;
 pub mod images;
 pub mod layout;
 pub mod links;
+pub mod math;
 pub mod parse;
 pub mod table;
 pub mod view;
