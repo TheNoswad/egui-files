@@ -273,12 +273,12 @@ fn entry_menu(
         &keys(C::Rename),
         Action::StartRename,
     );
-    item(
-        ui,
-        format!("{} Move to trash", icon::TRASH),
-        &keys(C::Trash),
-        Action::Trash,
-    );
+    let label = if crate::remote::is_remote(&entry.path) {
+        format!("{} Delete permanently…", icon::TRASH)
+    } else {
+        format!("{} Move to trash", icon::TRASH)
+    };
+    item(ui, label, &keys(C::Trash), Action::Trash);
     ui.separator();
     item(
         ui,

@@ -32,6 +32,7 @@ use crate::{
     fs::{display_name, human_size},
     open_with,
     places::{self, Space},
+    remote::{self, Listing},
     tab::{AppAction, Shared},
 };
 
@@ -153,6 +154,9 @@ pub struct View {
     pub open_full: bool,
     items: Vec<Item>,
     loaded: Option<Instant>,
+    /// A server's items wait for their folder to be listed (see
+    /// `remote::listing`), connecting first if need be.
+    waiting: bool,
     /// The items when editing started, to tell what changed on disk since.
     base: Option<Vec<Item>>,
     edits: Edits,
@@ -187,6 +191,7 @@ impl View {
             open_full: false,
             items: Vec::new(),
             loaded: None,
+            waiting: false,
             base: None,
             edits: Edits::default(),
             drafts: Drafts::default(),
@@ -219,6 +224,35 @@ impl View {
         self.applying.is_some() || self.elevated.is_some()
     }
 
+    /// Whether the servers' items can be read without waiting: their
+    /// folders are listed, which is started if not (it repaints once done).
+    /// A home folder (`~`) becomes where it is once that's known.
+    fn servers_ready(&mut self) -> bool {
+        let Source::Files(paths) = &mut self.source else {
+            return true;
+        };
+        let mut ready = true;
+        for path in paths.iter_mut().filter(|p| remote::is_remote(p)) {
+            let home = path.file_name().is_some_and(|n| n == "~");
+            let dir = match remote::parent(path) {
+                Some(parent) if !home => parent.to_path_buf(),
+                _ => path.clone(),
+            };
+            match remote::listing(&dir) {
+                Listing::Loading => ready = false,
+                Listing::Moved(to) if home => *path = to,
+                Listing::Moved(to) => {
+                    let name = path.file_name().map(ToOwned::to_owned).unwrap_or_default();
+                    *path = to.join(name);
+                }
+                // A failure shows when the item can't be read.
+                Listing::Ready | Listing::Failed(_) => {}
+            }
+        }
+        self.waiting = !ready;
+        ready
+    }
+
     fn editable(&self) -> bool {
         !self.busy() && !self.items.is_empty() && self.items.iter().all(|i| i.exists)
     }
@@ -226,7 +260,7 @@ impl View {
     /// Looks at the files again, and starts what's read in the background.
     fn refresh(&mut self, ctx: &egui::Context) {
         let due = self.loaded.is_none_or(|t| t.elapsed() >= REFRESH);
-        if !due || self.busy() {
+        if !due || self.busy() || !self.servers_ready() {
             return;
         }
         self.loaded = Some(Instant::now());
@@ -440,7 +474,17 @@ impl View {
         if self.edits.name.is_some() && self.changed_on_disk(|i| i.name.clone()) {
             changed_marker(ui);
         }
-        if self.items.iter().any(|i| !i.exists) && matches!(self.source, Source::Files(_)) {
+        if self.waiting {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.weak("Loading…");
+            });
+        } else if let Some(error) = self.items.iter().find_map(|i| i.error.as_ref()) {
+            ui.colored_label(
+                ui.visuals().warn_fg_color,
+                format!("{} Couldn't read it: {error}", icon::WARNING),
+            );
+        } else if self.items.iter().any(|i| !i.exists) && matches!(self.source, Source::Files(_)) {
             let missing = self.items.iter().filter(|i| !i.exists).count();
             let text = if self.items.len() == 1 {
                 "This item no longer exists".to_owned()

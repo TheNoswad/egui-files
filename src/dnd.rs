@@ -279,7 +279,8 @@ fn accepts(payload: &FileDrag, target: &DropTarget, modifiers: Modifiers) -> boo
         return true;
     }
     match target {
-        DropTarget::Trash => true,
+        // Servers' files can't go in this computer's trash.
+        DropTarget::Trash => !paths.iter().any(|p| crate::remote::is_remote(p)),
         DropTarget::Folder(dest) => {
             // Not into itself or a subfolder of itself.
             let into_itself = paths.iter().any(|p| dest.starts_with(p));

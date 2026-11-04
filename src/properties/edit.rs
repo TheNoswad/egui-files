@@ -213,7 +213,6 @@ fn mode_of(_meta: &disk::Metadata) -> u32 {
 
 #[cfg(windows)]
 fn attributes_of(meta: &disk::Metadata) -> u32 {
-    use std::os::windows::fs::MetadataExt;
     meta.file_attributes()
 }
 

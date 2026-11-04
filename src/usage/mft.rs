@@ -557,7 +557,7 @@ pub fn read_entries(input: &mut impl Read) -> io::Result<Vec<Entry>> {
 
 #[cfg(windows)]
 mod platform {
-    use disk::File;
+    use std::fs::File;
     use std::{io, os::windows::fs::FileExt};
 
     use super::{Entry, Parser, geometry, mft_extents};
@@ -576,7 +576,7 @@ mod platform {
         use std::os::windows::fs::OpenOptionsExt;
         // FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE: the
         // volume stays in use while it's read.
-        disk::OpenOptions::new()
+        std::fs::OpenOptions::new()
             .read(true)
             .share_mode(7)
             .open(format!(r"\\.\{letter}:"))

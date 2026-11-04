@@ -451,6 +451,7 @@ impl FilesApp {
             None,
             &[],
         ));
+        crate::remote::init(&cc.egui_ctx);
 
         #[cfg(not(target_arch = "wasm32"))]
         let persisted: Option<Persisted> = cc
@@ -1580,6 +1581,13 @@ impl FilesApp {
                         .clicked()
                     {
                         self.open_trash();
+                    }
+                    if ui
+                        .button(format!("{} Connect to server…", icon::HARD_DRIVES))
+                        .on_hover_text("Browse a computer's files over SFTP")
+                        .clicked()
+                    {
+                        crate::remote::open_connect_dialog(None);
                     }
                     if ui
                         .add(
@@ -2831,6 +2839,10 @@ impl FilesApp {
             .collect();
         self.relinker
             .ui(&ctx, &|path| unsaved.iter().any(|open| open == path));
+        crate::remote::prompts_ui(&ctx);
+        if let Some(path) = crate::remote::connect_dialog_ui(&ctx) {
+            self.go_to(path, false);
+        }
         if let Some((request, target)) = self.shared.open_with.ui(&ctx) {
             self.open_with(&ctx, request, target);
         }
@@ -2963,6 +2975,7 @@ impl FilesApp {
     #[cfg(not(target_arch = "wasm32"))]
     fn save_state(&mut self, storage: &mut dyn eframe::Storage) {
         self.terminal.remember_dirs();
+        self.sidebar.layout.servers = crate::remote::recent();
         let keymap = crate::keymap::get(&self.ctx);
         let state = PersistedRef {
             dock: &self.dock,
@@ -3007,7 +3020,22 @@ fn outgoing_drag(ctx: &egui::Context) -> Option<Vec<PathBuf>> {
         && !payload.link_only
         && ctx.input(|i| i.pointer.primary_down())
         && !ctx.content_rect().contains(pos);
-    outgoing.then(|| payload.paths.clone())
+    if !outgoing {
+        return None;
+    }
+    // Other apps can't reach a server's files: they get copies, fetched now.
+    #[cfg(not(target_arch = "wasm32"))]
+    if payload.paths.iter().any(|p| crate::remote::is_remote(p)) {
+        return match crate::remote::copies::fetch_now(&payload.paths) {
+            Ok(copies) => Some(copies),
+            Err(err) => {
+                egui::DragAndDrop::clear_payload(ctx);
+                crate::remote::notify(format!("Couldn't drag them out: {err}"));
+                None
+            }
+        };
+    }
+    Some(payload.paths.clone())
 }
 
 #[cfg(test)]

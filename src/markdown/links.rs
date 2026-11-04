@@ -107,6 +107,11 @@ fn decode(text: &str) -> String {
 
 /// Takes out `.` and `..`, without asking the disk.
 fn normalize(path: &Path) -> PathBuf {
+    // Components would take a server's `sftp://` for folders, losing a slash.
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(location) = disk::sftp::parse(path) {
+        return location.to_path();
+    }
     let mut out = PathBuf::new();
     for part in path.components() {
         match part {
@@ -281,6 +286,15 @@ pub fn is_program(path: &Path, meta: &disk::Metadata) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn links_in_a_servers_document_stay_on_the_server() {
+        let dir = Path::new("sftp://me@host:2222/notes/deep");
+        assert_eq!(
+            resolve(&link("../other.md"), dir),
+            Target::Document(PathBuf::from("sftp://me@host:2222/notes/other.md"), None)
+        );
+    }
 
     fn link(url: &str) -> Link {
         Link {

@@ -13,6 +13,9 @@ pub struct Item {
     pub path: PathBuf,
     pub name: String,
     pub exists: bool,
+    /// Why it couldn't be read, if not because it's gone (a server not
+    /// connected to, say).
+    pub error: Option<String>,
     pub is_dir: bool,
     pub is_symlink: bool,
     /// Where a symlink points, as written in the link.
@@ -50,8 +53,14 @@ impl Item {
             name,
             ..Item::default()
         };
-        let Ok(link_meta) = disk::symlink_metadata(path) else {
-            return item;
+        let link_meta = match disk::symlink_metadata(path) {
+            Ok(meta) => meta,
+            Err(err) => {
+                if err.kind() != std::io::ErrorKind::NotFound {
+                    item.error = Some(err.to_string());
+                }
+                return item;
+            }
         };
         item.exists = true;
         item.is_symlink = link_meta.file_type().is_symlink();

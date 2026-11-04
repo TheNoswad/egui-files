@@ -1018,6 +1018,7 @@ dependencies = [
  "open",
  "percent-encoding",
  "png",
+ "polling",
  "pulldown-cmark",
  "raw-window-handle",
  "resvg",

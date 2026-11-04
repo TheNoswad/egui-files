@@ -1,8 +1,10 @@
 //! The filesystem, as the app sees it.
 //!
-//! Everywhere but the browser it's `std::fs`, re-exported. The browser has
-//! no filesystem the app can reach (std's calls all fail there), so the web
-//! demo keeps one in memory with the same functions and types (`memory`).
+//! Everywhere but the browser it's `std::fs`, wrapped so that paths like
+//! `sftp://host/path` reach servers ([`sftp`]) through the same functions
+//! and types (`native`). The browser has no filesystem the app can reach
+//! (std's calls all fail there), so the web demo keeps one in memory with
+//! the same functions and types (`memory`).
 //! The app goes through here for every file; in the web build, clippy.toml
 //! makes reaching `std::fs` or `Path`'s filesystem methods directly a warning.
 //!
@@ -19,12 +21,16 @@
 use std::path::Path;
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use std::fs::{
+mod native;
+#[cfg(not(target_arch = "wasm32"))]
+pub use native::{
     DirEntry, File, FileType, Metadata, OpenOptions, Permissions, ReadDir, canonicalize, copy,
     create_dir, create_dir_all, exists, hard_link, metadata, read, read_dir, read_link,
-    read_to_string, remove_dir, remove_dir_all, remove_file, rename, set_permissions,
-    symlink_metadata, write,
+    read_to_string, remove_dir, remove_dir_all, remove_file, rename, set_file_mtime,
+    set_file_times, set_permissions, symlink, symlink_metadata, take_changes, write,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub mod sftp;
 
 #[cfg(any(test, target_arch = "wasm32"))]
 mod memory;
@@ -72,29 +78,6 @@ pub fn is_symlink(path: impl AsRef<Path>) -> bool {
 /// Whether there's something at `path`, following links (`Path::exists`).
 pub fn path_exists(path: impl AsRef<Path>) -> bool {
     metadata(path).is_ok()
-}
-
-/// Sets when `path` was last read and changed, following links.
-#[cfg(not(target_arch = "wasm32"))]
-pub fn set_file_times(
-    path: impl AsRef<Path>,
-    accessed: std::time::SystemTime,
-    modified: std::time::SystemTime,
-) -> std::io::Result<()> {
-    filetime::set_file_times(
-        path,
-        filetime::FileTime::from_system_time(accessed),
-        filetime::FileTime::from_system_time(modified),
-    )
-}
-
-/// Sets when `path` was last changed, following links.
-#[cfg(not(target_arch = "wasm32"))]
-pub fn set_file_mtime(
-    path: impl AsRef<Path>,
-    modified: std::time::SystemTime,
-) -> std::io::Result<()> {
-    filetime::set_file_mtime(path, filetime::FileTime::from_system_time(modified))
 }
 
 #[cfg(test)]

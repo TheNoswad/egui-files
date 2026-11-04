@@ -40,6 +40,7 @@ mod pane_sizes;
 mod places;
 mod preview;
 mod properties;
+mod remote;
 #[cfg(target_os = "android")]
 mod renderer;
 mod settings;
@@ -76,6 +77,10 @@ mod x11_dnd;
 /// Runs the desktop app.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn run() -> eframe::Result {
+    // Started by ssh to ask the running app for a password or the like.
+    if let Some(code) = disk::sftp::askpass_main() {
+        std::process::exit(code);
+    }
     // Started elevated to apply changes from the Properties window.
     if let Some(code) = properties::run_helper() {
         std::process::exit(code);

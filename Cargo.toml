@@ -144,6 +144,9 @@ log = "0.4"
 
 # Native Wayland drag and drop with other apps (winit doesn't implement it).
 [target.'cfg(target_os = "linux")'.dependencies]
+# The terminal's PTY, wrapped to read what the shell says of itself; the
+# version alacritty_terminal uses.
+polling = "3.8"
 smithay-client-toolkit = { version = "0.19", default-features = false }
 wayland-client = "0.31"
 wayland-backend = { version = "0.3", features = ["client_system"] }

@@ -658,6 +658,11 @@ impl File {
         OpenOptions::new()
     }
 
+    /// As natively: there's no server here, so never.
+    pub fn copy_on_server(&self, _to: &File, _offset: u64, _len: u64) -> io::Result<bool> {
+        Ok(false)
+    }
+
     pub fn metadata(&self) -> io::Result<Metadata> {
         Ok(tree().node(self.id).metadata())
     }

@@ -33,6 +33,9 @@ use crate::{
 };
 
 const BUFFER_SIZE: usize = 1 << 20;
+/// How much a server copies at a time within itself, between looks at
+/// whether the job was cancelled.
+const SERVER_COPY_PIECE: u64 = 64 << 20;
 
 /// Runs a job to the end on this thread. Nothing suspends outside the browser:
 /// questions wait on the thread instead, and pausing does nothing.
@@ -59,6 +62,10 @@ pub enum JobKind {
         dest: PathBuf,
     },
     Trash {
+        paths: Vec<PathBuf>,
+    },
+    /// Deletes for good: for servers, which have no trash.
+    Delete {
         paths: Vec<PathBuf>,
     },
     Restore {
@@ -101,6 +108,7 @@ impl JobKind {
                 format!("Moving {} to {}", items(sources.len()), display_name(dest))
             }
             Self::Trash { paths } => format!("Moving {} to trash", items(paths.len())),
+            Self::Delete { paths } => format!("Deleting {}", items(paths.len())),
             Self::Restore { items: trashed } => format!("Restoring {}", items(trashed.len())),
             Self::Purge { items: trashed } => {
                 format!("Permanently deleting {}", items(trashed.len()))
@@ -862,6 +870,20 @@ async fn run(kind: JobKind, p: &Progress) {
                 p.pause().await;
             }
         }
+        JobKind::Delete { paths } => {
+            p.total_items.store(paths.len() as u64, Relaxed);
+            for path in paths {
+                if p.cancelled() {
+                    return;
+                }
+                p.set_current(&path);
+                if let Err(err) = remove_all(&path) {
+                    p.error(&path, err);
+                }
+                p.done_items.fetch_add(1, Relaxed);
+                p.pause().await;
+            }
+        }
     }
 }
 
@@ -1099,8 +1121,7 @@ pub(crate) async fn copy_tree(src: &Path, dst: &Path, p: &Progress, buffer: &mut
 
     #[cfg(unix)]
     if meta.file_type().is_symlink() {
-        let result =
-            disk::read_link(src).and_then(|target| std::os::unix::fs::symlink(target, dst));
+        let result = disk::read_link(src).and_then(|target| disk::symlink(target, dst));
         p.done_items.fetch_add(1, Relaxed);
         return match result {
             Ok(()) => true,
@@ -1159,7 +1180,26 @@ async fn copy_file(
     let result = async {
         let mut from = disk::File::open(src)?;
         let mut to = disk::File::create_new(dst)?;
+        // Within one server, on the server, a piece at a time for progress.
+        let mut offset = 0;
+        let len = meta.len();
+        while offset < len {
+            if p.cancelled() {
+                return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+            }
+            let piece = (len - offset).min(SERVER_COPY_PIECE);
+            if !from.copy_on_server(&to, offset, piece)? {
+                break;
+            }
+            offset += piece;
+            p.done_bytes.fetch_add(piece, Relaxed);
+            p.pause().await;
+        }
         loop {
+            // Done on the server: there's nothing more to read.
+            if offset > 0 && offset >= len {
+                break;
+            }
             if p.cancelled() {
                 return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
             }
@@ -1303,6 +1343,88 @@ mod tests {
         assert!(errors(&jobs).iter().any(|e| e.contains("into itself")));
 
         disk::remove_dir_all(root).unwrap();
+    }
+
+    /// Against a server: see disk/src/sftp/tests.rs for
+    /// `EGUI_FILES_SFTP_TEST_CONFIG`. Without it, this does nothing.
+    #[test]
+    fn copy_and_move_to_and_from_a_server() {
+        let Some(config) = std::env::var_os("EGUI_FILES_SFTP_TEST_CONFIG") else {
+            return;
+        };
+        disk::sftp::set_extra_ssh_args([
+            std::ffi::OsString::from("-F"),
+            config,
+            "-o".into(),
+            "ControlPath=none".into(),
+        ]);
+        let server = PathBuf::from("sftp://sftp-test");
+        disk::sftp::connect(&server).unwrap();
+        let there = disk::sftp::home(&server)
+            .unwrap()
+            .join(format!("jobs-{}", std::process::id()));
+        let _ = disk::remove_dir_all(&there);
+        disk::create_dir_all(&there).unwrap();
+        let here = scratch("server");
+        disk::create_dir_all(here.join("tree/sub")).unwrap();
+        disk::write(here.join("tree/a.txt"), "a").unwrap();
+        disk::write(here.join("tree/sub/b.bin"), vec![7u8; 3 * BUFFER_SIZE + 5]).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("a.txt", here.join("tree/link")).unwrap();
+
+        let mut jobs = Jobs::new(&egui::Context::default());
+        // Up, then across to another folder there, then back down.
+        jobs.start(JobKind::Copy {
+            sources: vec![here.join("tree")],
+            dest: there.clone(),
+        });
+        wait(&mut jobs);
+        assert_eq!(errors(&jobs), Vec::<String>::new());
+        assert_eq!(read(there.join("tree/a.txt")), "a");
+        #[cfg(unix)]
+        assert_eq!(
+            disk::read_link(there.join("tree/link")).unwrap(),
+            Path::new("a.txt")
+        );
+        // Within the server, done there.
+        disk::create_dir(there.join("copied")).unwrap();
+        jobs.start(JobKind::Copy {
+            sources: vec![there.join("tree")],
+            dest: there.join("copied"),
+        });
+        wait(&mut jobs);
+        assert_eq!(errors(&jobs), Vec::<String>::new());
+        assert_eq!(
+            disk::read(there.join("copied/tree/sub/b.bin")).unwrap(),
+            vec![7u8; 3 * BUFFER_SIZE + 5]
+        );
+        disk::create_dir(there.join("moved")).unwrap();
+        jobs.start(JobKind::Move {
+            sources: vec![there.join("tree")],
+            dest: there.join("moved"),
+        });
+        wait(&mut jobs);
+        assert!(!disk::exists(there.join("tree")).unwrap());
+        let down = here.join("down");
+        disk::create_dir(&down).unwrap();
+        jobs.start(JobKind::Move {
+            sources: vec![there.join("moved/tree")],
+            dest: down.clone(),
+        });
+        wait(&mut jobs);
+        assert_eq!(errors(&jobs), Vec::<String>::new());
+        assert_eq!(
+            disk::read(down.join("tree/sub/b.bin")).unwrap(),
+            vec![7u8; 3 * BUFFER_SIZE + 5]
+        );
+        assert!(!disk::exists(there.join("moved/tree")).unwrap());
+
+        jobs.start(JobKind::Delete {
+            paths: vec![there.clone()],
+        });
+        wait(&mut jobs);
+        assert!(!disk::exists(&there).unwrap());
+        disk::remove_dir_all(here).unwrap();
     }
 
     #[test]

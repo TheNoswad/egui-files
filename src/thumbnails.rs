@@ -68,7 +68,14 @@ fn mtime_secs(modified: SystemTime) -> Option<u64> {
 }
 
 /// The file URIs other apps may have hashed for `path`, preferred first.
+/// A server's file has the URI GIO gives it (`sftp://host/path`), so
+/// thumbnails are shared with apps going through GVfs.
 fn uris(path: &Path) -> Vec<String> {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(location) = disk::sftp::parse(path) {
+        let path = percent_encoding::percent_encode(location.path.as_bytes(), URI_PATH);
+        return vec![format!("sftp://{}{path}", location.authority)];
+    }
     #[cfg(unix)]
     let bytes = std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str());
     #[cfg(not(unix))]
@@ -90,7 +97,8 @@ fn cache_name(uri: &str) -> String {
 /// Looks up a valid cached thumbnail of at least `max_side`, downscaled to fit.
 pub fn from_cache(path: &Path, modified: Option<SystemTime>, max_side: u32) -> Option<Thumbnail> {
     let dir = cache_dir()?;
-    if !path.is_absolute() || path.starts_with(&dir) {
+    let remote = crate::remote::is_remote(path);
+    if (!path.is_absolute() && !remote) || path.starts_with(&dir) {
         return None;
     }
     let mtime = mtime_secs(modified?)?;
@@ -202,6 +210,24 @@ fn run_thumbnailer(path: &Path, max_side: u32) -> Result<Vec<u8>, String> {
         }
     }
     Err("install ffmpegthumbnailer or ffmpeg for video thumbnails".into())
+}
+
+/// Keeps a thumbnail of a server's picture, decoded in full, so it needn't
+/// be fetched again to be shown small. Local pictures are quick to read.
+pub fn keep_remote(path: &Path, modified: Option<SystemTime>, image: &image::DynamicImage) {
+    if !crate::remote::is_remote(path) {
+        return;
+    }
+    let Some(mtime) = modified.and_then(mtime_secs) else {
+        return;
+    };
+    // The biggest the spec has room for that it's no bigger than.
+    let longest = image.width().max(image.height());
+    let Some(&(_, side)) = SIZES.iter().rev().find(|(_, side)| *side <= longest) else {
+        return;
+    };
+    let small = image.thumbnail(side, side).to_rgba8();
+    let _ = save_to_cache(path, mtime, &small);
 }
 
 fn save_to_cache(path: &Path, mtime: u64, image: &RgbaImage) -> Option<()> {

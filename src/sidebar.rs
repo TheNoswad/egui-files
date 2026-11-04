@@ -36,10 +36,18 @@ pub enum Section {
     Trash,
     Bookmarks,
     Drives,
+    /// Computers to connect to over SFTP.
+    Servers,
 }
 
 impl Section {
-    pub const ALL: [Self; 4] = [Self::Places, Self::Trash, Self::Bookmarks, Self::Drives];
+    pub const ALL: [Self; 5] = [
+        Self::Places,
+        Self::Trash,
+        Self::Bookmarks,
+        Self::Drives,
+        Self::Servers,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -47,12 +55,13 @@ impl Section {
             Self::Trash => "Trash",
             Self::Bookmarks => "Bookmarks",
             Self::Drives => "Drives",
+            Self::Servers => "Servers",
         }
     }
 
-    /// Bookmarks and drives have a heading over them.
+    /// Bookmarks, drives and servers have a heading over them.
     fn headed(self) -> bool {
-        matches!(self, Self::Bookmarks | Self::Drives)
+        matches!(self, Self::Bookmarks | Self::Drives | Self::Servers)
     }
 }
 
@@ -66,6 +75,9 @@ pub struct Layout {
     pub hidden_places: Vec<String>,
     /// A bar under each drive showing how full it is.
     pub space_bars: bool,
+    /// Servers connected to lately, as `user@host:port`, latest first (see
+    /// `remote::recent`).
+    pub servers: Vec<String>,
 }
 
 impl Default for Layout {
@@ -74,6 +86,7 @@ impl Default for Layout {
             sections: Section::ALL.iter().map(|&s| (s, true)).collect(),
             hidden_places: Vec::new(),
             space_bars: true,
+            servers: Vec::new(),
         }
     }
 }
@@ -132,6 +145,7 @@ impl Sidebar {
         mut layout: Layout,
     ) -> Self {
         layout.normalize();
+        crate::remote::set_recent(layout.servers.clone());
         Self {
             bookmarks,
             tree,
@@ -340,6 +354,10 @@ impl Sidebar {
                                     }
                                 }
                             }
+                            Section::Servers => {
+                                ui.label(RichText::new("Servers").small().weak());
+                                servers_ui(ui, &mut place_button);
+                            }
                         }
                     }
                     response.eject = eject;
@@ -355,6 +373,102 @@ impl Sidebar {
         if let Some(job) = dropped.or(trash_dropped) {
             jobs.start(job);
         }
+    }
+}
+
+/// The servers to connect to: those in the ssh config, then others used
+/// lately or now, each with how its connection is.
+/// Draws a place's row: glyph, label, where it goes, and more for its menu.
+type PlaceButton<'a> =
+    dyn FnMut(&mut Ui, &str, &str, &PathBuf, &mut dyn FnMut(&mut Ui)) -> egui::Response + 'a;
+
+fn servers_ui(ui: &mut Ui, place_button: &mut PlaceButton<'_>) {
+    use crate::remote::{self, Status};
+    if let Err(why) = remote::available() {
+        ui.label(RichText::new(why).small().weak());
+        return;
+    }
+    let hosts = remote::hosts::hosts();
+    let recent = remote::recent();
+    let connections = remote::connections();
+    let mut names: Vec<String> = hosts.config.iter().map(|h| h.alias.clone()).collect();
+    for name in recent
+        .iter()
+        .chain(connections.iter().map(|(name, _)| name))
+    {
+        if !names.contains(name) {
+            names.push(name.clone());
+        }
+    }
+    for name in names {
+        let status = connections
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map_or(Status::Disconnected, |(_, s)| s.clone());
+        let home = remote::home_of(&name);
+        let in_config = hosts.config.iter().any(|h| h.alias == name);
+        let mut forget = false;
+        let mut disconnect = false;
+        let mut menu = |ui: &mut Ui| {
+            if status == Status::Connected
+                && ui.button(format!("{}  Disconnect", icon::PLUGS)).clicked()
+            {
+                disconnect = true;
+                ui.close();
+            }
+            if !in_config
+                && recent.contains(&name)
+                && ui.button(format!("{}  Forget", icon::X)).clicked()
+            {
+                forget = true;
+                ui.close();
+            }
+        };
+        let row = place_button(ui, icon::HARD_DRIVES, &name, &home, &mut menu);
+        let detail = hosts
+            .config
+            .iter()
+            .find(|h| h.alias == name)
+            .and_then(|h| h.detail.clone());
+        let row = match &detail {
+            Some(detail) => row.on_hover_text(detail.clone()),
+            None => row,
+        };
+        // How it's connected, at the right of its row.
+        let size = row.rect.height();
+        let rect = egui::Rect::from_min_size(
+            egui::pos2(row.rect.right() - size, row.rect.top()),
+            egui::vec2(size, size),
+        );
+        match &status {
+            Status::Connecting => {
+                ui.put(rect, egui::Spinner::new().size(size * 0.6));
+            }
+            Status::Connected => {
+                let button = ui
+                    .put(rect, Button::new(icon::EJECT_SIMPLE).frame(false))
+                    .on_hover_text("Connected. Click to disconnect.");
+                disconnect |= button.clicked();
+            }
+            Status::Failed(why) => {
+                let warning = RichText::new(icon::WARNING).color(ui.visuals().warn_fg_color);
+                ui.put(rect, egui::Label::new(warning))
+                    .on_hover_text(format!("Couldn't connect: {why}"));
+            }
+            Status::Disconnected => {}
+        }
+        if disconnect {
+            remote::disconnect(&name);
+        }
+        if forget {
+            remote::forget_recent(&name);
+        }
+    }
+    if ui
+        .button(format!("{}  Connect to server…", icon::PLUS))
+        .clicked()
+    {
+        remote::open_connect_dialog(None);
     }
 }
 
@@ -400,12 +514,18 @@ mod tests {
                 (Section::Places, true),
                 (Section::Trash, true),
                 (Section::Bookmarks, true),
+                (Section::Servers, true),
             ]
         );
         assert!(layout.space_bars);
         assert_eq!(
             layout.shown().collect::<Vec<_>>(),
-            [Section::Places, Section::Trash, Section::Bookmarks]
+            [
+                Section::Places,
+                Section::Trash,
+                Section::Bookmarks,
+                Section::Servers
+            ]
         );
 
         layout.set_place_shown("Music", false);

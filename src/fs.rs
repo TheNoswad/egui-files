@@ -171,7 +171,6 @@ pub fn read_dir(dir: &Path) -> io::Result<Vec<Entry>> {
 
 #[cfg(windows)]
 fn is_hidden(_name: &str, meta: Option<&disk::Metadata>) -> bool {
-    use std::os::windows::fs::MetadataExt;
     const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
     meta.is_some_and(|m| m.file_attributes() & FILE_ATTRIBUTE_HIDDEN != 0)
 }
@@ -295,6 +294,12 @@ pub fn display_name(path: &Path) -> String {
 // Operations
 
 pub fn open(path: &Path) -> io::Result<()> {
+    // Other apps can't read a server's files there: a copy opens instead.
+    #[cfg(not(target_arch = "wasm32"))]
+    if crate::remote::is_remote(path) {
+        crate::remote::copies::open(path);
+        return Ok(());
+    }
     #[cfg(target_os = "android")]
     return crate::android::open(path, false);
     #[cfg(target_arch = "wasm32")]
