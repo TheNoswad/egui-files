@@ -344,7 +344,7 @@ fn bar(
                         icon::ARROW_UP,
                         "Up",
                         Command::Up,
-                        browser.is_some_and(|p| p.parent().is_some()),
+                        browser.is_some_and(|p| crate::remote::parent(p).is_some()),
                         tab::Action::Up,
                     ),
                 ];

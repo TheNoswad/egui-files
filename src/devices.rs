@@ -10,7 +10,10 @@ use std::{
 
 use egui::Context;
 
-use crate::places::{self, Place};
+use crate::{
+    phones::Phones,
+    places::{self, Place},
+};
 
 /// Also how soon file watches let go of a memory card that was pulled out,
 /// which Windows needs before it can mount the next one.
@@ -18,10 +21,12 @@ const POLL: Duration = Duration::from_secs(1);
 
 pub struct Drives {
     list: Arc<Mutex<Vec<Place>>>,
+    pub phones: Phones,
 }
 
 impl Drives {
     pub fn new(ctx: &Context) -> Self {
+        let phones = Phones::new(ctx);
         let list = Arc::new(Mutex::new(places::drives()));
         let shared = list.clone();
         let ctx = ctx.clone();
@@ -38,11 +43,13 @@ impl Drives {
                     }
                 }
             });
-        Self { list }
+        Self { list, phones }
     }
 
     pub fn get(&self) -> Vec<Place> {
-        self.list.lock().unwrap().clone()
+        let mut drives = self.list.lock().unwrap().clone();
+        drives.extend(self.phones.places());
+        drives
     }
 
     /// The drives to list, leaving out the ones without media if
@@ -58,6 +65,9 @@ impl Drives {
 /// encrypted, and powers it off (or ejects the disc).
 #[cfg(target_os = "linux")]
 pub fn eject(path: &Path) -> Result<(), String> {
+    if let Some(result) = crate::phones::eject(path) {
+        return result;
+    }
     zbus::block_on(udisks::eject(path)).map_err(|err| match err {
         zbus::Error::MethodError(_, Some(message), _) => message,
         err => err.to_string(),

@@ -38,6 +38,7 @@ mod list_columns;
 mod markdown;
 mod open_with;
 mod pane_sizes;
+mod phones;
 mod places;
 mod preview;
 mod properties;

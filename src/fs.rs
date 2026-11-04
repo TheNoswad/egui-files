@@ -290,6 +290,13 @@ pub fn display_name(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
+/// What to call a folder being shown: as [`display_name`], but the top of a
+/// phone's storage goes by the phone (its real name is just `0`). Not for
+/// naming files: this may not be the folder's name.
+pub fn location_name(path: &Path) -> String {
+    crate::phones::name_of(path).unwrap_or_else(|| display_name(path))
+}
+
 // ---------------------------------------------------------------------------
 // Operations
 

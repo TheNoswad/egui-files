@@ -251,9 +251,10 @@ pub fn typed(path: PathBuf) -> PathBuf {
     }
 }
 
-/// `path` and the folders it's in, up to the top of its drive or server.
+/// `path` and the folders it's in, up to the top of its drive, server or
+/// phone's storage.
 pub fn ancestors(path: &Path) -> impl Iterator<Item = &Path> {
-    let top = root(path);
+    let top = root(path).or_else(|| crate::phones::root_of(path));
     let mut done = false;
     path.ancestors().take_while(move |ancestor| {
         if done {
@@ -266,7 +267,7 @@ pub fn ancestors(path: &Path) -> impl Iterator<Item = &Path> {
     })
 }
 
-/// The folder `path` is in, short of going above a server's top.
+/// The folder `path` is in, short of going above a server's or phone's top.
 pub fn parent(path: &Path) -> Option<&Path> {
     ancestors(path).nth(1)
 }

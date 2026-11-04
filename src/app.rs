@@ -811,6 +811,23 @@ impl FilesApp {
     /// without media, whose folders mustn't be watched: the watch would keep
     /// the old card in use and the next one from mounting.
     fn follow_media(&mut self) -> Vec<PathBuf> {
+        // A phone that went away: tabs leave without looking, as what's left
+        // of its mount may not answer.
+        let lost = self.sidebar.drives.phones.take_lost();
+        if !lost.is_empty() {
+            let home = places::home_dir();
+            for tab in self.all_tabs_mut() {
+                if let Some(browser) = tab.browser_mut()
+                    && lost.iter().any(|root| browser.path.starts_with(root))
+                {
+                    browser.navigate(home.clone());
+                }
+            }
+            for root in &lost {
+                self.watcher.forget(root);
+            }
+            self.sidebar.tree.invalidate();
+        }
         let drives = self.sidebar.drives.get();
         let mut changed = false;
         for drive in &drives {

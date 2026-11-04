@@ -10,6 +10,7 @@ use crate::{
     devices::Drives,
     dnd::{self, DropTarget},
     jobs::Jobs,
+    phones::{Phones, Status, Unmounted},
     places::{self, Place},
     trash::TrashCount,
     tree::{FolderTree, TreeAction},
@@ -353,6 +354,7 @@ impl Sidebar {
                                         }
                                     }
                                 }
+                                phones_ui(ui, &self.drives.phones);
                             }
                             Section::Servers => {
                                 ui.label(RichText::new("Servers").small().weak());
@@ -372,6 +374,52 @@ impl Sidebar {
         }
         if let Some(job) = dropped.or(trash_dropped) {
             jobs.start(job);
+        }
+        if response.target.is_none() {
+            response.target = self.drives.phones.take_open();
+        }
+    }
+}
+
+/// Phones that can be connected to; once they are, they're listed as drives.
+fn phones_ui(ui: &mut Ui, phones: &Phones) {
+    for Unmounted { id, name, status } in phones.unmounted() {
+        let row = ui
+            .add(Button::selectable(
+                false,
+                format!("{}  {name}", icon::DEVICE_MOBILE),
+            ))
+            .interact(crate::touch::item_sense(ui.ctx()))
+            .on_hover_text("Connect through KDE Connect");
+        if row.clicked() {
+            phones.mount(&id, false);
+        } else if row.middle_clicked() {
+            phones.mount(&id, true);
+        }
+        row.context_menu(|ui| {
+            if ui
+                .button(format!("{}  Open in new tab", icon::PLUS))
+                .clicked()
+            {
+                phones.mount(&id, true);
+                ui.close();
+            }
+        });
+        let size = row.rect.height();
+        let rect = egui::Rect::from_min_size(
+            egui::pos2(row.rect.right() - size, row.rect.top()),
+            egui::vec2(size, size),
+        );
+        match status {
+            Status::Idle => {}
+            Status::Mounting => {
+                ui.put(rect, egui::Spinner::new().size(size * 0.6));
+            }
+            Status::Failed(why) => {
+                let warning = RichText::new(icon::WARNING).color(ui.visuals().warn_fg_color);
+                ui.put(rect, egui::Label::new(warning))
+                    .on_hover_text(format!("Couldn't connect: {why}"));
+            }
         }
     }
 }

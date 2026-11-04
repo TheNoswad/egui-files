@@ -315,7 +315,7 @@ impl BrowserTab {
     }
 
     pub fn title(&self) -> String {
-        format!("{} {}", icon::FOLDER, fs::display_name(&self.path))
+        format!("{} {}", icon::FOLDER, fs::location_name(&self.path))
     }
 
     pub fn entries(&self) -> &[Entry] {
@@ -1276,7 +1276,7 @@ impl BrowserTab {
                             ui.weak(icon::CARET_RIGHT);
                         }
                         let last = i + 1 == crumbs.len();
-                        let label = RichText::new(fs::display_name(crumb));
+                        let label = RichText::new(fs::location_name(crumb));
                         let label = if last { label.strong() } else { label };
                         if ui.add(Button::new(label).frame(false)).clicked() && !last {
                             actions.push(Action::Navigate(crumb.to_path_buf()));
