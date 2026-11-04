@@ -631,6 +631,7 @@ fn subtitle(tab: &DockTab) -> Option<String> {
         DockTab::Trash(_) => Some("Trash".to_owned()),
         DockTab::Archive(_) => Some("Archive".to_owned()),
         DockTab::Usage(_) => Some("Disk usage".to_owned()),
+        DockTab::Clip(clip) => Some(clip.clip.display().to_string()),
         DockTab::Properties(_) => Some("Properties".to_owned()),
         DockTab::Settings(_) | DockTab::Pane(_) => None,
     }

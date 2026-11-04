@@ -77,6 +77,8 @@ pub enum JobKind {
     },
     Compress(CompressJob),
     Extract(ExtractJob),
+    /// Trims or converts a video.
+    Clip(Box<crate::clip::ClipJob>),
     Eject {
         drive: PathBuf,
         label: String,
@@ -119,6 +121,7 @@ impl JobKind {
                 display_name(&job.dest)
             ),
             Self::Extract(job) => job.title(),
+            Self::Clip(job) => job.title(),
             Self::Eject { label, .. } => format!("Ejecting {label}"),
         }
     }
@@ -142,6 +145,8 @@ pub struct Progress {
     outcome: Mutex<Option<Outcome>>,
     /// What's been moved so far, and where to.
     moved: Mutex<Vec<Moved>>,
+    /// The totals count milliseconds of video, not bytes.
+    in_time: AtomicBool,
 }
 
 /// Something only the user can decide, asked from a worker thread.
@@ -250,6 +255,17 @@ impl Progress {
     /// For progress measured as a position, e.g. in the archive being read.
     pub(crate) fn set_done_bytes(&self, bytes: u64) {
         self.done_bytes.store(bytes, Relaxed);
+    }
+
+    /// Progress through `seconds` of video, rather than bytes.
+    pub(crate) fn set_time_total(&self, seconds: f64) {
+        self.in_time.store(true, Relaxed);
+        self.total_bytes
+            .store((seconds.max(0.0) * 1000.0) as u64, Relaxed);
+    }
+
+    pub(crate) fn set_time_done(&self, seconds: f64) {
+        self.set_done_bytes((seconds.max(0.0) * 1000.0) as u64);
     }
 
     /// Starts counting from scratch, e.g. when retrying with a password.
@@ -370,6 +386,11 @@ impl Progress {
 
     pub(crate) fn set_current(&self, path: &Path) {
         *self.current.lock().expect("current poisoned") = path.display().to_string();
+    }
+
+    /// Says what's going on, when it isn't working on a file.
+    pub(crate) fn set_status(&self, status: &str) {
+        *self.current.lock().expect("current poisoned") = status.to_owned();
     }
 
     fn fraction(&self) -> f32 {
@@ -590,20 +611,26 @@ impl Jobs {
                     if !finished {
                         ui.add(ProgressBar::new(p.fraction()).desired_width(220.0));
                         let bytes = p.total_bytes.load(Relaxed);
-                        let detail = format!(
-                            "{} / {}{}",
-                            p.done_items.load(Relaxed),
-                            p.total_items.load(Relaxed),
-                            if bytes > 0 {
-                                format!(
-                                    " · {} / {}",
-                                    human_size(p.done_bytes.load(Relaxed)),
-                                    human_size(bytes)
-                                )
-                            } else {
-                                String::new()
-                            }
-                        );
+                        let detail = if p.in_time.load(Relaxed) {
+                            let time =
+                                |millis: u64| crate::video::format_time(millis as f64 / 1000.0);
+                            format!("{} / {}", time(p.done_bytes.load(Relaxed)), time(bytes))
+                        } else {
+                            format!(
+                                "{} / {}{}",
+                                p.done_items.load(Relaxed),
+                                p.total_items.load(Relaxed),
+                                if bytes > 0 {
+                                    format!(
+                                        " · {} / {}",
+                                        human_size(p.done_bytes.load(Relaxed)),
+                                        human_size(bytes)
+                                    )
+                                } else {
+                                    String::new()
+                                }
+                            )
+                        };
                         ui.weak(detail);
                         let current = p.current.lock().expect("current poisoned").clone();
                         ui.add(egui::Label::new(RichText::new(current).weak().small()).truncate());
@@ -856,6 +883,7 @@ async fn run(kind: JobKind, p: &Progress) {
         JobKind::Import { items, dest } => crate::web_files::import(items, &dest, p).await,
         JobKind::Compress(job) => archive::compress(job, p).await,
         JobKind::Extract(job) => archive::extract(job, p).await,
+        JobKind::Clip(job) => crate::clip::export(*job, p),
         JobKind::Trash { paths } => {
             p.total_items.store(paths.len() as u64, Relaxed);
             for path in paths {

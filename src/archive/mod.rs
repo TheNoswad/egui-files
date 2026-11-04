@@ -18,7 +18,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-pub use dialogs::{CompressDialog, DialogResult, ExtractDialog, subfolder_label};
+pub use dialogs::{CompressDialog, DialogResult, ExtractDialog, FolderPicker, subfolder_label};
 pub use extract::extract;
 pub use listings::{ListState, Listings};
 pub use tab::{ArchiveTab, COLUMNS};

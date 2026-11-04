@@ -31,6 +31,8 @@ raw-window-handle = "0.6"
 png = "0.18"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico", "tiff"] }
 serde = { version = "1.0.229", features = ["derive"] }
+# What ffprobe says of a video.
+serde_json = "1"
 # Reading saved state before the window opens (eframe saves it as RON).
 ron = "0.12"
 # zstd is C, so only native builds have it (see the wasm32 section below).

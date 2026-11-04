@@ -95,6 +95,8 @@ pub enum AppAction {
     Reveal(PathBuf),
     /// Scan a folder in a disk usage tab.
     DiskUsage(PathBuf),
+    /// Open a video in its editor.
+    EditVideo(PathBuf),
     /// Show properties, where the user chose.
     Properties(crate::properties::Source),
     /// Move a tab into a window of its own.
@@ -126,6 +128,8 @@ pub enum Action {
     OpenInNewTab(PathBuf),
     /// Scan a folder in a disk usage tab.
     DiskUsage(PathBuf),
+    /// Open a video in its editor.
+    EditVideo(PathBuf),
     /// Show the properties of these items.
     Properties(Vec<PathBuf>),
     /// Of the selection, or of the folder if nothing is selected.
@@ -1577,6 +1581,7 @@ impl BrowserTab {
             }
             Action::OpenInNewTab(path) => shared.app_actions.push(AppAction::NewTab(path)),
             Action::DiskUsage(path) => shared.app_actions.push(AppAction::DiskUsage(path)),
+            Action::EditVideo(path) => shared.app_actions.push(AppAction::EditVideo(path)),
             Action::Properties(paths) => {
                 shared
                     .app_actions

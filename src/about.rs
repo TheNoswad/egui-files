@@ -618,7 +618,7 @@ fn about_page(ui: &mut Ui) {
             ("syntect", "https://github.com/trishume/syntect", "syntax highlighting, with bat's syntaxes and themes through two-face"),
             ("UnRAR", "https://www.rarlab.com", "RAR extraction, by Alexander Roshal, through the unrar crate"),
             ("mpv", "https://mpv.io", "video playback, loaded at runtime if installed (not bundled)"),
-            ("FFmpeg", "https://ffmpeg.org", "video decoding and thumbnails, used through mpv and ffmpegthumbnailer if installed (not bundled)"),
+            ("FFmpeg", "https://ffmpeg.org", "video decoding, thumbnails and the video editor's exports, used through mpv, ffmpegthumbnailer and ffmpeg if installed (not bundled)"),
         ];
         for (name, url, what) in links {
             ui.horizontal_wrapped(|ui| {

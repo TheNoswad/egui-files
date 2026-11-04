@@ -929,6 +929,17 @@ impl FilesApp {
         }
     }
 
+    /// Shows a video in its editor, in the tab already showing it if there is
+    /// one, else in a new tab in `window`.
+    fn open_clip(&mut self, window: Option<u64>, path: PathBuf) {
+        if let Some(id) = self.find_tab(|t| t.clip().is_some_and(|c| c.clip == path)) {
+            self.focus_tab(id);
+        } else {
+            let tab = DockTab::Clip(crate::clip::ClipTab::new(self.next_id(), path));
+            self.push_tab(window, tab);
+        }
+    }
+
     /// Shows the settings tab, opening it in `window` if it isn't open.
     fn open_settings(&mut self, window: Option<u64>) {
         if let Some(id) = self.find_tab(|t| t.settings().is_some()) {
@@ -1944,7 +1955,8 @@ impl TabViewer for Viewer<'_> {
             | DockTab::Editor(_)
             | DockTab::Usage(_)
             | DockTab::Properties(_)
-            | DockTab::Settings(_) => None,
+            | DockTab::Settings(_)
+            | DockTab::Clip(_) => None,
         };
         if let Some(job) = target.and_then(|target| dnd::target(response, target)) {
             self.shared.jobs.start(job);
@@ -2553,6 +2565,7 @@ impl FilesApp {
             AppAction::CopyFiles { paths, cut } => self.copy_files(ctx, &paths, cut),
             AppAction::Reveal(path) => self.reveal(window, path),
             AppAction::DiskUsage(path) => self.open_usage(window, path),
+            AppAction::EditVideo(path) => self.open_clip(window, path),
             AppAction::Properties(source) => self.open_properties(source),
             // The mobile layout has one window.
             AppAction::MoveToNewWindow(_) if self.mobile.enabled => {}

@@ -20,16 +20,16 @@ pub enum DialogResult {
 }
 
 /// A folder tree to pick a destination in, with an editable path.
-struct FolderPicker {
+pub struct FolderPicker {
     tree: FolderTree,
     roots: Vec<Place>,
-    current: PathBuf,
+    pub current: PathBuf,
     text: String,
     error: Option<String>,
 }
 
 impl FolderPicker {
-    fn new(current: PathBuf) -> Self {
+    pub fn new(current: PathBuf) -> Self {
         let mut roots: Vec<Place> = places::standard_places().into_iter().take(1).collect();
         roots.extend(places::drives());
         Self {
@@ -46,7 +46,7 @@ impl FolderPicker {
         self.current = path;
     }
 
-    fn ui(&mut self, ui: &mut Ui, show_hidden: bool) {
+    pub fn ui(&mut self, ui: &mut Ui, show_hidden: bool) {
         ui.horizontal(|ui| {
             // Room for the new folder button, in a dialog as narrow as a phone.
             let width = (ui.available_width() - 48.0).clamp(80.0, 340.0);

@@ -17,6 +17,7 @@ mod android;
 mod app;
 mod archive;
 mod background;
+mod clip;
 mod dates;
 #[cfg(target_arch = "wasm32")]
 mod demo;

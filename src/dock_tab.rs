@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     archive::ArchiveTab,
+    clip::ClipTab,
     editor::EditorTab,
     properties::PropertiesTab,
     settings::SettingsTab,
@@ -36,6 +37,8 @@ pub enum DockTab {
     Properties(PropertiesTab),
     /// Saved as `id`, `settings`.
     Settings(SettingsTab),
+    /// Saved as `id`, `clip`.
+    Clip(ClipTab),
 }
 
 /// A tool docked alongside the tabs. Each is open at most once.
@@ -90,6 +93,7 @@ impl DockTab {
             Self::Usage(tab) => tab.id,
             Self::Properties(tab) => tab.id,
             Self::Settings(tab) => tab.id,
+            Self::Clip(tab) => tab.id,
         }
     }
 
@@ -103,6 +107,7 @@ impl DockTab {
             Self::Usage(tab) => tab.title(),
             Self::Properties(tab) => tab.title(),
             Self::Settings(tab) => tab.title(),
+            Self::Clip(tab) => tab.title(),
         }
     }
 
@@ -115,7 +120,8 @@ impl DockTab {
             | Self::Editor(_)
             | Self::Usage(_)
             | Self::Properties(_)
-            | Self::Settings(_) => None,
+            | Self::Settings(_)
+            | Self::Clip(_) => None,
         }
     }
 
@@ -128,7 +134,8 @@ impl DockTab {
             | Self::Editor(_)
             | Self::Usage(_)
             | Self::Properties(_)
-            | Self::Settings(_) => None,
+            | Self::Settings(_)
+            | Self::Clip(_) => None,
         }
     }
 
@@ -141,7 +148,8 @@ impl DockTab {
             | Self::Editor(_)
             | Self::Usage(_)
             | Self::Properties(_)
-            | Self::Settings(_) => None,
+            | Self::Settings(_)
+            | Self::Clip(_) => None,
         }
     }
 
@@ -184,6 +192,13 @@ impl DockTab {
         }
     }
 
+    pub fn clip(&self) -> Option<&ClipTab> {
+        match self {
+            Self::Clip(tab) => Some(tab),
+            _ => None,
+        }
+    }
+
     pub fn settings(&self) -> Option<&SettingsTab> {
         match self {
             Self::Settings(tab) => Some(tab),
@@ -201,6 +216,7 @@ impl DockTab {
             Self::Editor(tab) => tab.ui(ui, shared),
             Self::Usage(tab) => tab.ui(ui, shared),
             Self::Properties(tab) => tab.ui(ui, shared),
+            Self::Clip(tab) => tab.ui(ui, shared),
             Self::Pane(_) | Self::Settings(_) => {}
         }
     }
@@ -213,7 +229,11 @@ impl DockTab {
             Self::Usage(tab) => tab.mark_stale(),
             // Listings notice changes to the archive themselves; properties
             // look again every few seconds.
-            Self::Pane(_) | Self::Archive(_) | Self::Properties(_) | Self::Settings(_) => {}
+            Self::Pane(_)
+            | Self::Archive(_)
+            | Self::Properties(_)
+            | Self::Settings(_)
+            | Self::Clip(_) => {}
         }
     }
 
@@ -227,7 +247,11 @@ impl DockTab {
             }
             Self::Editor(tab) => tab.dirs_changed(dirs),
             Self::Usage(tab) => tab.dirs_changed(dirs),
-            Self::Pane(_) | Self::Archive(_) | Self::Properties(_) | Self::Settings(_) => {}
+            Self::Pane(_)
+            | Self::Archive(_)
+            | Self::Properties(_)
+            | Self::Settings(_)
+            | Self::Clip(_) => {}
         }
     }
 
@@ -239,7 +263,7 @@ impl DockTab {
             Self::Archive(tab) => tab.dir().into_iter().collect(),
             Self::Editor(tab) => tab.dir().into_iter().collect(),
             Self::Usage(tab) => tab.shown_dirs(),
-            Self::Pane(_) | Self::Properties(_) | Self::Settings(_) => Vec::new(),
+            Self::Pane(_) | Self::Properties(_) | Self::Settings(_) | Self::Clip(_) => Vec::new(),
         }
     }
 }
@@ -282,12 +306,18 @@ mod tests {
         let mut settings = SettingsTab::new(6);
         settings.settings = crate::settings::Page::Places;
         new.push_to_first_leaf(DockTab::Settings(settings));
+        new.push_to_first_leaf(DockTab::Clip(ClipTab::new(7, PathBuf::from("/tmp/a.mp4"))));
         let saved = ron::ser::to_string(&new).unwrap();
         let loaded: DockState<DockTab> = ron::from_str(&saved).unwrap();
         assert!(
             loaded
                 .iter_all_tabs()
                 .any(|(_, t)| t.usage().is_some_and(|u| u.id == 5))
+        );
+        assert!(
+            loaded
+                .iter_all_tabs()
+                .any(|(_, t)| t.clip().is_some_and(|c| c.id == 7))
         );
         assert!(loaded.iter_all_tabs().any(|(_, t)| {
             t.settings()
@@ -314,6 +344,7 @@ mod tests {
                 (4, false, None, true),
                 (5, false, None, true),
                 (6, false, None, false),
+                (7, false, None, false),
             ]
         );
     }

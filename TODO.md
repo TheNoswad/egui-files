@@ -55,6 +55,20 @@
     - [ ] Moto G20 (Unisoc T700, Mali-G52, Android 11): noise at the bottom while scrolling with Vulkan, gone with "Disable HW overlays", so its display hardware mishandles the Vulkan driver's buffers. Settings → Appearance → Renderer → OpenGL is the workaround (checked on the Pixel that OpenGL runs); confirm it fixes the G20, and if so consider OpenGL by default on such phones
     - [ ] Haptics on Windows: `InputHapticsManager` (`Windows.Devices.Haptics`, SDK 10.0.28000, for haptic touchpads, mice and pens) once the `windows` crate has it (0.62.2 doesn't). Linux has no API for it
 
+## Video editor
+
+Trims and converts with the user's own ffmpeg, so the app ships no codecs (`src/clip/`). Android will use Media3 with the device's codecs instead: no pure Rust stack covers H.264 and H.265 yet, which is most of what phones film.
+
+- [x] Editor tab: timeline with start and end handles, I and O, fast cut from a keyframe or frame-exact, formats, quality, what to keep, exports queued in the jobs bar
+- [ ] Target size: guaranteed under the limit (two-pass, check, retry lower), warning first if it's impossibly small
+- [ ] Resize and frame rate; audio: remove, choose a track, bitrate, audio only
+- [ ] Hardware encoders, as a toggle when one is found
+- [ ] Crop, rotate and flip, speed; GIF and animated WebP
+- [ ] Settings field for ffmpeg's path, and offering to download an LGPL build (no x264 or x265 in those; none for macOS from BtbN)
+- [ ] Windows and macOS: needs the video backend above; the editor stays off there until then
+- [ ] Android: Media3 Transformer to export, ExoPlayer to show (getting its frames into egui needs a prototype)
+- [ ] Try exporting from a phone's mount: the path is mapped, but no test or run has covered it
+
 ## Markdown
 
 `src/markdown/`: `parse` (pulldown-cmark to blocks with source offsets), `layout` (blocks at a width, to a flat list of items), `view` (draws what's on screen, clicks), `images`, `links`, `drawing` (formulas and diagrams). The editor tab shows it in Source, Split and Preview. The source is the only document: anything that changes it is a splice of its bytes.

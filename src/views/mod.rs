@@ -213,6 +213,14 @@ fn entry_menu(
             },
         );
     }
+    if !entry.is_dir && crate::clip::can_edit(&entry.path) {
+        item(
+            ui,
+            format!("{} Edit video", icon::FILM_SLATE),
+            "",
+            Action::EditVideo(entry.path.clone()),
+        );
+    }
     let open_with = open_with::submenu(ui, || {
         if tab.selection.contains(&entry.path) {
             tab.selected_paths()
