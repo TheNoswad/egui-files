@@ -380,6 +380,8 @@ pub struct FilesApp {
     trash_count: TrashCount,
     /// Showing the "operations still running" or "unsaved changes" dialog.
     confirm_quit: bool,
+    /// Keeps links working when files move.
+    relinker: markdown::relink::Relinker,
     /// Editor tabs with unsaved changes waiting for "Save changes?" answers.
     confirm_close: Vec<u64>,
     /// Why saving before quitting failed.
@@ -590,6 +592,7 @@ impl FilesApp {
             drive_media: HashMap::new(),
             trash_count: TrashCount::new(&cc.egui_ctx),
             confirm_quit: false,
+            relinker: Default::default(),
             confirm_close: Vec::new(),
             quit_error: None,
             allow_close: false,
@@ -2281,6 +2284,17 @@ impl FilesApp {
                 tab.mark_stale();
             }
         }
+        for moves in self.shared.jobs.take_moved() {
+            for tab in self.all_tabs_mut() {
+                if let Some(editor) = tab.editor_mut() {
+                    editor.file_moved(&moves);
+                }
+            }
+            self.relinker.moved(ctx, moves);
+        }
+        for document in self.shared.jobs.take_repairs() {
+            self.relinker.repair(ctx, document);
+        }
         for outcome in self.shared.jobs.take_outcomes() {
             match outcome {
                 Outcome::Reveal(path) => {
@@ -2796,6 +2810,14 @@ impl FilesApp {
             self.act(&ctx, window, action);
         }
         self.confirm_close_ui(&ctx);
+        let unsaved: Vec<std::path::PathBuf> = self
+            .all_tabs()
+            .filter_map(DockTab::editor)
+            .filter(|editor| editor.is_dirty())
+            .map(|editor| editor.edit.clone())
+            .collect();
+        self.relinker
+            .ui(&ctx, &|path| unsaved.iter().any(|open| open == path));
         if let Some((request, target)) = self.shared.open_with.ui(&ctx) {
             self.open_with(&ctx, request, target);
         }

@@ -69,7 +69,10 @@
 - [ ] WYSIWYG: text being composed with an input method only shows once it's committed; check an IME, and the on-screen keyboard on Android and phones (only tried with a keyboard, on X11 and in Firefox)
 - [ ] WYSIWYG on touchscreens: a tap places the cursor, but nothing selects yet, and the cursor has no handle. Dragging past the edge of the view doesn't scroll
 - [ ] WYSIWYG: the setting for what "Edit" opens has no place in the settings to choose this mode (`Prefs::edit_mode`); find looks through the source there, as in Split
-- [ ] Phase 6: updating links in documents when files move in the app
+- [x] Phase 6: links in documents follow files moved or renamed in the app (`relink.rs`): the git repository or vault around the move is looked through, or without one the folders moved from and to, and what would change is shown first. Only link destinations' bytes change, and links already broken are left. Editor tabs go with their files
+- [x] What's looked at when links update: raw HTML's `src` and `href` too, hidden folders but not tools' own (`.git`, `node_modules`), and documents up to 64 MiB; what can't be read is named in the list, as is what has unsaved changes
+- [x] Repair links, in a document's toolbar: for what moved outside the app, which can't be told from a `git checkout`. Finds broken links around the document, and fixes those with one file of their name
+- [x] `[[Note]]` goes by how the app follows it: a rename leaves links that meant another note of that name, and a name that would now find another note gets a path
 - [ ] Raw HTML: a subset (img, br, details/summary, kbd, sub/sup, center); shown as written, dimmed, until then
 - [ ] Export (HTML, rich text, PDF)
 - [x] Scripts the bundled fonts lack, everywhere in the app: installed fonts on the desktop and Android, chosen by what they cover (`src/theme/fallback.rs`), and on the web Noto fonts beside the page, fetched when text needs them (`src/theme/web_fonts.rs`, `web/fonts.sh`)

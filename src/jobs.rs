@@ -132,6 +132,8 @@ pub struct Progress {
     answer: Mutex<Option<Answer>>,
     answered: Condvar,
     outcome: Mutex<Option<Outcome>>,
+    /// What's been moved so far, and where to.
+    moved: Mutex<Vec<Moved>>,
 }
 
 /// Something only the user can decide, asked from a worker thread.
@@ -208,6 +210,8 @@ impl Resolver {
 fn is_dir(path: &Path) -> bool {
     disk::symlink_metadata(path).is_ok_and(|m| m.is_dir())
 }
+
+use crate::markdown::relink::Moved;
 
 /// What to do with a job's result once it finishes.
 #[derive(Debug, PartialEq, Eq)]
@@ -397,6 +401,8 @@ pub struct Jobs {
     ctx: egui::Context,
     jobs: Vec<Job>,
     outcomes: Vec<Outcome>,
+    moved: Vec<Vec<Moved>>,
+    repairs: Vec<PathBuf>,
 }
 
 impl Jobs {
@@ -405,12 +411,33 @@ impl Jobs {
             ctx: ctx.clone(),
             jobs: Vec::new(),
             outcomes: Vec::new(),
+            moved: Vec::new(),
+            repairs: Vec::new(),
         }
     }
 
     /// Results of finished jobs for the app to act on.
     pub fn take_outcomes(&mut self) -> Vec<Outcome> {
         std::mem::take(&mut self.outcomes)
+    }
+
+    /// What finished jobs moved, a list for each, and renames.
+    pub fn take_moved(&mut self) -> Vec<Vec<Moved>> {
+        std::mem::take(&mut self.moved)
+    }
+
+    /// Something was renamed without a job.
+    pub fn note_renamed(&mut self, from: PathBuf, to: PathBuf) {
+        self.moved.push(vec![Moved { from, to }]);
+    }
+
+    /// A document asks for the links around it to be repaired.
+    pub fn ask_for_repair(&mut self, document: PathBuf) {
+        self.repairs.push(document);
+    }
+
+    pub fn take_repairs(&mut self) -> Vec<PathBuf> {
+        std::mem::take(&mut self.repairs)
     }
 
     pub fn start(&mut self, kind: JobKind) {
@@ -473,6 +500,12 @@ impl Jobs {
                     && !job.progress.cancelled()
                 {
                     self.outcomes.push(outcome);
+                }
+                // Even if it was cancelled: what moved, moved.
+                let moved =
+                    std::mem::take(&mut *job.progress.moved.lock().expect("moved poisoned"));
+                if !moved.is_empty() {
+                    self.moved.push(moved);
                 }
                 any_finished = true;
             }
@@ -934,6 +967,7 @@ impl<'a> Paste<'a> {
                     if let Some(replace) = replace {
                         self.swap(dst, replace);
                     }
+                    self.note_moved(src, replace.unwrap_or(dst));
                 }
                 Err(err) if err.kind() == io::ErrorKind::CrossesDevices => {
                     self.later.push((
@@ -945,6 +979,13 @@ impl<'a> Paste<'a> {
                 Err(err) => self.p.error(src, err),
             },
         }
+    }
+
+    fn note_moved(&self, from: &Path, to: &Path) {
+        self.p.moved.lock().expect("moved poisoned").push(Moved {
+            from: from.to_path_buf(),
+            to: to.to_path_buf(),
+        });
     }
 
     /// Replaces `old` with `new`, which is beside it.
@@ -985,9 +1026,10 @@ impl<'a> Paste<'a> {
                 if let Err(err) = remove_all(&src) {
                     self.p.error(&src, err);
                 }
-                if let Some(replace) = replace {
-                    self.swap(&dst, &replace);
+                if let Some(replace) = &replace {
+                    self.swap(&dst, replace);
                 }
+                self.note_moved(&src, replace.as_ref().unwrap_or(&dst));
             }
         }
         // Innermost first; ones still holding skipped items stay.
@@ -1342,6 +1384,33 @@ mod tests {
         assert!(!src.join("single.txt").exists());
 
         disk::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_move_says_what_went_where() {
+        let root = scratch("says-moved");
+        disk::create_dir_all(root.join("to")).unwrap();
+        disk::write(root.join("a.txt"), "a").unwrap();
+        // Already there: nothing moves.
+        disk::write(root.join("to/stays.txt"), "s").unwrap();
+        let mut jobs = Jobs::new(&egui::Context::default());
+        jobs.start(JobKind::Move {
+            sources: vec![root.join("a.txt"), root.join("to/stays.txt")],
+            dest: root.join("to"),
+        });
+        while jobs.running() > 0 {
+            jobs.poll();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        jobs.poll();
+        assert_eq!(
+            jobs.take_moved(),
+            [[Moved {
+                from: root.join("a.txt"),
+                to: root.join("to/a.txt"),
+            }]]
+        );
+        assert!(jobs.take_moved().is_empty(), "once");
     }
 
     #[test]

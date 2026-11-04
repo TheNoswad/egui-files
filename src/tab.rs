@@ -1532,6 +1532,9 @@ impl BrowserTab {
                 };
                 match fs::rename(&rename.path, &rename.name) {
                     Ok(new_path) => {
+                        shared
+                            .jobs
+                            .note_renamed(rename.path.clone(), new_path.clone());
                         self.reload();
                         self.select_path(&new_path, shared.show_hidden);
                     }

@@ -464,6 +464,8 @@ struct MarkdownState {
     caret_x: Option<f32>,
     /// Scroll to the page's cursor.
     reveal: bool,
+    /// Asked to repair the links around this document.
+    repair_links: bool,
 }
 
 /// Where the source pane is scrolled, for keeping the panes together.
@@ -498,6 +500,7 @@ struct GoTo {
 }
 
 enum Command {
+    RepairLinks,
     Save,
     Find {
         replace: bool,
@@ -797,6 +800,19 @@ impl EditorTab {
         state.store(ctx, id);
     }
 
+    /// Goes with its file when that's moved in the app, or with a folder it's
+    /// in, rather than saying it's gone, and creating it again on saving.
+    pub fn file_moved(&mut self, moves: &[markdown::relink::Moved]) {
+        let Some(to) = markdown::relink::moved_to(moves, &self.edit) else {
+            return;
+        };
+        self.edit = to;
+        if let Doc::Ready(buffer) = &mut self.doc {
+            buffer.stamp = document::stamp(&self.edit);
+            buffer.disk = Disk::InSync;
+        }
+    }
+
     /// Loads the file, applies reloads, and reacts to changes on disk.
     fn update_doc(&mut self, ctx: &Context) {
         match &self.doc {
@@ -954,6 +970,7 @@ impl EditorTab {
                     Command::Save
                         | Command::CloseBars
                         | Command::NextMode
+                        | Command::RepairLinks
                         | Command::Back
                         | Command::Forward
                         | Command::ToggleOutline
@@ -968,6 +985,9 @@ impl EditorTab {
         }
         if self.editing_page() {
             self.page_input(&ctx);
+        }
+        if std::mem::take(&mut self.md.repair_links) {
+            shared.jobs.ask_for_repair(self.edit.clone());
         }
 
         let cursor = self.selection(&ctx).start;
@@ -1526,6 +1546,7 @@ impl EditorTab {
                     Mode::Wysiwyg => Mode::Source,
                 };
             }
+            Command::RepairLinks => self.md.repair_links = true,
             Command::Back => self.go_back(true),
             Command::Forward => self.go_back(false),
             Command::ToggleOutline => self.outline = !self.outline,
@@ -2063,6 +2084,14 @@ fn toolbar(
                 "Forward (Alt+Right)",
             ) {
                 commands.push(Command::Forward);
+            }
+            if button(
+                ui,
+                true,
+                icon::LINK_BREAK,
+                "Repair broken links, by finding files of their names",
+            ) {
+                commands.push(Command::RepairLinks);
             }
             ui.separator();
             let modes = [
@@ -3407,6 +3436,28 @@ mod tests {
         h.frame(vec![Event::Text("c".into())]);
         h.frame(vec![]);
         assert_eq!(h.text(), "ab c\n\n# next\n");
+    }
+
+    #[test]
+    fn a_tab_goes_with_its_file() {
+        let mut h = page("page-moved", "ab\n", "ab");
+        h.frame(vec![Event::Text("X".into())]);
+        h.frame(vec![]);
+        let to = h.dir.join("elsewhere.md");
+        disk::rename(&h.path, &to).unwrap();
+        h.tab.file_moved(&[markdown::relink::Moved {
+            from: h.path.clone(),
+            to: to.clone(),
+        }]);
+        for _ in 0..3 {
+            h.frame(vec![]);
+        }
+        assert_eq!(h.tab.edit, to);
+        assert!(h.buffer().disk == Disk::InSync);
+        assert_eq!(h.text(), "abX\n", "what wasn't saved stays");
+        h.tab.save().unwrap();
+        assert_eq!(disk::read_to_string(&to).unwrap(), "abX\n");
+        assert!(disk::metadata(&h.path).is_err(), "not back where it was");
     }
 
     #[test]

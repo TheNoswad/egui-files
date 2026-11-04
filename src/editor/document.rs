@@ -159,7 +159,11 @@ pub fn encode(text: &str, line_ending: LineEnding, bom: bool) -> Vec<u8> {
 /// a symlink is followed so the link itself stays. Files with other hard
 /// links, and folders we can't create files in, are overwritten in place.
 pub fn save(path: &Path, text: &str, line_ending: LineEnding, bom: bool) -> io::Result<Stamp> {
-    let bytes = encode(text, line_ending, bom);
+    write_atomic(path, &encode(text, line_ending, bom))
+}
+
+/// Puts these bytes in the file, as [`save`] does.
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<Stamp> {
     let target = disk::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let meta = disk::metadata(&target).ok();
     #[cfg(unix)]
@@ -171,7 +175,7 @@ pub fn save(path: &Path, text: &str, line_ending: LineEnding, bom: bool) -> io::
     let hard_linked = false;
 
     let replaced = match &meta {
-        Some(meta) if !hard_linked => replace(&target, &bytes, meta),
+        Some(meta) if !hard_linked => replace(&target, bytes, meta),
         _ => Err(io::ErrorKind::Unsupported.into()),
     };
     if replaced.is_err() {
@@ -180,7 +184,7 @@ pub fn save(path: &Path, text: &str, line_ending: LineEnding, bom: bool) -> io::
             .create(true)
             .truncate(true)
             .open(&target)?;
-        file.write_all(&bytes)?;
+        file.write_all(bytes)?;
         file.sync_all()?;
     }
     stamp(&target).ok_or_else(|| io::ErrorKind::NotFound.into())

@@ -346,7 +346,7 @@ pub fn parse(source: &str) -> Document {
     document
 }
 
-fn options() -> Options {
+pub(super) fn options() -> Options {
     Options::ENABLE_TABLES
         | Options::ENABLE_FOOTNOTES
         | Options::ENABLE_STRIKETHROUGH

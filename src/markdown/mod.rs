@@ -13,6 +13,7 @@ pub mod layout;
 pub mod links;
 pub mod math;
 pub mod parse;
+pub mod relink;
 pub mod table;
 pub mod view;
 pub mod wysiwyg;

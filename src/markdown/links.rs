@@ -96,6 +96,11 @@ pub fn local_path(url: &str, dir: &Path) -> Option<(PathBuf, Option<String>)> {
     Some((normalize(&dir.join(&decoded)), anchor))
 }
 
+/// A path in a link, as it is on the disk.
+pub fn decoded(text: &str) -> String {
+    decode(text)
+}
+
 fn decode(text: &str) -> String {
     percent_decode_str(text).decode_utf8_lossy().into_owned()
 }
@@ -149,13 +154,17 @@ fn wiki(url: &str, dir: &Path) -> Target {
 /// The folder notes are linked within: the nearest one with `.obsidian` or
 /// `.git`, or else the document's own.
 fn vault_root(dir: &Path) -> PathBuf {
+    marked_vault(dir).unwrap_or_else(|| dir.to_path_buf())
+}
+
+/// The nearest folder with `.obsidian` or `.git`, if there is one.
+pub fn marked_vault(dir: &Path) -> Option<PathBuf> {
     dir.ancestors()
         .find(|folder| {
             disk::metadata(folder.join(".obsidian")).is_ok()
                 || disk::metadata(folder.join(".git")).is_ok()
         })
-        .unwrap_or(dir)
-        .to_path_buf()
+        .map(Path::to_path_buf)
 }
 
 /// Finds the file whose path ends in `name`, breadth first, so the nearest
