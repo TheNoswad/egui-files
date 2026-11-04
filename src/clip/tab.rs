@@ -22,6 +22,7 @@ use crate::{
     fs::{display_name, human_size},
     jobs::JobKind,
     tab::Shared,
+    tools::Tool,
     video,
 };
 
@@ -141,6 +142,8 @@ fn picture_mesh(texture: egui::TextureId, rect: Rect, view: View) -> egui::Shape
 #[derive(Default)]
 struct Runtime {
     loaded: Option<Arc<OnceLock<Loaded>>>,
+    /// [`crate::tools::generation`] when it was asked.
+    loaded_generation: u64,
     keyframe: Option<KeyframeLookup>,
     drag: Option<Handle>,
     /// A drag of the crop: what it took, the crop then, and where it began.
@@ -187,6 +190,20 @@ impl ClipTab {
 
     /// What's known of the video, starting to find out if nothing's asked yet.
     fn loaded(&mut self, ctx: &egui::Context) -> Option<Loaded> {
+        // It may have failed for want of what's since been installed.
+        let generation = crate::tools::generation();
+        if generation != self.runtime.loaded_generation {
+            self.runtime.loaded_generation = generation;
+            if self
+                .runtime
+                .loaded
+                .as_ref()
+                .and_then(|cell| cell.get())
+                .is_some_and(Result::is_err)
+            {
+                self.runtime.loaded = None;
+            }
+        }
         let cell = self.runtime.loaded.get_or_insert_with(|| {
             let cell = Arc::new(OnceLock::new());
             let (result, ctx, path) = (cell.clone(), ctx.clone(), self.clip.clone());
@@ -212,8 +229,21 @@ impl ClipTab {
                 return;
             }
             Some(Err(err)) => {
-                ui.centered_and_justified(|ui| {
+                let missing = err == ffmpeg::NOT_INSTALLED;
+                ui.vertical_centered(|ui| {
+                    ui.add_space(ui.available_height() / 3.0);
                     ui.colored_label(ui.visuals().warn_fg_color, err);
+                    if missing {
+                        ui.add_space(8.0);
+                        crate::tools::offer(ui, &mut shared.jobs, Tool::Ffmpeg);
+                    }
+                    ui.add_space(4.0);
+                    if ui
+                        .button(format!("{} Try again", icon::ARROW_CLOCKWISE))
+                        .clicked()
+                    {
+                        self.runtime.loaded = None;
+                    }
                 });
                 return;
             }
@@ -266,6 +296,7 @@ impl ClipTab {
                     ui.visuals().warn_fg_color,
                     format!("Can't play videos: {err}"),
                 );
+                crate::tools::offer(ui, &mut shared.jobs, Tool::Libmpv);
                 return;
             }
         };
@@ -1017,7 +1048,9 @@ impl ClipTab {
             }
         });
         let name = name.trim().to_owned();
-        let name_invalid = name.is_empty() || name.contains(['/', std::path::MAIN_SEPARATOR]);
+        let name_invalid = name.is_empty()
+            || name.contains(['/', std::path::MAIN_SEPARATOR])
+            || (cfg!(windows) && name.contains(['<', '>', ':', '"', '|', '?', '*']));
 
         let dir = self.dir().to_path_buf();
         ui.horizontal(|ui| {

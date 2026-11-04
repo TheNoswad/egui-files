@@ -13,11 +13,21 @@ use std::{
 use egui::{ColorImage, Context, TextureHandle, TextureOptions};
 use glow::HasContext;
 
+#[cfg(target_os = "linux")]
+use super::egl::GlContext;
+#[cfg(windows)]
+use super::wgl::GlContext;
 use super::{
     Command, Message, Mode, Open, Status,
-    egl::GlContext,
     mpv::{self, Event, Mpv, PropertyValue, RenderContext, RenderParam},
 };
+
+/// Hardware decoding: VA-API and friends hand their frames straight to OpenGL
+/// on Linux. On Windows OpenGL can't take Direct3D's, so they're copied back.
+#[cfg(target_os = "linux")]
+const HWDEC: &str = "auto-safe";
+#[cfg(windows)]
+const HWDEC: &str = "auto-copy-safe";
 
 const PROPERTY_POSITION: u64 = 1;
 const PROPERTY_DURATION: u64 = 2;
@@ -151,7 +161,7 @@ impl VideoPlayer {
             ("config", "no"),
             ("terminal", "no"),
             ("vo", "libmpv"),
-            ("hwdec", "auto-safe"),
+            ("hwdec", HWDEC),
             ("idle", "yes"),
             ("keep-open", "yes"),
             ("input-default-bindings", "no"),

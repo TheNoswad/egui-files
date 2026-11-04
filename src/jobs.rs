@@ -79,6 +79,9 @@ pub enum JobKind {
     Extract(ExtractJob),
     /// Trims or converts a video.
     Clip(Box<crate::clip::ClipJob>),
+    /// Fetches a program the app needs.
+    #[cfg(not(target_arch = "wasm32"))]
+    Download(crate::tools::Tool),
     Eject {
         drive: PathBuf,
         label: String,
@@ -122,6 +125,8 @@ impl JobKind {
             ),
             Self::Extract(job) => job.title(),
             Self::Clip(job) => job.title(),
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Download(tool) => format!("Downloading {}", tool.name()),
             Self::Eject { label, .. } => format!("Ejecting {label}"),
         }
     }
@@ -884,6 +889,8 @@ async fn run(kind: JobKind, p: &Progress) {
         JobKind::Compress(job) => archive::compress(job, p).await,
         JobKind::Extract(job) => archive::extract(job, p).await,
         JobKind::Clip(job) => crate::clip::export(*job, p),
+        #[cfg(not(target_arch = "wasm32"))]
+        JobKind::Download(tool) => crate::tools::install(tool, p),
         JobKind::Trash { paths } => {
             p.total_items.store(paths.len() as u64, Relaxed);
             for path in paths {

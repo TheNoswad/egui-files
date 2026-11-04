@@ -11,8 +11,10 @@
 #[cfg(target_os = "linux")]
 mod egl;
 mod mpv;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 mod renderer;
+#[cfg(windows)]
+mod wgl;
 
 use std::{
     collections::HashMap,
@@ -192,7 +194,7 @@ impl Quality {
     }
 
     /// mpv options for this level.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
     fn options(self) -> &'static [(&'static str, &'static str)] {
         match self {
             Self::Fast => &[("profile", "fast")],
@@ -229,9 +231,8 @@ pub struct Status {
     pub error: Option<String>,
 }
 
-// Read by the video thread, which only Linux has yet (see "Video backend
-// for Windows/macOS" in TODO.md).
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+// Read by the video thread, which not all platforms have.
+#[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
 enum Command {
     Load {
         path: PathBuf,
@@ -246,9 +247,8 @@ enum Command {
     Speed(f64),
 }
 
-// Read by the video thread, which only Linux has yet (see "Video backend
-// for Windows/macOS" in TODO.md).
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+// Read by the video thread, which not all platforms have.
+#[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
 struct Open {
     id: u64,
     mode: Mode,
@@ -258,9 +258,8 @@ struct Open {
     quality: Quality,
 }
 
-// Read by the video thread, which only Linux has yet (see "Video backend
-// for Windows/macOS" in TODO.md).
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+// Read by the video thread, which not all platforms have.
+#[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
 enum Message {
     Open(Open),
     Command(u64, Command),
@@ -399,9 +398,9 @@ impl Backend {
     fn start(ctx: &Context) -> Self {
         let (sender, receiver) = mpsc::channel();
         let error = Arc::new(OnceLock::new());
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         renderer::spawn(ctx.clone(), receiver, sender.clone(), error.clone());
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", windows)))]
         {
             let _ = (ctx, receiver);
             let _ = error.set("video playback is not implemented on this platform yet".into());
@@ -424,11 +423,14 @@ pub struct Videos {
     /// Volume in percent, as `f64` bits.
     volume: Arc<AtomicU64>,
     quality: Quality,
+    /// [`crate::tools::generation`] when the backend was started.
+    tools_generation: u64,
 }
 
 impl Videos {
     pub fn new(ctx: &Context) -> Self {
         Self {
+            tools_generation: crate::tools::generation(),
             ctx: ctx.clone(),
             backend: None,
             players: HashMap::new(),
@@ -475,6 +477,18 @@ impl Videos {
 
     /// The player for `id`, playing `path`; created or switched over as needed.
     pub fn player(&mut self, id: Id, path: &Path, mode: Mode) -> Result<&mut Player, String> {
+        // It may have failed for want of what's since been installed.
+        let generation = crate::tools::generation();
+        if generation != self.tools_generation {
+            self.tools_generation = generation;
+            if self
+                .backend
+                .as_ref()
+                .is_some_and(|b| b.error.get().is_some())
+            {
+                self.backend = None;
+            }
+        }
         let backend = self
             .backend
             .get_or_insert_with(|| Backend::start(&self.ctx));

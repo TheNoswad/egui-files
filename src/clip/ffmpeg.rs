@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
-        Mutex, OnceLock, TryLockError,
+        Mutex, TryLockError,
         mpsc::{self, RecvTimeoutError},
     },
     time::Duration,
@@ -26,7 +26,12 @@ use crate::{
 static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
 
 /// How to say ffmpeg is missing.
-pub const NOT_INSTALLED: &str = "ffmpeg isn't installed. Install it from your package manager or ffmpeg.org, then open this tab again.";
+#[cfg(windows)]
+pub const NOT_INSTALLED: &str =
+    "FFmpeg isn't installed. Download it here, or install it from ffmpeg.org.";
+#[cfg(not(windows))]
+pub const NOT_INSTALLED: &str =
+    "FFmpeg isn't installed. Install it from your package manager or ffmpeg.org.";
 
 /// Below this a video is only smears: not worth an encode that would take as
 /// long as a good one.
@@ -755,9 +760,13 @@ impl ClipJob {
     }
 }
 
-/// A program of ffmpeg's, found on the PATH.
+/// A program of ffmpeg's.
 fn command(program: &str) -> Command {
-    let mut command = Command::new(program);
+    let mut command = Command::new(match program {
+        "ffmpeg" => crate::tools::ffmpeg(),
+        "ffprobe" => crate::tools::ffprobe(),
+        other => other.into(),
+    });
     command.stdin(Stdio::null());
     #[cfg(windows)]
     {
@@ -816,34 +825,39 @@ pub fn tools() -> Result<Tools, String> {
 /// The hardware encoders that work here. They're tried once for the whole run
 /// of the app, as each takes a moment.
 fn working_hardware(encoders: &HashSet<String>) -> Vec<Hardware> {
-    static WORKING: OnceLock<Vec<Hardware>> = OnceLock::new();
-    WORKING
-        .get_or_init(|| {
-            let mut working = Vec::new();
-            for codec in ["h264", "hevc", "av1"] {
-                for kind in ["nvenc", "qsv", "vaapi"] {
-                    let encoder = format!("{codec}_{kind}");
-                    if !encoders.contains(&encoder) {
-                        continue;
-                    }
-                    let devices = if kind == "vaapi" {
-                        render_nodes().into_iter().map(Some).collect()
-                    } else {
-                        vec![None]
-                    };
-                    let found = devices
-                        .into_iter()
-                        .map(|device| Hardware {
-                            encoder: encoder.clone(),
-                            device,
-                        })
-                        .find(hardware_works);
-                    working.extend(found);
-                }
+    // For the ffmpeg they were tried with.
+    static WORKING: Mutex<Option<(PathBuf, Vec<Hardware>)>> = Mutex::new(None);
+    let mut working = WORKING.lock().unwrap_or_else(|err| err.into_inner());
+    let ffmpeg = crate::tools::ffmpeg();
+    if let Some((tried, hardware)) = &*working
+        && *tried == ffmpeg
+    {
+        return hardware.clone();
+    }
+    let mut hardware = Vec::new();
+    for codec in ["h264", "hevc", "av1"] {
+        for kind in ["nvenc", "qsv", "vaapi"] {
+            let encoder = format!("{codec}_{kind}");
+            if !encoders.contains(&encoder) {
+                continue;
             }
-            working
-        })
-        .clone()
+            let devices = if kind == "vaapi" {
+                render_nodes().into_iter().map(Some).collect()
+            } else {
+                vec![None]
+            };
+            let found = devices
+                .into_iter()
+                .map(|device| Hardware {
+                    encoder: encoder.clone(),
+                    device,
+                })
+                .find(hardware_works);
+            hardware.extend(found);
+        }
+    }
+    *working = Some((ffmpeg, hardware.clone()));
+    hardware
 }
 
 /// The GPUs VAAPI can use.
@@ -1153,7 +1167,11 @@ fn encoder_for(job: &ClipJob, codec: Codec) -> Result<Hardware, String> {
     }
     let encoder = codec
         .encoder(&job.tools)
-        .ok_or_else(|| format!("This ffmpeg has no encoder for {codec:?}."))?;
+        .ok_or_else(|| {
+            format!(
+                "This ffmpeg can't encode {codec:?}. Try another format, or the hardware encoder if there's one."
+            )
+        })?;
     Ok(Hardware {
         encoder: encoder.to_owned(),
         device: None,
@@ -1246,8 +1264,9 @@ fn video_args(
     if encoder != "libx265" && has_two_passes(encoder) {
         match encode.pass {
             Pass::Only => {}
-            Pass::First => add(&["-pass", "1", "-passlogfile", STATS]),
-            Pass::Second => add(&["-pass", "2", "-passlogfile", STATS]),
+            // Only the video's, or newer ffmpegs have the audio look for notes.
+            Pass::First => add(&["-pass:v", "1", "-passlogfile:v", STATS]),
+            Pass::Second => add(&["-pass:v", "2", "-passlogfile:v", STATS]),
         }
     }
     if codec == Codec::Hevc && is_mov(extension) {
@@ -1318,6 +1337,11 @@ fn video_filters(
     }
     if settings.flip_vertical {
         filters.push("vflip".to_owned());
+    }
+    // `vflip` hands on the same frame, read from the bottom up, which OpenH264
+    // refuses. `hflip` makes a real copy, and two change nothing.
+    if filters.last().is_some_and(|last| last.ends_with("vflip")) {
+        filters.push("hflip,hflip".to_owned());
     }
     if let Some(side) = encode.side.or_else(|| settings.scale_to(source)) {
         let (width, height) = settings.visible_size(source);
@@ -2231,12 +2255,12 @@ mod tests {
         };
         let job_264 = job(settings);
         let first = plain(&job_264, Pass::First);
-        assert!(has(&first, "-pass", "1") && has(&first, "-b:v", "1000000"));
+        assert!(has(&first, "-pass:v", "1") && has(&first, "-b:v", "1000000"));
         assert!(first.iter().any(|arg| arg == "-an"));
         assert!(has(&first, "-f", "null"));
         assert!(!has(&first, "-map", "0:2"), "no audio to read");
         let second = plain(&job_264, Pass::Second);
-        assert!(has(&second, "-pass", "2") && has(&second, "-b:a", "96k"));
+        assert!(has(&second, "-pass:v", "2") && has(&second, "-b:a", "96k"));
         assert!(has(&second, "-map", "0:2"));
 
         let job_265 = job(Settings {
@@ -2244,7 +2268,7 @@ mod tests {
             ..settings
         });
         let first = plain(&job_265, Pass::First);
-        assert!(!first.iter().any(|arg| arg == "-pass"));
+        assert!(!first.iter().any(|arg| arg == "-pass:v"));
         assert!(has(
             &first,
             "-x265-params",
@@ -2343,6 +2367,28 @@ mod tests {
                 "{turn:?}: {width} by {height}"
             );
         }
+    }
+
+    #[test]
+    fn a_vertical_flip_is_copied_on_for_the_encoder() {
+        let upended = Settings {
+            flip_vertical: true,
+            ..Settings::default()
+        };
+        assert!(has(
+            &planned(&job(upended), "mkv"),
+            "-vf",
+            "vflip,hflip,hflip"
+        ));
+        let turned = Settings {
+            turn: Turn::Half,
+            ..Settings::default()
+        };
+        assert!(has(
+            &planned(&job(turned), "mkv"),
+            "-vf",
+            "hflip,vflip,hflip,hflip"
+        ));
     }
 
     #[test]
@@ -2518,6 +2564,15 @@ mod tests {
         .unwrap()
     }
 
+    /// The H.264 encoder there is, to make samples with: not every ffmpeg has
+    /// x264. Without ffmpeg, anything: `sample` will say so.
+    fn h264() -> &'static str {
+        super::tools()
+            .ok()
+            .and_then(|tools| Codec::H264.encoder(&tools))
+            .unwrap_or("libx264")
+    }
+
     /// Makes a video with a keyframe every 2 seconds, tags and a location.
     /// `None` without ffmpeg.
     fn sample(dir: &Path) -> Option<PathBuf> {
@@ -2526,7 +2581,7 @@ mod tests {
             .args(["-v", "error", "-f", "lavfi", "-i"])
             .arg("testsrc2=size=160x90:rate=10:duration=10")
             .args(["-f", "lavfi", "-i", "sine=frequency=440:duration=10"])
-            .args(["-c:v", "libx264", "-g", "20", "-c:a", "aac"])
+            .args(["-c:v", h264(), "-b:v", "800k", "-g", "20", "-c:a", "aac"])
             .args(["-metadata", "title=Holiday"])
             .args(["-metadata", "location=+37.7+122.4/"])
             .arg(&path)
@@ -2584,6 +2639,8 @@ mod tests {
 
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("clip-{name}-{}", std::process::id()));
+        // A failed run can leave one behind, under a process id used again.
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -2911,7 +2968,7 @@ mod tests {
         let made = command("ffmpeg")
             .args(["-v", "error", "-f", "lavfi", "-i"])
             .arg("testsrc2=size=1280x720:rate=30:duration=4")
-            .args(["-c:v", "libx264", "-preset", "ultrafast"])
+            .args(["-c:v", h264(), "-b:v", "2M"])
             .arg(&input)
             .status();
         if !made.is_ok_and(|status| status.success()) {
@@ -2984,7 +3041,7 @@ mod tests {
         let made = command("ffmpeg")
             .args(["-v", "error", "-f", "lavfi", "-i"])
             .arg("color=black:s=160x90:r=10:d=1,drawbox=x=0:y=0:w=30:h=30:color=white:t=fill")
-            .args(["-c:v", "libx264", "-qp", "0"])
+            .args(["-c:v", h264(), "-b:v", "2M"])
             .arg(&marked)
             .status();
         assert!(made.unwrap().success());

@@ -94,6 +94,8 @@ struct Persisted {
     #[serde(default)]
     clip_settings: crate::clip::Settings,
     #[serde(default)]
+    ffmpeg_path: Option<PathBuf>,
+    #[serde(default)]
     open_with: open_with::Prefs,
     #[serde(default)]
     editor: editor::Prefs,
@@ -165,6 +167,7 @@ struct PersistedRef<'a> {
     video_quality: Quality,
     archive_prefs: &'a archive::Prefs,
     clip_settings: crate::clip::Settings,
+    ffmpeg_path: Option<PathBuf>,
     open_with: &'a open_with::Prefs,
     editor: &'a editor::Prefs,
     theme: &'a theme::Prefs,
@@ -492,6 +495,7 @@ impl FilesApp {
                 video_quality: Quality::default(),
                 archive_prefs: archive::Prefs::default(),
                 clip_settings: Default::default(),
+                ffmpeg_path: None,
                 open_with: open_with::Prefs::default(),
                 editor: editor::Prefs::default(),
                 theme: theme::Prefs::default(),
@@ -524,6 +528,7 @@ impl FilesApp {
             video_quality,
             archive_prefs,
             clip_settings,
+            ffmpeg_path,
             open_with,
             editor,
             theme,
@@ -540,6 +545,7 @@ impl FilesApp {
             pane_sizes,
             mobile,
         } = persisted;
+        crate::tools::set_custom_ffmpeg(ffmpeg_path);
         crate::keymap::set(&cc.egui_ctx, keymap);
         editor::highlight::preload();
         let pending_panes = if panes_docked {
@@ -3050,6 +3056,7 @@ impl FilesApp {
             video_quality: self.shared.videos.quality(),
             archive_prefs: &self.shared.archive_prefs,
             clip_settings: self.shared.clip_settings,
+            ffmpeg_path: crate::tools::custom_ffmpeg(),
             open_with: &self.shared.open_with.prefs,
             editor: &self.shared.editor,
             theme: &self.themes.prefs,

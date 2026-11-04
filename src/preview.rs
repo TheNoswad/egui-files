@@ -195,6 +195,7 @@ pub fn show(
     let Shared {
         images,
         videos,
+        jobs,
         texts,
         archives,
         editor: editor_prefs,
@@ -210,7 +211,7 @@ pub fn show(
         if entry.is_dir || is_archive {
             big_icon(ui, entry);
         } else if video::is_video(&entry.path) {
-            (dimensions, duration) = video_player(ui, entry, images, videos);
+            (dimensions, duration) = video_player(ui, entry, images, videos, jobs);
         } else if images::is_image(&entry.path) {
             dimensions = image(ui, entry, images, max_side);
         } else {
@@ -523,6 +524,7 @@ fn video_player(
     entry: &Entry,
     images: &mut ImageCache,
     videos: &mut Videos,
+    jobs: &mut crate::jobs::Jobs,
 ) -> (Option<[u32; 2]>, Option<f64>) {
     let max_size = vec2(
         ui.available_width(),
@@ -539,6 +541,7 @@ fn video_player(
                 ui.visuals().warn_fg_color,
                 format!("Can't play videos: {err}"),
             );
+            crate::tools::offer(ui, jobs, crate::tools::Tool::Libmpv);
             return (None, None);
         }
     };

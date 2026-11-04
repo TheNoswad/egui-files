@@ -57,6 +57,7 @@ mod terminal_panel;
 mod theme;
 mod thumbnails;
 mod titlebar;
+mod tools;
 mod touch;
 mod trash;
 mod tree;

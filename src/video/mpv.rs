@@ -1,14 +1,14 @@
 //! Minimal bindings to libmpv's client and OpenGL render APIs, loaded at
 //! runtime so the app still starts when mpv isn't installed.
 
-// Only Linux has a video thread to use the render API and events yet (see
-// "Video backend for Windows/macOS" in TODO.md); elsewhere only probing is.
-#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
+// Not all platforms have a video thread to use the render API and events;
+// elsewhere only probing is.
+#![cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
 
 use std::{
     ffi::{CStr, CString, c_char, c_int, c_ulong, c_void},
     path::Path,
-    sync::OnceLock,
+    sync::{Mutex, OnceLock},
 };
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -28,7 +28,9 @@ const LIBRARY_NAMES: &[&str] = &["libmpv.so"];
 #[cfg(target_arch = "wasm32")]
 const LIBRARY_NAMES: &[&str] = &[];
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(windows)]
+const NOT_FOUND: &str = "libmpv isn't installed";
+#[cfg(not(any(target_arch = "wasm32", windows)))]
 const NOT_FOUND: &str = "libmpv not found (install mpv)";
 #[cfg(target_arch = "wasm32")]
 const NOT_FOUND: &str = "video playback needs the desktop app";
@@ -39,7 +41,7 @@ mod web {
     pub enum Library {}
 
     impl Library {
-        pub unsafe fn new(_name: &str) -> Result<Self, ()> {
+        pub unsafe fn new(_name: impl AsRef<std::ffi::OsStr>) -> Result<Self, ()> {
             Err(())
         }
 
@@ -133,10 +135,17 @@ macro_rules! api {
 
         impl Api {
             fn load() -> Result<Self, String> {
-                let (name, library) = LIBRARY_NAMES
-                    .iter()
-                    // SAFETY: libmpv has no library constructors with preconditions.
-                    .find_map(|name| Some((*name, unsafe { Library::new(name) }.ok()?)))
+                // SAFETY: libmpv has no library constructors with preconditions.
+                let downloaded = crate::tools::downloaded_libmpv()
+                    .and_then(|path| unsafe { Library::new(path) }.ok())
+                    .map(|library| ("libmpv-2.dll", library));
+                let (name, library) = downloaded
+                    .or_else(|| {
+                        LIBRARY_NAMES
+                            .iter()
+                            // SAFETY: as above.
+                            .find_map(|name| Some((*name, unsafe { Library::new(name) }.ok()?)))
+                    })
                     .ok_or(NOT_FOUND)?;
                 // SAFETY: the signatures match libmpv's client.h and render.h.
                 unsafe {
@@ -176,8 +185,18 @@ api! {
 }
 
 fn api() -> Result<&'static Api, String> {
-    static API: OnceLock<Result<Api, String>> = OnceLock::new();
-    API.get_or_init(Api::load).as_ref().map_err(Clone::clone)
+    static API: OnceLock<Api> = OnceLock::new();
+    static LOADING: Mutex<()> = Mutex::new(());
+    if let Some(api) = API.get() {
+        return Ok(api);
+    }
+    let _loading = LOADING.lock().unwrap_or_else(|err| err.into_inner());
+    if let Some(api) = API.get() {
+        return Ok(api);
+    }
+    // Not kept if it fails: it may have been installed by the next time.
+    let api = Api::load()?;
+    Ok(API.get_or_init(|| api))
 }
 
 /// Whether libmpv can be loaded.

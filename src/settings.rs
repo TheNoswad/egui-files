@@ -615,6 +615,10 @@ fn files(ui: &mut Ui, app: &mut Access) {
             }
         }
     });
+    if cfg!(not(target_arch = "wasm32")) {
+        ui.add_space(6.0);
+        crate::tools::settings_ui(ui, &mut shared.jobs);
+    }
 
     group(ui, "Terminal");
     ui.menu_button(format!("{} Terminal folder", icon::LINK_SIMPLE), |ui| {

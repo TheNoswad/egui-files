@@ -819,7 +819,11 @@ fn tool_version(program: &str) -> Option<String> {
     } else {
         "-version"
     };
-    let mut command = Command::new(program);
+    let mut command = if program == "ffmpeg" {
+        Command::new(crate::tools::ffmpeg())
+    } else {
+        Command::new(program)
+    };
     command.arg(flag).stdin(std::process::Stdio::null());
     #[cfg(windows)]
     {

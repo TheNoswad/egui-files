@@ -2,7 +2,7 @@
 
 ## General
 
-- [ ] Video backend for Windows/macOS (WGL / ANGLE); Linux-only for now
+- [ ] Video backend for macOS; Linux and Windows have one
 - [ ] Zero-copy dmabuf → wgpu import for video, if readback ever matters
 - [ ] Drag-out on X11: check by hand on a real X11 desktop with a window manager, into a file manager and a browser (tested on Xvfb against a minimal XDND target, including Escape and dragging back in). No drag cursor outside the window, since the pointer stays grabbed by winit
 - [ ] Upstream: egui-winit (0.36 and 0.37) drops Ctrl+V entirely, without even the key press, when the clipboard has no text (or image), e.g. files copied in Explorer. We work around it with `file_clipboard::PasteKey` (Windows: `GetKeyState`) so copied files don't need a text fallback, which Discord would paste instead of the files. Report it, or send a PR that always passes the key press through (or adds an empty-paste event), then drop `PasteKey`.
@@ -66,8 +66,10 @@ Trims and converts with the user's own ffmpeg, so the app ships no codecs (`src/
 - [ ] Target size for audio on its own (only the bitrate can be chosen there)
 - [x] Crop (free or to a shape), turn and mirror, speed; GIF and animated WebP, also to a target size
 - [x] Turning, mirroring and speed show in the editor's video, with the crop's rectangle turning along
-- [ ] Settings field for ffmpeg's path, and offering to download an LGPL build (no x264 or x265 in those; none for macOS from BtbN)
-- [ ] Windows and macOS: needs the video backend above; the editor stays off there until then
+- [x] Settings field for ffmpeg's path, and offering to download an LGPL build (no x264 or x265 in those) and, on Windows, libmpv
+- [x] Windows: the player and editor, run under Wine with the downloaded tools and the export tests
+- [ ] Windows on real hardware: only run under Wine so far, with no GPU. Check hardware decoding (`auto-copy-safe`), hardware encoders, high DPI and a 4K video
+- [ ] macOS: not planned for now, nothing here to build or run it on
 - [ ] Android: Media3 Transformer to export, ExoPlayer to show (getting its frames into egui needs a prototype)
 - [ ] Try exporting from a phone's mount: the path is mapped, but no test or run has covered it
 

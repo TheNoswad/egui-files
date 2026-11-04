@@ -172,7 +172,7 @@ fn run_thumbnailer(path: &Path, max_side: u32) -> Result<Vec<u8>, String> {
         .arg("-i")
         .arg(path)
         .args(["-o", "-", "-c", "png", "-s", &side]);
-    let mut ffmpeg = Command::new("ffmpeg");
+    let mut ffmpeg = Command::new(crate::tools::ffmpeg());
     ffmpeg
         .args(["-v", "error", "-nostdin", "-i"])
         .arg(path)
