@@ -81,7 +81,13 @@ impl FolderTree {
         self.children
             .entry(dir.to_path_buf())
             .or_insert_with(|| {
-                let mut entries = fs::read_dir(dir).unwrap_or_default();
+                // Inside a phone's mount, which may not answer: it's reached
+                // from the places pane instead.
+                let mut entries = if crate::phones::reached(dir).is_some() {
+                    Vec::new()
+                } else {
+                    fs::read_dir(dir).unwrap_or_default()
+                };
                 entries.retain(|e| e.is_dir);
                 fs::sort_entries(&mut entries, fs::Sort::default());
                 Arc::new(

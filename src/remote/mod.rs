@@ -147,6 +147,10 @@ pub fn forget_recent(authority: &str) {
 
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 fn remember(authority: &str) {
+    // Phones are listed with the drives, and mounted on demand.
+    if crate::phones::is_phone_authority(authority) {
+        return;
+    }
     let mut recent = RECENT.lock().unwrap_or_else(PoisonError::into_inner);
     recent.retain(|s| s != authority);
     recent.insert(0, authority.to_owned());
@@ -193,7 +197,8 @@ pub fn connections() -> Vec<(String, Status)> {
                 disk::sftp::Status::Connected => Status::Connected,
                 disk::sftp::Status::Failed(why) => Status::Failed(why),
             };
-            Some((authority(&root)?, status))
+            let authority = authority(&root)?;
+            (!crate::phones::is_phone_authority(&authority)).then_some((authority, status))
         })
         .collect();
     #[cfg(target_arch = "wasm32")]
@@ -254,7 +259,9 @@ pub fn typed(path: PathBuf) -> PathBuf {
 /// `path` and the folders it's in, up to the top of its drive, server or
 /// phone's storage.
 pub fn ancestors(path: &Path) -> impl Iterator<Item = &Path> {
-    let top = root(path).or_else(|| crate::phones::root_of(path));
+    // A phone's first: it's reached like a server, whose top is this
+    // computer's, not the phone's.
+    let top = crate::phones::root_of(path).or_else(|| root(path));
     let mut done = false;
     path.ancestors().take_while(move |ancestor| {
         if done {
@@ -323,6 +330,15 @@ pub fn retry(dir: &Path) {
     fetch::retry(dir);
     #[cfg(target_arch = "wasm32")]
     let _ = dir;
+}
+
+/// Forgets what's known of the folders in `root`, and that they failed, so
+/// they're fetched again: a phone's, as it comes and goes.
+pub fn retry_within(root: &Path) {
+    #[cfg(not(target_arch = "wasm32"))]
+    fetch::retry_within(root);
+    #[cfg(target_arch = "wasm32")]
+    let _ = root;
 }
 
 /// Whether the computer `path` is on is being connected to.
@@ -420,8 +436,21 @@ mod fetch {
             }
             None => (dir.to_path_buf(), None),
         };
-        disk::read_dir(&target).map_err(|err| err.to_string())?;
+        disk::read_dir(&target).map_err(|err| {
+            if crate::phones::is_phone(dir) {
+                "the phone isn't connected".to_owned()
+            } else {
+                err.to_string()
+            }
+        })?;
         Ok(moved)
+    }
+
+    pub fn retry_within(root: &Path) {
+        let mut fetches = fetches();
+        fetches.failed.retain(|dir, _| !dir.starts_with(root));
+        drop(fetches);
+        disk::sftp::forget(root);
     }
 
     pub fn retry(dir: &Path) {

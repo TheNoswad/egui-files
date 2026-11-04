@@ -606,3 +606,47 @@ fn files_share_the_connection_without_a_channel() {
     drop(file);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// What's mounted here may never answer, so the UI's thread is never left
+/// waiting on it: it gets what's known, or is told to come back later, however
+/// healthy the connection. Other threads do the waiting.
+#[test]
+fn the_ui_thread_never_waits_on_a_local_server() {
+    let Some(program) = [
+        "/usr/lib/ssh/sftp-server",
+        "/usr/lib/openssh/sftp-server",
+        "/usr/libexec/openssh/sftp-server",
+    ]
+    .into_iter()
+    .find(|path| std::path::Path::new(path).exists()) else {
+        return;
+    };
+    set_local_servers("local-test-", program);
+    let dir = std::env::temp_dir().join(format!("sftp-local-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("listed")).unwrap();
+    std::fs::create_dir_all(dir.join("not-listed")).unwrap();
+    std::fs::write(dir.join("listed/file"), "data").unwrap();
+    let url = |rest: &str| url("local-test-a", &format!("{}/{rest}", dir.display()));
+
+    let listed = url("listed");
+    assert_eq!(disk::read_dir(&listed).unwrap().count(), 1);
+
+    let (listed_too, unknown) = (listed.clone(), url("not-listed"));
+    let (file, written) = (url("listed/file"), url("listed/new"));
+    std::thread::spawn(move || {
+        never_connect_on_this_thread();
+        assert_eq!(disk::read_dir(&listed_too).unwrap().count(), 1);
+        assert!(disk::metadata(&file).unwrap().is_file());
+        let would_block = |err: io::Error| assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+        would_block(disk::metadata(&unknown).unwrap_err());
+        would_block(disk::read_dir(&unknown).map(drop).unwrap_err());
+        would_block(disk::write(&written, "x").unwrap_err());
+        would_block(disk::read(&file).unwrap_err());
+    })
+    .join()
+    .unwrap();
+
+    assert!(!dir.join("listed/new").exists());
+    disconnect(&listed);
+    std::fs::remove_dir_all(&dir).unwrap();
+}

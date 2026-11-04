@@ -166,7 +166,15 @@ impl Sidebar {
         response: &mut SidebarResponse,
     ) {
         let drives = self.drives.shown(self.hide_empty_drives);
-        let roots: Vec<&Place> = self.places.iter().take(1).chain(&drives).collect();
+        // The tree reads folders as it's drawn: not a phone's, which may not
+        // answer. Like servers', they're in the places pane.
+        let roots: Vec<&Place> = self
+            .places
+            .iter()
+            .take(1)
+            .chain(&drives)
+            .filter(|place| !crate::remote::is_remote(&place.path))
+            .collect();
         match self.tree.ui(ui, &roots, current, show_hidden) {
             Some(TreeAction::Navigate(path)) => response.target = Some((path, false)),
             Some(TreeAction::OpenInNewTab(path)) => response.target = Some((path, true)),

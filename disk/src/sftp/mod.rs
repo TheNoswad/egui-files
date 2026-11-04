@@ -267,6 +267,9 @@ struct Pool {
     extra_args: Vec<OsString>,
     program: Option<OsString>,
     askpass: Option<PathBuf>,
+    /// Computers named with this prefix are reached through this program, an
+    /// SFTP server run here, rather than ssh (see `set_local_servers`).
+    local: Option<(String, OsString)>,
 }
 
 static POOL: OnceLock<(Mutex<Pool>, Condvar)> = OnceLock::new();
@@ -279,6 +282,27 @@ fn pool() -> (MutexGuard<'static, Pool>, &'static Condvar) {
 /// Gives ssh these arguments too, before the rest (for tests: `-F config`).
 pub fn set_extra_ssh_args(args: impl IntoIterator<Item = impl Into<OsString>>) {
     pool().0.extra_args = args.into_iter().map(Into::into).collect();
+}
+
+/// Reaches computers whose names start with `prefix` through `program`, an
+/// SFTP server run here, rather than ssh: for what's mounted here but may not
+/// answer, which only that process then waits on.
+///
+/// The thread that's told [`never_connect_on_this_thread`] never waits on
+/// these at all, not even over a connection that's up: it's told what's
+/// known, however old, or else [`io::ErrorKind::WouldBlock`].
+pub fn set_local_servers(prefix: impl Into<String>, program: impl Into<OsString>) {
+    pool().0.local = Some((prefix.into(), program.into()));
+}
+
+fn local_server(pool: &Pool, authority: &str) -> Option<OsString> {
+    let (prefix, program) = pool.local.as_ref()?;
+    authority.starts_with(prefix).then(|| program.clone())
+}
+
+/// Whether this thread mustn't wait on `authority`, and takes what's known.
+fn takes_what_is_known(authority: &str) -> bool {
+    NO_CONNECTING.get() && local_server(&pool().0, authority).is_some()
 }
 
 /// Where connections listen for other ssh's to share them (ssh's
@@ -349,6 +373,12 @@ fn session(authority: &str) -> io::Result<Arc<Session>> {
 fn session_or_connect(authority: &str, retry: bool) -> io::Result<Arc<Session>> {
     let may_connect = !NO_CONNECTING.get();
     let (mut pool, changed) = pool();
+    if !may_connect && local_server(&pool, authority).is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            format!("{authority} is only reached in the background"),
+        ));
+    }
     loop {
         match pool.connections.get(authority) {
             Some(Connection::Up(session)) if session.is_open() => return Ok(session.clone()),
@@ -406,8 +436,12 @@ fn start_session(
     }
     let target = Target::parse(authority)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "not a computer's name"))?;
-    let mut command = session::ssh_command(&target);
-    if !extra_args.is_empty() {
+    let local = local_server(&pool().0, authority);
+    let mut command = match &local {
+        Some(program) => std::process::Command::new(program),
+        None => session::ssh_command(&target),
+    };
+    if local.is_none() && !extra_args.is_empty() {
         // Ahead of the rest, so `-F` and the like come before the host.
         let rest: Vec<OsString> = command.get_args().map(OsString::from).collect();
         let program = command.get_program().to_owned();
@@ -667,9 +701,10 @@ pub fn take_changes() -> BTreeSet<PathBuf> {
 }
 
 fn known(location: &Location, follow: bool) -> Option<Attrs> {
+    let any_age = takes_what_is_known(&location.authority);
     let cache = cache();
     let known = cache.files.get(location)?;
-    if known.at.elapsed() >= FRESH {
+    if known.at.elapsed() >= FRESH && !any_age {
         return None;
     }
     if follow && known.link.is_symlink() {
@@ -796,9 +831,10 @@ pub fn read_dir(location: &Location) -> io::Result<Vec<Listed>> {
 /// The listing remembered for `location`, if recent and nothing in it has
 /// been forgotten since.
 fn listed_recently(location: &Location) -> Option<Vec<Listed>> {
+    let any_age = takes_what_is_known(&location.authority);
     let cache = cache();
     let (at, names) = cache.listings.get(location)?;
-    if at.elapsed() >= FRESH {
+    if at.elapsed() >= FRESH && !any_age {
         return None;
     }
     names

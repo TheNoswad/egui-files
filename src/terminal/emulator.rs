@@ -729,6 +729,10 @@ impl Terminal {
         if !idle || self.remote_sent.as_deref() == Some(folder) {
             return None;
         }
+        // Reached through KDE Connect: there's no ssh into it from here.
+        if crate::phones::is_phone(folder) {
+            return None;
+        }
         // Once the app's connection is up, to share it: no password again.
         // If it failed, ssh asks for itself.
         use disk::sftp::Status;

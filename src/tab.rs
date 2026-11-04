@@ -222,6 +222,9 @@ pub struct BrowserTab {
     /// before, if anything.
     #[serde(skip)]
     loading: bool,
+    /// Renames and new items on a phone, under way in the background.
+    #[serde(skip)]
+    phone_work: Vec<std::sync::mpsc::Receiver<Result<PhoneWork, String>>>,
     /// Items on a server to delete for good, once the user says so.
     #[serde(skip)]
     confirm_delete: Option<Vec<PathBuf>>,
@@ -270,6 +273,12 @@ pub struct BrowserTab {
     folder_sizes: Option<std::sync::Arc<crate::usage::FolderSizes>>,
 }
 
+/// What finished on a phone, in the background.
+enum PhoneWork {
+    Renamed(PathBuf, PathBuf),
+    Created(PathBuf),
+}
+
 impl BrowserTab {
     pub fn new(id: u64, path: PathBuf) -> Self {
         Self {
@@ -286,6 +295,7 @@ impl BrowserTab {
             stale: false,
             error: None,
             loading: false,
+            phone_work: Vec::new(),
             confirm_delete: None,
             selection: HashSet::new(),
             toolbar_height: 0.0,
@@ -352,6 +362,9 @@ impl BrowserTab {
     }
 
     fn reload(&mut self) {
+        if let Some(on_phone) = crate::phones::reached(&self.path) {
+            self.path = on_phone;
+        }
         self.column_cache.clear();
         self.loading = false;
         // A server's folder is read once it's here, without waiting for it.
@@ -370,7 +383,10 @@ impl BrowserTab {
             }
             Listing::Failed(why) => {
                 self.entries = Some(Vec::new());
-                self.error = Some(format!("Cannot read {}: {why}", self.path.display()));
+                self.error = Some(format!(
+                    "Cannot read {}: {why}",
+                    fs::location_text(&self.path)
+                ));
                 return;
             }
         }
@@ -479,6 +495,7 @@ impl BrowserTab {
     }
 
     pub fn navigate(&mut self, path: PathBuf) {
+        let path = crate::phones::reached(&path).unwrap_or(path);
         if path == self.path {
             return;
         }
@@ -569,6 +586,7 @@ impl BrowserTab {
     // UI
 
     pub fn ui(&mut self, ui: &mut Ui, shared: &mut Shared) {
+        self.finish_phone_work(shared);
         ui.style_mut().interaction.selectable_labels = false;
         // A server's folder that's come in since.
         if self.loading && remote::listing(&self.path) != Listing::Loading {
@@ -613,7 +631,10 @@ impl BrowserTab {
             Panel::top(Id::new(("loading", self.id))).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    let server = remote::authority(&self.path).unwrap_or_default();
+                    let server = match crate::phones::root_of(&self.path) {
+                        Some(root) => fs::location_name(&root),
+                        None => remote::authority(&self.path).unwrap_or_default(),
+                    };
                     ui.weak(if remote::connecting(&self.path) {
                         format!("Connecting to {server}…")
                     } else {
@@ -1660,6 +1681,13 @@ impl BrowserTab {
                 let Some(rename) = self.rename.take() else {
                     return;
                 };
+                if crate::phones::is_phone(&rename.path) {
+                    self.on_phone(move || match fs::rename(&rename.path, &rename.name) {
+                        Ok(to) => Ok(PhoneWork::Renamed(rename.path, to)),
+                        Err(err) => Err(format!("Rename failed: {err}")),
+                    });
+                    return;
+                }
                 match fs::rename(&rename.path, &rename.name) {
                     Ok(new_path) => {
                         shared
@@ -1670,6 +1698,22 @@ impl BrowserTab {
                     }
                     Err(err) => self.error = Some(format!("Rename failed: {err}")),
                 }
+            }
+            Action::NewFolder if crate::phones::is_phone(&self.path) => {
+                let parent = self.path.clone();
+                self.on_phone(move || match fs::create_dir(&parent) {
+                    Ok(path) => Ok(PhoneWork::Created(path)),
+                    Err(err) => Err(format!("Could not create folder: {err}")),
+                });
+            }
+            Action::NewFile(template) if crate::phones::is_phone(&self.path) => {
+                let parent = self.path.clone();
+                self.on_phone(
+                    move || match fs::create_file(&parent, template.as_deref()) {
+                        Ok(path) => Ok(PhoneWork::Created(path)),
+                        Err(err) => Err(format!("Could not create file: {err}")),
+                    },
+                );
             }
             Action::NewFolder => match fs::create_dir(&self.path) {
                 Ok(path) => self.start_renaming_new(path),
@@ -1735,6 +1779,40 @@ impl BrowserTab {
     }
 
     /// Selects a just-created item and opens the rename dialog for it.
+    /// Does `work` in the background: a phone may not answer, and the UI's
+    /// thread can't wait on it.
+    fn on_phone(&mut self, work: impl FnOnce() -> Result<PhoneWork, String> + Send + 'static) {
+        let (done, outcome) = std::sync::mpsc::channel();
+        self.phone_work.push(outcome);
+        crate::background::spawn("change something on a phone", move || {
+            let _ = done.send(work());
+            remote::repaint();
+        });
+    }
+
+    fn finish_phone_work(&mut self, shared: &mut Shared) {
+        let mut finished = Vec::new();
+        self.phone_work.retain(|work| match work.try_recv() {
+            Ok(outcome) => {
+                finished.push(outcome);
+                false
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => true,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => false,
+        });
+        for outcome in finished {
+            match outcome {
+                Ok(PhoneWork::Renamed(from, to)) => {
+                    shared.jobs.note_renamed(from, to.clone());
+                    self.reload();
+                    self.select_path(&to, shared.show_hidden);
+                }
+                Ok(PhoneWork::Created(path)) => self.start_renaming_new(path),
+                Err(why) => self.error = Some(why),
+            }
+        }
+    }
+
     fn start_renaming_new(&mut self, path: PathBuf) {
         self.filter.clear();
         self.reload();

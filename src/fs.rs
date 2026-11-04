@@ -297,6 +297,16 @@ pub fn location_name(path: &Path) -> String {
     crate::phones::name_of(path).unwrap_or_else(|| display_name(path))
 }
 
+/// A folder's path for messages: on a phone, what it's called, as the real
+/// path says little.
+pub fn location_text(path: &Path) -> String {
+    if crate::phones::root_of(path).is_some() {
+        location_name(path)
+    } else {
+        path.display().to_string()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Operations
 
