@@ -41,9 +41,9 @@ pub enum RemoteImages {
 pub enum Mode {
     Source,
     Split,
-    #[default]
     Preview,
-    /// The page itself is what's edited.
+    /// The page itself is what's edited. How documents open.
+    #[default]
     Wysiwyg,
 }
 

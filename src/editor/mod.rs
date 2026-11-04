@@ -574,7 +574,7 @@ impl EditorTab {
     /// A tab for reading a markdown document.
     pub fn new_markdown(id: u64, path: PathBuf) -> Self {
         Self {
-            mode: Mode::Preview,
+            mode: Mode::Wysiwyg,
             focus_text: false,
             ..Self::new(id, path)
         }
@@ -929,8 +929,12 @@ impl EditorTab {
             Mode::Wysiwyg if buffer.read_only.is_some() => Mode::Preview,
             mode => mode,
         };
-        // Coming to it, the keys come with it.
-        if mode == Mode::Wysiwyg && self.shown_mode != Mode::Wysiwyg {
+        // Coming to it, the keys come with it. On a touchscreen that's the
+        // keyboard over half of what's being read, so that waits for a tap.
+        if mode == Mode::Wysiwyg
+            && self.shown_mode != Mode::Wysiwyg
+            && !crate::touch::is_touch(&ctx)
+        {
             self.focus_text = true;
         }
         self.shown_mode = mode;
@@ -4006,6 +4010,24 @@ mod tests {
     }
 
     #[test]
+    fn opening_on_a_touchscreen_leaves_the_keyboard_down_until_a_tap() {
+        let mut h = Harness::with_file("touch-open", "a.md", "first second third\n");
+        crate::touch::set_touch(&h.ctx, true);
+        h.tab.mode = Mode::Wysiwyg;
+        h.tab.focus_text = false;
+        h.until(|h| matches!(h.tab.doc, Doc::Ready(_)));
+        for _ in 0..4 {
+            h.frame(vec![]);
+        }
+        assert_eq!(h.keyboard_wanted.last(), Some(&false), "reading");
+        let view = &h.tab.md.view;
+        let fields = view.layout().placed_fields();
+        let pos = fields[0].rect().center() + view.page_origin.to_vec2();
+        tap(&mut h, pos);
+        assert_eq!(h.keyboard_wanted.last(), Some(&true), "writing");
+    }
+
+    #[test]
     fn a_read_only_document_can_only_be_read() {
         let mut h = page("page-read-only", "ab\n", "ab");
         if let Doc::Ready(buffer) = &mut h.tab.doc {
@@ -4647,7 +4669,11 @@ mod tests {
     #[test]
     fn opening_reads_and_editing_edits() {
         let mut tab = EditorTab::new_markdown(1, "/x/a.md".into());
-        assert_eq!(tab.mode, Mode::Preview);
+        assert_eq!(tab.mode, Mode::Wysiwyg);
+        tab.show_for_editing(Mode::Split);
+        assert_eq!(tab.mode, Mode::Wysiwyg, "it's being edited already");
+        // Having been put in Preview to read, Edit is what takes it out of it.
+        tab.mode = Mode::Preview;
         tab.show_for_editing(Mode::Split);
         assert_eq!(tab.mode, Mode::Split);
         // Not taken out of what the user chose.

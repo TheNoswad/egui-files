@@ -49,7 +49,7 @@
 `src/markdown/`: `parse` (pulldown-cmark to blocks with source offsets), `layout` (blocks at a width, to a flat list of items), `view` (draws what's on screen, clicks), `images`, `links`, `drawing` (formulas and diagrams). The editor tab shows it in Source, Split and Preview. The source is the only document: anything that changes it is a splice of its bytes.
 
 - [x] Renderer: CommonMark, GFM, footnotes, alerts and callouts, frontmatter, definition lists, sub/superscript, heading ids, wikilinks, highlights, tags, emoji shortcodes
-- [x] Preview and Split, with scrolling kept together; Open reads, Edit edits; the preview pane renders
+- [x] Preview and Split, with scrolling kept together; Open shows WYSIWYG; the preview pane renders
 - [x] Links followed in place with Back and Forward; programs are revealed rather than run
 - [x] Local and remote pictures, SVG included; remote ones behind a setting, by default asked for each document
 - [x] Phase 2, editing aids: formatting commands and shortcuts, lists that continue on Enter and nest on Tab, addresses pasted over text become links, table editing (`table.rs`), outline, word count and reading time, find in the rendered view, pasted and dropped pictures (`assets.rs`), a picture's lightbox
