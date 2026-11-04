@@ -164,6 +164,8 @@ pub fn generate_video(
 }
 
 fn run_thumbnailer(path: &Path, max_side: u32) -> Result<Vec<u8>, String> {
+    let on_phone = crate::phones::mount_path(path);
+    let path = on_phone.as_deref().unwrap_or(path);
     let side = max_side.to_string();
     let mut ffmpegthumbnailer = Command::new("ffmpegthumbnailer");
     ffmpegthumbnailer

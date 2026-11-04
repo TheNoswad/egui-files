@@ -359,6 +359,13 @@ impl ImageCache {
         }
     }
 
+    /// Tries again the pictures in `root` that couldn't be read: a phone's,
+    /// which fail while it's away and are there once it's back.
+    pub fn retry_failed_within(&mut self, root: &Path) {
+        self.slots
+            .retain(|key, slot| !(matches!(slot, Slot::Failed(_)) && key.path.starts_with(root)));
+    }
+
     /// Returns the image if decoded, queueing it otherwise.
     pub fn get(&mut self, path: &Path, modified: Option<SystemTime>, max_side: u32) -> Lookup<'_> {
         if !is_supported(path) {
@@ -688,6 +695,19 @@ mod tests {
                 image_done = true;
             }
             broken_done = matches!(cache.get(&broken, None, 100), Lookup::Failed(_));
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        // It stays failed, even once it's fine, until told to try again.
+        disk::copy(&path, &broken).unwrap();
+        cache.begin_frame();
+        assert!(matches!(cache.get(&broken, None, 100), Lookup::Failed(_)));
+        cache.retry_failed_within(Path::new("/somewhere/else"));
+        assert!(matches!(cache.get(&broken, None, 100), Lookup::Failed(_)));
+        cache.retry_failed_within(&dir);
+        while !matches!(cache.get(&broken, None, 100), Lookup::Ready(_)) {
+            assert!(web_time::Instant::now() < deadline, "decode timed out");
+            cache.begin_frame();
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
 

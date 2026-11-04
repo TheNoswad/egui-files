@@ -81,6 +81,21 @@ pub fn reached(path: &Path) -> Option<PathBuf> {
     }
 }
 
+/// The file in the phone's mount that `path` means, for programs of other
+/// people's that read it themselves and can't reach `sftp://kdeconnect-…`:
+/// they run off the UI's thread, and it's fine for them to wait on the phone.
+pub fn mount_path(path: &Path) -> Option<PathBuf> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        is_phone(path).then(|| disk::sftp::parse(path).map(|location| location.path.into()))?
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = path;
+        None
+    }
+}
+
 /// Whether `path` is on a phone.
 pub fn is_phone(path: &Path) -> bool {
     path.to_str()
@@ -391,6 +406,8 @@ mod kde {
     const ANSWER_WITHIN: Duration = Duration::from_secs(10);
     /// How often mounting a phone that dropped is tried again.
     const REMOUNT_EVERY: Duration = Duration::from_secs(5);
+    /// How long KDE Connect gets to mount a phone. Its own limit is shorter.
+    const MOUNT_WITHIN: Duration = Duration::from_secs(30);
     /// How long KDE Connect gets to notice a mount that was cut is over.
     const UNMOUNT_TRIES: u32 = 40;
     const UNMOUNT_TRY: Duration = Duration::from_millis(250);
@@ -695,8 +712,9 @@ mod kde {
                 }
                 clear_dead_mount(root);
             }
-            let mounted: bool = sftp.call("mountAndWait", &()).await?;
-            if mounted && fuse_connection(&mount_table(), root).is_some() {
+            // The table has the last word, as it may say so without mounting.
+            let _ = mount_and_wait(id);
+            if fuse_connection(&mount_table(), root).is_some() {
                 return Ok(Ok(()));
             }
             // Only meant when mounting failed: it stays set after a success.
@@ -708,6 +726,24 @@ mod kde {
             }))
         })
         .unwrap_or_else(|err: zbus::Error| Err(err.to_string()))
+    }
+
+    /// Asks KDE Connect to mount a phone, for only so long: it's been seen never
+    /// to answer, and a phone waiting on that wouldn't be tried again.
+    fn mount_and_wait(id: &str) -> Result<bool, mpsc::RecvTimeoutError> {
+        let (done, answer) = mpsc::channel();
+        let id = id.to_owned();
+        crate::background::spawn("ask KDE Connect to mount", move || {
+            let mounted: zbus::Result<bool> = zbus::block_on(async {
+                let connection = Connection::session().await?;
+                sftp(&connection, &id)
+                    .await?
+                    .call("mountAndWait", &())
+                    .await
+            });
+            let _ = done.send(mounted.unwrap_or(false));
+        });
+        answer.recv_timeout(MOUNT_WITHIN)
     }
 
     /// KDE Connect's own `unmount`, which is also how it lets go of a phone,
@@ -833,6 +869,18 @@ mod tests {
 
         let beside = Path::new("sftp://kdeconnect-test/storage/01");
         assert_eq!(root_of(beside), None);
+    }
+
+    /// Other people's programs are given the file itself, not a URL they can't
+    /// open; a server's stays as it is.
+    #[test]
+    fn programs_are_given_the_file_in_a_phones_mount() {
+        assert_eq!(
+            mount_path(Path::new("sftp://kdeconnect-a/run/m/DCIM/v.mp4")),
+            Some(PathBuf::from("/run/m/DCIM/v.mp4"))
+        );
+        assert_eq!(mount_path(Path::new("sftp://me@host/srv/v.mp4")), None);
+        assert_eq!(mount_path(Path::new("/home/v.mp4")), None);
     }
 
     /// A tab saved on the mount itself goes the safe way round.

@@ -816,6 +816,7 @@ impl FilesApp {
         let changed = self.sidebar.drives.phones.take_changed();
         for root in &changed {
             crate::remote::retry_within(root);
+            self.shared.images.retry_failed_within(root);
         }
         if !changed.is_empty() {
             for tab in self.all_tabs_mut() {

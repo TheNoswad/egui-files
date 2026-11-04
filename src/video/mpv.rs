@@ -285,6 +285,8 @@ impl Mpv {
     }
 
     pub fn load_file(&self, path: &Path) -> Result<(), String> {
+        let on_phone = crate::phones::mount_path(path);
+        let path = on_phone.as_deref().unwrap_or(path);
         // mpv takes paths as UTF-8; it would misread "-" or "foo://" as non-files.
         let path = path.to_string_lossy();
         self.command(&["loadfile", &path, "replace"])
