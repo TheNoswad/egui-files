@@ -3460,6 +3460,80 @@ mod tests {
         assert!(disk::metadata(&h.path).is_err(), "not back where it was");
     }
 
+    /// A finger's tap: when it lifts, there's no pointer anymore.
+    fn tap(h: &mut Harness, pos: egui::Pos2) {
+        let button = |pressed| Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        h.frame(vec![Event::PointerMoved(pos), button(true)]);
+        h.frame(vec![button(false), Event::PointerGone]);
+        h.frame(vec![]);
+        h.frame(vec![]);
+    }
+
+    /// Where the first link on the page is, on the screen.
+    fn first_link(h: &Harness) -> egui::Pos2 {
+        let view = &h.tab.md.view;
+        let found = view.layout().items.iter().find_map(|item| match item {
+            markdown::layout::Item::Text(text) => {
+                let (chars, _) = text.links.first()?;
+                let rects = markdown::layout::row_rects(&text.galley, chars);
+                Some(rects[0].center() + text.pos.to_vec2())
+            }
+            _ => None,
+        });
+        found.expect("a link") + view.page_origin.to_vec2()
+    }
+
+    fn with_a_linked_note(name: &str, mode: Mode) -> Harness {
+        let mut h = page(name, "See [the other](other.md) one.\n", "See");
+        disk::write(h.dir.join("other.md"), "# Other\n").unwrap();
+        h.tab.mode = mode;
+        crate::touch::set_touch(&h.ctx, true);
+        for _ in 0..3 {
+            h.frame(vec![]);
+        }
+        h
+    }
+
+    #[test]
+    fn tapping_a_link_while_reading_follows_it() {
+        let mut h = with_a_linked_note("touch-read", Mode::Preview);
+        let link = first_link(&h);
+        tap(&mut h, link);
+        assert!(h.tab.edit.ends_with("other.md"), "{:?}", h.tab.edit);
+    }
+
+    #[test]
+    fn tapping_a_link_while_editing_offers_to_open_it() {
+        let mut h = with_a_linked_note("touch-edit", Mode::Wysiwyg);
+        assert!(
+            h.tab.md.view.open_link_rect.is_none(),
+            "not until it's in a link"
+        );
+        let link = first_link(&h);
+        tap(&mut h, link);
+        assert!(
+            h.tab.edit.ends_with("a.md"),
+            "a tap there is for the cursor"
+        );
+        let open = h.tab.md.view.open_link_rect.expect("the button shows");
+        tap(&mut h, open.center());
+        assert!(h.tab.edit.ends_with("other.md"), "{:?}", h.tab.edit);
+    }
+
+    #[test]
+    fn a_mouse_is_not_offered_the_button() {
+        let mut h = with_a_linked_note("mouse-edit", Mode::Wysiwyg);
+        crate::touch::set_touch(&h.ctx, false);
+        let link = first_link(&h);
+        tap(&mut h, link);
+        assert!(h.tab.md.view.open_link_rect.is_none(), "it has Ctrl");
+    }
+
     #[test]
     fn a_read_only_document_can_only_be_read() {
         let mut h = page("page-read-only", "ab\n", "ab");

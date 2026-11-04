@@ -136,6 +136,8 @@ pub struct MdView {
     dragging_caret: bool,
     /// Where the page's top left was last drawn, on the screen.
     pub page_origin: Pos2,
+    /// Where the button to open the link at the cursor is, if it's showing.
+    pub open_link_rect: Option<Rect>,
 }
 
 /// A picture shown large, over everything.
@@ -434,6 +436,7 @@ impl MdView {
             if clicked_page {
                 ui.memory_mut(|memory| memory.request_focus(caret.focus));
             }
+            clicks.extend(self.open_link_button(ui, id, page_origin, caret, output.inner_rect));
         } else if options.editable && editor.is_none() && !self.lightbox_is_open() {
             clicks.extend(self.double_clicked(ui, output.inner_rect, page_origin));
         }
@@ -509,6 +512,52 @@ impl MdView {
         Some(Click::EditBlock {
             source: self.layout.block_at(on_page.y).cloned(),
             word: self.layout.word_at(on_page),
+        })
+    }
+
+    /// With no Ctrl to hold on a touchscreen, a link the cursor is in gets a
+    /// button to open it, by the cursor.
+    fn open_link_button(
+        &mut self,
+        ui: &Ui,
+        id: Id,
+        origin: Pos2,
+        caret: Caret,
+        viewport: Rect,
+    ) -> Option<Click> {
+        self.open_link_rect = None;
+        if !crate::touch::is_touch(ui.ctx()) || caret.anchor != caret.head {
+            return None;
+        }
+        let source = self.parsed.as_deref()?;
+        let (link, cursor) = self.layout.link_at_offset(source, caret.head)?;
+        let cursor = cursor.translate(origin.to_vec2());
+        let link = link.clone();
+        // Above the cursor, or below when there's no room.
+        let height = crate::touch::TOUCH_SIZE;
+        let above = cursor.min.y - height - 6.0;
+        let y = if above >= viewport.min.y {
+            above
+        } else {
+            cursor.max.y + 6.0
+        };
+        let area = egui::Area::new(id.with("open-link"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(pos2(cursor.min.x.max(viewport.min.x + 4.0), y))
+            .constrain(true)
+            .show(ui.ctx(), |ui| {
+                ui.set_max_width(viewport.width() - 8.0);
+                egui::Frame::popup(ui.style())
+                    .show(ui, |ui| {
+                        let label = format!("{} Open", icon::ARROW_SQUARE_OUT);
+                        ui.button(label).on_hover_text(&link.url).clicked()
+                    })
+                    .inner
+            });
+        self.open_link_rect = Some(area.response.rect);
+        area.inner.then_some(Click::Link {
+            link,
+            new_tab: false,
         })
     }
 
@@ -1042,8 +1091,14 @@ fn paint_text(
     let editing = painting.caret.is_some();
     let command = ui.input(|i| i.modifiers.command);
     // While the page is being edited, a click there puts the cursor there.
-    let hovered_link = response
-        .hover_pos()
+    // When a finger lifts there's no pointer to hover: a tap is where it was.
+    let pointer = response.hover_pos().or_else(|| {
+        response
+            .clicked()
+            .then(|| response.interact_pointer_pos())
+            .flatten()
+    });
+    let hovered_link = pointer
         .filter(|_| !editing || command)
         .and_then(|pointer| text.link_at(pointer - origin.to_vec2()));
     if on_screen {
@@ -1070,7 +1125,8 @@ fn paint_text(
             );
             // A formula is part of the line: it has nothing more to show. And
             // while editing, a click on a picture is a place for the cursor.
-            if ui.rect_contains_pointer(image_rect) && !is_drawing(&key) && !editing {
+            let under = pointer.is_some_and(|pointer| image_rect.contains(pointer));
+            if under && !is_drawing(&key) && !editing {
                 image_under = Some(key);
                 if !image.tip.is_empty() {
                     response.clone().on_hover_text(&image.tip);

@@ -54,7 +54,7 @@
 - [x] Local and remote pictures, SVG included; remote ones behind a setting, by default asked for each document
 - [x] Phase 2, editing aids: formatting commands and shortcuts, lists that continue on Enter and nest on Tab, addresses pasted over text become links, table editing (`table.rs`), outline, word count and reading time, find in the rendered view, pasted and dropped pictures (`assets.rs`), a picture's lightbox
 - [ ] Pasting files and pictures (`system_clipboard.rs`), in the file browser and documents: the whole path only tried on X11, and reading the clipboard on KWin Wayland; check Ctrl+V on Wayland and Windows. Android and the browser can't read it: there, pictures come by dropping or the toolbar's template
-- [ ] Clicking a picture in a rendered document on a touchscreen: the lightbox is only checked with a mouse; pinch-to-zoom in it is untested
+- [ ] Pinch-to-zoom in a picture's lightbox on a touchscreen is untested
 - [x] Phase 3: math (`math.rs`, katex-native) and Mermaid (`diagram.rs`, mermaid-rs-renderer, patched: see `patches/README.md`), drawn as SVGs through the images store (`drawing.rs`)
 - [ ] Formulas that define macros aren't drawn: an argument doubling itself reaches gigabytes in a second, past KaTeX's limit on expansions, and macros can hide nesting that overflows the stack, which can't be caught. To allow them, KaTeX needs limits on what expansions produce and on depth (`math::refusal`)
 - [ ] Automatic equation numbers (`align`, `equation`) start over in each formula; `layout_numbered` can continue them, once a formula's key can depend on those before it
@@ -83,7 +83,8 @@
 - [ ] Check fallback fonts on Windows and Android: only run on Linux and in Firefox so far (Android loads `/system/fonts` itself, as fontdb doesn't)
 - [ ] Bare email addresses aren't linked (`<a@b.c>` is)
 - [ ] Text selection in rendered documents on touchscreens (dragging scrolls there)
-- [ ] Check on a real Android device: links opening through `android::open_url` (compiled, never run), and touch in rendered documents (checked with a mouse in the mobile layout)
+- [ ] Check on a real Android device: web links opening through `android::open_url` (compiled, never run). Tapping links and pictures, broken because a lifted finger leaves no pointer, is fixed and covered by tests with those events
+- [x] Links on a touchscreen while editing the page: a tap puts the cursor there, and a button by it opens the link, as there's no Ctrl
 
 ## Web demo
 

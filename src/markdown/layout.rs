@@ -575,6 +575,23 @@ impl Layout {
         out
     }
 
+    /// The link the cursor at this offset is in, and where the cursor shows.
+    pub fn link_at_offset(&self, source: &str, offset: usize) -> Option<(&Link, Rect)> {
+        let fields = self.placed_fields();
+        let refs: Vec<&Editable> = fields.iter().map(|placed| placed.field).collect();
+        let (index, field) = wysiwyg::field_at(&refs, offset)?;
+        let placed = &fields[index];
+        let char = field.char_at(offset);
+        let in_link = |range: &Range<usize>| {
+            range.contains(&char)
+                || char
+                    .checked_sub(1)
+                    .is_some_and(|last| range.contains(&last))
+        };
+        let (_, link) = placed.text.links.iter().find(|(range, _)| in_link(range))?;
+        Some((link, placed.cursor_rect(source, offset)))
+    }
+
     /// The source offset nearest this point on the page.
     pub fn offset_at_pos(&self, pos: egui::Pos2) -> Option<usize> {
         let fields = self.placed_fields();
