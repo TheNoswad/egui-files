@@ -60,9 +60,10 @@
 Trims and converts with the user's own ffmpeg, so the app ships no codecs (`src/clip/`). Android will use Media3 with the device's codecs instead: no pure Rust stack covers H.264 and H.265 yet, which is most of what phones film.
 
 - [x] Editor tab: timeline with start and end handles, I and O, fast cut from a keyframe or frame-exact, formats, quality, what to keep, exports queued in the jobs bar
-- [ ] Target size: guaranteed under the limit (two-pass, check, retry lower), warning first if it's impossibly small
-- [ ] Resize and frame rate; audio: remove, choose a track, bitrate, audio only
-- [ ] Hardware encoders, as a toggle when one is found
+- [x] Target size: under the limit (two passes where the encoder has them, check, retry lower), refused if it's impossibly small
+- [x] Resize and frame rate; audio: remove, choose a track, bitrate, audio only
+- [x] Hardware encoders, as a toggle when one is found (run here: VAAPI; NVENC and QuickSync only have their arguments tested)
+- [ ] Target size for audio on its own (only the bitrate can be chosen there)
 - [ ] Crop, rotate and flip, speed; GIF and animated WebP
 - [ ] Settings field for ffmpeg's path, and offering to download an LGPL build (no x264 or x265 in those; none for macOS from BtbN)
 - [ ] Windows and macOS: needs the video backend above; the editor stays off there until then

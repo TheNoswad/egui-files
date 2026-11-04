@@ -306,7 +306,11 @@ mod tests {
         let mut settings = SettingsTab::new(6);
         settings.settings = crate::settings::Page::Places;
         new.push_to_first_leaf(DockTab::Settings(settings));
-        new.push_to_first_leaf(DockTab::Clip(ClipTab::new(7, PathBuf::from("/tmp/a.mp4"))));
+        new.push_to_first_leaf(DockTab::Clip(ClipTab::new(
+            7,
+            PathBuf::from("/tmp/a.mp4"),
+            Default::default(),
+        )));
         let saved = ron::ser::to_string(&new).unwrap();
         let loaded: DockState<DockTab> = ron::from_str(&saved).unwrap();
         assert!(

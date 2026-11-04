@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
-        Mutex, TryLockError,
+        Mutex, OnceLock, TryLockError,
         mpsc::{self, RecvTimeoutError},
     },
     time::Duration,
@@ -26,6 +26,29 @@ static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
 
 /// How to say ffmpeg is missing.
 pub const NOT_INSTALLED: &str = "ffmpeg isn't installed. Install it from your package manager or ffmpeg.org, then open this tab again.";
+
+/// Below this a video is only smears: not worth an encode that would take as
+/// long as a good one.
+const MIN_VIDEO_BITRATE: f64 = 30_000.0;
+/// How many encodes at a target size to try before saying it can't be done.
+const MAX_ATTEMPTS: usize = 4;
+/// What's aimed at, of a target size: the rest is for the container, and for
+/// encoders landing a little over.
+const TARGET_MARGIN: f64 = 0.97;
+/// Bits for each pixel of each frame, below which a video looks poor, and at
+/// which it looks fine: enough for a guide, however much codecs differ.
+const POOR_BPP: f64 = 0.02;
+const FINE_BPP: f64 = 0.04;
+
+/// An audio stream of the source.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AudioStream {
+    /// In the whole file, as `-map 0:N` means it.
+    pub index: u64,
+    codec: String,
+    /// What to call it: its language, channels and so on.
+    pub label: String,
+}
 
 /// A subtitle stream of the source.
 #[derive(Clone, Debug, PartialEq)]
@@ -46,13 +69,14 @@ pub struct Source {
     start_time: f64,
     video_index: u64,
     video_codec: String,
+    /// As shown, so a phone's upright video is taller than it's wide.
     width: u32,
     height: u32,
     fps: f64,
     color_primaries: Option<String>,
     color_transfer: Option<String>,
     color_space: Option<String>,
-    audio_codecs: Vec<String>,
+    pub audio: Vec<AudioStream>,
     subtitles: Vec<Subtitle>,
     chapters: usize,
     /// Tags saying where it was filmed.
@@ -74,6 +98,15 @@ impl Source {
     pub fn has_subtitles_or_chapters(&self) -> bool {
         !self.subtitles.is_empty() || self.chapters > 0
     }
+
+    /// The shorter of its sides, which "1080p" means either way up.
+    pub fn short_side(&self) -> u32 {
+        self.width.min(self.height)
+    }
+
+    pub fn fps(&self) -> f64 {
+        self.fps
+    }
 }
 
 /// What this ffmpeg can do.
@@ -82,6 +115,16 @@ pub struct Tools {
     encoders: HashSet<String>,
     /// The filter converting HDR to SDR needs; only some builds have it.
     zscale: bool,
+    /// Hardware encoders that made a video here just now. ffmpeg lists all it
+    /// was built with, whatever the computer has.
+    hardware: Vec<Hardware>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Hardware {
+    encoder: String,
+    /// The GPU's device, for VAAPI.
+    device: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,6 +149,20 @@ impl Codec {
             .copied()
     }
 
+    /// A hardware encoder for this that works here.
+    fn hardware(self, tools: &Tools) -> Option<&Hardware> {
+        let prefix = match self {
+            Self::H264 => "h264_",
+            Self::Hevc => "hevc_",
+            Self::Av1 => "av1_",
+            Self::Vp9 => return None,
+        };
+        tools
+            .hardware
+            .iter()
+            .find(|hardware| hardware.encoder.starts_with(prefix))
+    }
+
     fn of_source(name: &str) -> Option<Self> {
         match name {
             "h264" => Some(Self::H264),
@@ -128,10 +185,15 @@ pub enum Format {
     WebmVp9,
     WebmAv1,
     MkvH264,
+    Mp3,
+    M4a,
+    Opus,
+    Flac,
+    Wav,
 }
 
 impl Format {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 12] = [
         Self::Original,
         Self::Mp4H264,
         Self::Mp4Hevc,
@@ -139,6 +201,11 @@ impl Format {
         Self::WebmVp9,
         Self::WebmAv1,
         Self::MkvH264,
+        Self::Mp3,
+        Self::M4a,
+        Self::Opus,
+        Self::Flac,
+        Self::Wav,
     ];
 
     pub fn label(self) -> &'static str {
@@ -150,6 +217,11 @@ impl Format {
             Self::WebmVp9 => "WebM (VP9)",
             Self::WebmAv1 => "WebM (AV1)",
             Self::MkvH264 => "MKV (H.264)",
+            Self::Mp3 => "MP3",
+            Self::M4a => "M4A (AAC)",
+            Self::Opus => "Opus",
+            Self::Flac => "FLAC (lossless)",
+            Self::Wav => "WAV (lossless)",
         }
     }
 
@@ -162,13 +234,44 @@ impl Format {
             Self::WebmVp9 => Some(("webm", Codec::Vp9)),
             Self::WebmAv1 => Some(("webm", Codec::Av1)),
             Self::MkvH264 => Some(("mkv", Codec::H264)),
+            Self::Mp3 | Self::M4a | Self::Opus | Self::Flac | Self::Wav => None,
         }
+    }
+
+    /// For audio on its own: the extension, the encoder and, if it has one,
+    /// the usual bitrate in kbit/s.
+    fn audio_only(self) -> Option<(&'static str, &'static str, Option<u32>)> {
+        match self {
+            Self::Mp3 => Some(("mp3", "libmp3lame", Some(192))),
+            Self::M4a => Some(("m4a", "aac", Some(192))),
+            Self::Opus => Some(("opus", "libopus", Some(128))),
+            Self::Flac => Some(("flac", "flac", None)),
+            Self::Wav => Some(("wav", "pcm_s16le", None)),
+            _ => None,
+        }
+    }
+
+    pub fn is_audio_only(self) -> bool {
+        self.audio_only().is_some()
+    }
+
+    /// Whether it has a bitrate to choose.
+    pub fn is_lossless(self) -> bool {
+        matches!(self, Self::Flac | Self::Wav)
     }
 
     /// Whether this ffmpeg can make it.
     pub fn available(self, tools: &Tools) -> bool {
+        if let Some((_, encoder, _)) = self.audio_only() {
+            return tools.encoders.contains(encoder);
+        }
         self.target()
             .is_none_or(|(_, codec)| codec.encoder(tools).is_some())
+    }
+
+    /// The codec it encodes video in, if that's known before seeing a source.
+    fn codec(self) -> Option<Codec> {
+        self.target().map(|(_, codec)| codec)
     }
 }
 
@@ -221,31 +324,210 @@ impl Default for Keep {
     }
 }
 
+/// Which audio to keep.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AudioChoice {
+    #[default]
+    All,
+    None,
+    /// The stream with this index in the file.
+    One(u64),
+}
+
 /// What the editor asks for.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+// Tabs saved before a setting existed get its default.
+#[serde(default)]
 pub struct Settings {
     pub format: Format,
     pub quality: Quality,
     /// Re-encode to cut on the exact frame, rather than copy from a keyframe.
     pub exact: bool,
     pub keep: Keep,
+    /// Aim for a file size rather than a quality.
+    pub use_target: bool,
+    /// In millions of bytes, so a limit in either kind of megabyte is met.
+    pub target_mb: f64,
+    /// The shorter side to shrink to, in pixels.
+    pub resolution: Option<u32>,
+    /// The frame rate to lower it to.
+    pub fps: Option<u32>,
+    pub audio: AudioChoice,
+    /// `None` keeps it as it is where it can be, and picks otherwise.
+    pub audio_kbps: Option<u32>,
+    /// Encode on the GPU, where there's an encoder for it.
+    pub hardware: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            format: Format::default(),
+            quality: Quality::default(),
+            exact: false,
+            keep: Keep::default(),
+            use_target: false,
+            target_mb: 25.0,
+            resolution: None,
+            fps: None,
+            audio: AudioChoice::default(),
+            audio_kbps: None,
+            hardware: false,
+        }
+    }
+}
+
+/// How an encode at a target size spends it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Fit {
+    pub video_bps: f64,
+    pub audio_kbps: u32,
+    /// Bits for each pixel of each frame.
+    bpp: f64,
+}
+
+impl Fit {
+    pub fn looks_poor(&self) -> bool {
+        self.bpp < POOR_BPP
+    }
 }
 
 impl Settings {
-    /// Whether the streams can be copied as they are.
+    /// What a new tab starts from, after an export with these. Choices that
+    /// leave something out of the file, or put it in, are made for each video.
+    pub fn for_new_tab(mut self) -> Self {
+        let fresh = Self::default();
+        self.keep = fresh.keep;
+        self.audio = fresh.audio;
+        self.exact = fresh.exact;
+        self
+    }
+
+    /// Whether the video can be copied as it is.
     pub fn copies(&self, source: &Source) -> bool {
-        self.format == Format::Original && !self.exact && (!source.is_hdr() || self.keep.hdr)
+        self.format == Format::Original
+            && !self.exact
+            && (!source.is_hdr() || self.keep.hdr)
+            && !self.use_target
+            && self.scale_to(source).is_none()
+            && self.fps_to(source).is_none()
+    }
+
+    /// Whether a hardware encoder could do this.
+    pub fn hardware_available(&self, source: &Source, tools: &Tools, original: &str) -> bool {
+        let codec = self
+            .container(source, original)
+            .ok()
+            .and_then(|(_, codec)| codec);
+        codec.is_some_and(|codec| codec.hardware(tools).is_some())
+    }
+
+    /// Whether something other than the exact cut makes it re-encode, so
+    /// that it cuts on the frame anyway.
+    pub fn encodes_anyway(&self, source: &Source) -> bool {
+        !Self {
+            exact: false,
+            ..*self
+        }
+        .copies(source)
+    }
+
+    /// The size to aim under, in bytes.
+    pub fn target_bytes(&self) -> Option<f64> {
+        (self.use_target && !self.format.is_audio_only()).then_some(self.target_mb * 1e6)
+    }
+
+    /// The shorter side to shrink to: never larger than it is.
+    fn scale_to(&self, source: &Source) -> Option<u32> {
+        self.resolution
+            .filter(|side| !self.format.is_audio_only() && *side < source.short_side())
+    }
+
+    /// The frame rate to lower to: never higher than it is.
+    fn fps_to(&self, source: &Source) -> Option<u32> {
+        self.fps
+            .filter(|fps| !self.format.is_audio_only() && f64::from(*fps) < source.fps - 0.5)
+    }
+
+    /// The pixels of each frame it comes out with, and its frames each second.
+    fn output_rate(&self, source: &Source) -> (f64, f64) {
+        let (width, height) = (f64::from(source.width), f64::from(source.height));
+        let scale = self
+            .scale_to(source)
+            .map_or(1.0, |side| f64::from(side) / f64::from(source.short_side()));
+        let fps = self.fps_to(source).map_or(source.fps, f64::from);
+        (width * height * scale * scale, fps)
+    }
+
+    /// The audio streams that go in.
+    fn audio_streams<'a>(&self, source: &'a Source) -> Vec<&'a AudioStream> {
+        let first = source.audio.iter().take(1);
+        match self.audio {
+            // A file of audio has room for one, and always has it.
+            AudioChoice::All | AudioChoice::None if self.format.is_audio_only() => first.collect(),
+            AudioChoice::All => source.audio.iter().collect(),
+            AudioChoice::None => Vec::new(),
+            AudioChoice::One(index) => source.audio.iter().filter(|a| a.index == index).collect(),
+        }
+    }
+
+    /// How `length` seconds fit the target size; an error says if they can't.
+    pub fn fit(&self, source: &Source, length: f64) -> Result<Fit, String> {
+        let bytes = self.target_bytes().unwrap_or(0.0);
+        let length = length.max(0.001);
+        let budget = bytes * 8.0 * TARGET_MARGIN / length;
+        let tracks = self.audio_streams(source).len() as f64;
+        // The audio gets a little of what there is, within what still sounds
+        // right: at a target size, its original could be most of the file.
+        let audio_kbps = self.audio_kbps.unwrap_or_else(|| {
+            let share = budget * 0.15 / tracks.max(1.0) / 1000.0;
+            share.clamp(48.0, 128.0) as u32
+        });
+        let audio_bps = f64::from(audio_kbps) * 1000.0 * tracks;
+        let video_bps = budget - audio_bps;
+        if video_bps < MIN_VIDEO_BITRATE {
+            let needed = (MIN_VIDEO_BITRATE + audio_bps) * length / 8.0 / TARGET_MARGIN / 1e6;
+            return Err(format!(
+                "{} MB is too small for this much video. It needs at least {:.1} MB, or less audio.",
+                self.target_mb, needed
+            ));
+        }
+        let (pixels, fps) = self.output_rate(source);
+        Ok(Fit {
+            video_bps,
+            audio_kbps,
+            bpp: video_bps / (pixels * fps).max(1.0),
+        })
+    }
+
+    /// A shorter side to shrink to, if at this target size it would look fine.
+    pub fn suggested_resolution(&self, source: &Source, fit: &Fit) -> Option<u32> {
+        let (pixels, fps) = self.output_rate(source);
+        let side = f64::from(self.scale_to(source).unwrap_or(source.short_side()));
+        // Pixels go by the square of the side.
+        let fine = side * (fit.video_bps / (pixels * fps).max(1.0) / FINE_BPP).sqrt();
+        super::tab::RESOLUTIONS
+            .iter()
+            .copied()
+            .find(|preset| f64::from(*preset) <= fine && f64::from(*preset) < side)
     }
 
     /// The output's extension, for a source with the extension `original`.
     pub fn extension(&self, source: &Source, original: &str) -> Result<String, String> {
-        Ok(self.target(source, original)?.0)
+        Ok(self.container(source, original)?.0)
     }
 
     /// The container and, when re-encoding, the codec. An original that can't
     /// be made again as it is (mpeg4 in an .avi, say) becomes H.264 in an MP4.
-    fn target(&self, source: &Source, original: &str) -> Result<(String, Option<Codec>), String> {
+    fn container(
+        &self,
+        source: &Source,
+        original: &str,
+    ) -> Result<(String, Option<Codec>), String> {
         let original = original.to_ascii_lowercase();
+        if let Some((extension, _, _)) = self.format.audio_only() {
+            return Ok((extension.to_owned(), None));
+        }
         if self.copies(source) {
             return Ok((original, None));
         }
@@ -310,16 +592,23 @@ fn output(command: &mut Command) -> Result<String, String> {
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     } else {
-        Err(last_line(&String::from_utf8_lossy(&output.stderr)))
+        Err(first_error(&String::from_utf8_lossy(&output.stderr)))
     }
 }
 
-fn last_line(text: &str) -> String {
-    text.lines()
-        .rev()
+/// What went wrong, from ffmpeg's errors: the first says why, and the ones
+/// after only what that led to. Without the `[h264_vaapi @ 0x55…]` it may start
+/// with.
+fn first_error(text: &str) -> String {
+    let line = text
+        .lines()
         .map(str::trim)
         .find(|line| !line.is_empty())
-        .unwrap_or("ffmpeg failed")
+        .unwrap_or("ffmpeg failed");
+    line.strip_prefix('[')
+        .and_then(|rest| rest.split_once("] "))
+        .filter(|(tag, _)| tag.contains(" @ "))
+        .map_or(line, |(_, message)| message)
         .to_owned()
 }
 
@@ -333,9 +622,88 @@ pub fn tools() -> Result<Tools, String> {
     let encoders = output(command("ffmpeg").args(["-hide_banner", "-encoders"]))?;
     let filters = output(command("ffmpeg").args(["-hide_banner", "-filters"]))?;
     Ok(Tools {
+        hardware: working_hardware(&parse_names(&encoders)),
         encoders: parse_names(&encoders),
         zscale: parse_names(&filters).contains("zscale"),
     })
+}
+
+/// The hardware encoders that work here. They're tried once for the whole run
+/// of the app, as each takes a moment.
+fn working_hardware(encoders: &HashSet<String>) -> Vec<Hardware> {
+    static WORKING: OnceLock<Vec<Hardware>> = OnceLock::new();
+    WORKING
+        .get_or_init(|| {
+            let mut working = Vec::new();
+            for codec in ["h264", "hevc", "av1"] {
+                for kind in ["nvenc", "qsv", "vaapi"] {
+                    let encoder = format!("{codec}_{kind}");
+                    if !encoders.contains(&encoder) {
+                        continue;
+                    }
+                    let devices = if kind == "vaapi" {
+                        render_nodes().into_iter().map(Some).collect()
+                    } else {
+                        vec![None]
+                    };
+                    let found = devices
+                        .into_iter()
+                        .map(|device| Hardware {
+                            encoder: encoder.clone(),
+                            device,
+                        })
+                        .find(hardware_works);
+                    working.extend(found);
+                }
+            }
+            working
+        })
+        .clone()
+}
+
+/// The GPUs VAAPI can use.
+fn render_nodes() -> Vec<String> {
+    let Ok(entries) = disk::read_dir("/dev/dri") else {
+        return Vec::new();
+    };
+    let mut nodes: Vec<String> = entries
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("renderD"))
+        .map(|name| format!("/dev/dri/{name}"))
+        .collect();
+    nodes.sort();
+    nodes
+}
+
+/// Encodes a moment of black, giving up on a driver that hangs.
+fn hardware_works(hardware: &Hardware) -> bool {
+    let mut ffmpeg = command("ffmpeg");
+    ffmpeg.args(["-hide_banner", "-v", "quiet", "-nostdin"]);
+    if let Some(device) = &hardware.device {
+        ffmpeg.args(["-vaapi_device", device]);
+    }
+    ffmpeg.args(["-f", "lavfi", "-i", "color=black:s=1280x720:d=0.2:r=30"]);
+    if hardware.device.is_some() {
+        ffmpeg.args(["-vf", "format=nv12,hwupload"]);
+    }
+    ffmpeg
+        .args(["-c:v", &hardware.encoder, "-f", "null", "-"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let Ok(mut child) = ffmpeg.spawn() else {
+        return false;
+    };
+    for _ in 0..100 {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+            Err(_) => break,
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    false
 }
 
 /// The second column of `ffmpeg -encoders` and `-filters`, after their headers.
@@ -410,8 +778,11 @@ fn parse_probe(text: &str) -> Result<Source, String> {
                 source.video_index = index;
                 source.video_codec = codec;
                 let side = |key| stream.get(key).and_then(Value::as_u64).unwrap_or(0) as u32;
-                source.width = side("width");
-                source.height = side("height");
+                let (width, height) = (side("width"), side("height"));
+                // Phones film sideways and say which way up it goes.
+                let turned = rotation(stream).rem_euclid(180) == 90;
+                source.width = if turned { height } else { width };
+                source.height = if turned { width } else { height };
                 source.fps = stream
                     .get("avg_frame_rate")
                     .and_then(Value::as_str)
@@ -421,7 +792,14 @@ fn parse_probe(text: &str) -> Result<Source, String> {
                 source.color_transfer = text_of(stream, "color_transfer");
                 source.color_space = text_of(stream, "color_space");
             }
-            Some("audio") => source.audio_codecs.push(codec),
+            Some("audio") => {
+                let label = audio_label(stream, &codec, source.audio.len() + 1);
+                source.audio.push(AudioStream {
+                    index,
+                    codec,
+                    label,
+                });
+            }
             Some("subtitle") => source.subtitles.push(Subtitle { index, codec }),
             _ => {}
         }
@@ -440,6 +818,34 @@ fn is_cover(stream: &Value) -> bool {
         .pointer("/disposition/attached_pic")
         .and_then(Value::as_i64)
         == Some(1)
+}
+
+/// The degrees a video is turned when shown.
+fn rotation(stream: &Value) -> i64 {
+    stream
+        .get("side_data_list")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find_map(|data| data.get("rotation").and_then(Value::as_i64))
+        .unwrap_or(0)
+}
+
+/// What to call an audio stream, among those of a file.
+fn audio_label(stream: &Value, codec: &str, number: usize) -> String {
+    let tag = |key| stream.pointer(key).and_then(Value::as_str);
+    let mut parts = vec![format!("Track {number}")];
+    parts.extend(tag("/tags/title").map(str::to_owned));
+    parts.extend(
+        tag("/tags/language")
+            .filter(|l| *l != "und")
+            .map(str::to_owned),
+    );
+    parts.push(codec.to_owned());
+    if let Some(channels) = stream.get("channels").and_then(Value::as_u64) {
+        parts.push(format!("{channels} ch"));
+    }
+    parts.join(", ")
 }
 
 /// `location`, `location-eng`, `com.apple.quicktime.location.ISO6709`…
@@ -529,54 +935,132 @@ fn is_mov(extension: &str) -> bool {
     matches!(extension, "mp4" | "m4v" | "mov")
 }
 
+/// What one run of ffmpeg is for.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Encode {
+    /// For a target size: the video's bits a second, and the audio's kbit/s.
+    rate: Option<(f64, u32)>,
+    pass: Pass,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Pass {
+    #[default]
+    Only,
+    /// Reads the video to see where the bits are best spent.
+    First,
+    Second,
+}
+
+/// Whether ffmpeg can run this encoder twice.
+fn has_two_passes(encoder: &str) -> bool {
+    matches!(encoder, "libx264" | "libx265" | "libvpx-vp9" | "libaom-av1")
+}
+
+/// The encoder a job uses for `codec`.
+fn encoder_for(job: &ClipJob, codec: Codec) -> Result<Hardware, String> {
+    if job.settings.hardware
+        && let Some(hardware) = codec.hardware(&job.tools)
+    {
+        return Ok(hardware.clone());
+    }
+    let encoder = codec
+        .encoder(&job.tools)
+        .ok_or_else(|| format!("This ffmpeg has no encoder for {codec:?}."))?;
+    Ok(Hardware {
+        encoder: encoder.to_owned(),
+        device: None,
+    })
+}
+
 /// ffmpeg's arguments to encode the video.
 fn video_args(
+    encoder: &str,
     codec: Codec,
     extension: &str,
     job: &ClipJob,
     tone_map: bool,
-) -> Result<Vec<String>, String> {
+    encode: Encode,
+) -> Vec<String> {
     let quality = job.settings.quality;
-    let encoder = codec
-        .encoder(&job.tools)
-        .ok_or_else(|| format!("This ffmpeg has no encoder for {codec:?}."))?;
     let mut args: Vec<String> = vec!["-c:v".into(), encoder.into()];
     let mut add = |more: &[&str]| args.extend(more.iter().map(|&arg| arg.to_owned()));
     let crf =
         |high: u32, balanced: u32, small: u32| quality.pick(high, balanced, small).to_string();
+    let rate = encode.rate.map(|(video, _)| (video as u64).to_string());
+    // For encoders that keep to a bitrate only if told how closely.
+    let cap = encode
+        .rate
+        .map(|(video, _)| ((video * 1.5) as u64).to_string());
     match encoder {
-        "libx264" => add(&["-preset", "medium", "-crf", &crf(18, 23, 28)]),
-        "libx265" => add(&["-preset", "medium", "-crf", &crf(20, 26, 31)]),
-        "libsvtav1" => add(&["-preset", "8", "-crf", &crf(24, 32, 42)]),
-        "libaom-av1" => add(&[
-            "-cpu-used",
-            "6",
-            "-row-mt",
-            "1",
-            "-crf",
-            &crf(24, 32, 42),
-            "-b:v",
-            "0",
-        ]),
-        "libvpx-vp9" => add(&[
-            "-deadline",
-            "good",
-            "-cpu-used",
-            "3",
-            "-row-mt",
-            "1",
-            "-crf",
-            &crf(24, 32, 40),
-            "-b:v",
-            "0",
-        ]),
-        // OpenH264 is the one H.264 encoder LGPL builds have, and takes only
-        // a bitrate: so many bits for each pixel of each frame.
-        _ => {
-            let source = &job.source;
-            let pixels = f64::from(source.width) * f64::from(source.height) * source.fps;
-            let bitrate = (pixels * quality.pick(0.15, 0.08, 0.04)) as u64;
-            add(&["-b:v", &bitrate.to_string()]);
+        "libx264" => {
+            add(&["-preset", "medium"]);
+            match &rate {
+                Some(rate) => add(&["-b:v", rate]),
+                None => add(&["-crf", &crf(18, 23, 28)]),
+            }
+        }
+        "libx265" => {
+            add(&["-preset", "medium"]);
+            match &rate {
+                Some(rate) => add(&["-b:v", rate]),
+                None => add(&["-crf", &crf(20, 26, 31)]),
+            }
+            // x265 takes its passes this way, and writes to the terminal.
+            let params = match encode.pass {
+                Pass::Only => "log-level=error".to_owned(),
+                Pass::First => format!("log-level=error:pass=1:stats={STATS}.log"),
+                Pass::Second => format!("log-level=error:pass=2:stats={STATS}.log"),
+            };
+            add(&["-x265-params", &params]);
+        }
+        "libsvtav1" => {
+            add(&["-preset", "8"]);
+            match &rate {
+                Some(rate) => add(&["-b:v", rate]),
+                None => add(&["-crf", &crf(24, 32, 42)]),
+            }
+        }
+        "libaom-av1" => {
+            add(&["-cpu-used", "6", "-row-mt", "1"]);
+            match &rate {
+                Some(rate) => add(&["-b:v", rate]),
+                None => add(&["-crf", &crf(24, 32, 42), "-b:v", "0"]),
+            }
+        }
+        "libvpx-vp9" => {
+            add(&["-deadline", "good", "-cpu-used", "3", "-row-mt", "1"]);
+            match &rate {
+                Some(rate) => add(&["-b:v", rate]),
+                None => add(&["-crf", &crf(24, 32, 40), "-b:v", "0"]),
+            }
+        }
+        "libopenh264" => {
+            // OpenH264 is the one H.264 encoder LGPL builds have, and takes
+            // only a bitrate: so many bits for each pixel of each frame.
+            let (pixels, fps) = job.settings.output_rate(&job.source);
+            let bitrate = (pixels * fps * quality.pick(0.15, 0.08, 0.04)) as u64;
+            add(&["-b:v", rate.as_deref().unwrap_or(&bitrate.to_string())]);
+        }
+        hardware => match (&rate, &cap) {
+            (Some(rate), Some(cap)) => {
+                add(&["-b:v", rate, "-maxrate", cap]);
+                if hardware.ends_with("_vaapi") {
+                    add(&["-rc_mode", "VBR"]);
+                }
+            }
+            _ if hardware.ends_with("_nvenc") => add(&["-rc", "vbr", "-cq", &crf(19, 25, 31)]),
+            _ if hardware.ends_with("_vaapi") => {
+                add(&["-rc_mode", "CQP", "-global_quality", &crf(19, 25, 31)]);
+            }
+            _ => add(&["-global_quality", &crf(19, 25, 31)]),
+        },
+    }
+    if encoder != "libx265" && has_two_passes(encoder) {
+        match encode.pass {
+            Pass::Only => {}
+            Pass::First => add(&["-pass", "1", "-passlogfile", STATS]),
+            Pass::Second => add(&["-pass", "2", "-passlogfile", STATS]),
         }
     }
     if codec == Codec::Hevc && is_mov(extension) {
@@ -584,8 +1068,22 @@ fn video_args(
         add(&["-tag:v", "hvc1"]);
     }
     let source = &job.source;
-    if source.is_hdr() && !tone_map {
-        add(&["-pix_fmt", "yuv420p10le"]);
+    let ten_bit = source.is_hdr() && !tone_map;
+    // VAAPI has its pictures in the GPU by now, as the filters left them.
+    if !encoder.ends_with("_vaapi") {
+        let hardware = !encoder.starts_with("lib");
+        add(&[
+            "-pix_fmt",
+            match (ten_bit, hardware) {
+                (true, true) => "p010le",
+                (true, false) => "yuv420p10le",
+                (false, true) => "nv12",
+                // What every player can show.
+                (false, false) => "yuv420p",
+            },
+        ]);
+    }
+    if ten_bit {
         for (flag, value) in [
             ("-color_primaries", &source.color_primaries),
             ("-color_trc", &source.color_transfer),
@@ -595,11 +1093,40 @@ fn video_args(
                 add(&[flag, value]);
             }
         }
-    } else {
-        // What every player can show.
-        add(&["-pix_fmt", "yuv420p"]);
     }
-    Ok(args)
+    args
+}
+
+/// The name a two-pass encode's notes go by, in a folder of their own.
+const STATS: &str = "pass";
+
+/// The filters a re-encode runs the video through.
+fn video_filters(job: &ClipJob, tone_map: bool, ten_bit: bool, vaapi: bool) -> Option<String> {
+    let ClipJob {
+        source, settings, ..
+    } = job;
+    let mut filters: Vec<String> = Vec::new();
+    if tone_map {
+        filters.push(TONE_MAP.to_owned());
+    }
+    if let Some(side) = settings.scale_to(source) {
+        filters.push(if source.width >= source.height {
+            format!("scale=-2:{side}:flags=lanczos")
+        } else {
+            format!("scale={side}:-2:flags=lanczos")
+        });
+    }
+    if let Some(fps) = settings.fps_to(source) {
+        filters.push(format!("fps={fps}"));
+    }
+    if vaapi {
+        // Last, as the others work on pictures in memory.
+        filters.push(format!(
+            "format={},hwupload",
+            if ten_bit { "p010" } else { "nv12" }
+        ));
+    }
+    (!filters.is_empty()).then(|| filters.join(","))
 }
 
 /// Converts HDR to SDR.
@@ -618,18 +1145,29 @@ fn copy_margin(extension: &str) -> f64 {
 
 /// ffmpeg's arguments for a job, given where it writes. A copy's `start` is
 /// the keyframe it starts on by now.
-fn plan(job: &ClipJob, extension: &str, output: &Path) -> Result<Vec<OsString>, String> {
+fn plan(
+    job: &ClipJob,
+    extension: &str,
+    output: &Path,
+    encode: Encode,
+) -> Result<Vec<OsString>, String> {
     let ClipJob {
         source, settings, ..
     } = job;
-    let (_, codec) = settings.target(source, extension)?;
+    let (_, codec) = settings.container(source, extension)?;
+    let audio_only = settings.format.audio_only();
     let keep = settings.keep;
+    let hardware = codec.map(|codec| encoder_for(job, codec)).transpose()?;
     let mut args: Vec<OsString> = Vec::new();
     let mut add = |more: &[&str]| args.extend(more.iter().map(OsString::from));
     add(&["-hide_banner", "-v", "error", "-nostdin", "-nostats", "-n"]);
     add(&["-progress", "pipe:1"]);
+    if let Some(device) = hardware.as_ref().and_then(|h| h.device.as_deref()) {
+        add(&["-vaapi_device", device]);
+    }
+    let copying_video = codec.is_none() && audio_only.is_none();
     let seek = job.start
-        + if settings.copies(source) {
+        + if copying_video {
             copy_margin(extension)
         } else {
             0.0
@@ -644,13 +1182,22 @@ fn plan(job: &ClipJob, extension: &str, output: &Path) -> Result<Vec<OsString>, 
     args.push(reachable(&job.input).into());
     let mut add = |more: &[&str]| args.extend(more.iter().map(OsString::from));
 
-    add(&["-map", &format!("0:{}", source.video_index), "-map", "0:a?"]);
-    let copying = codec.is_none();
+    let streams = settings.audio_streams(source);
+    if audio_only.is_none() {
+        add(&["-map", &format!("0:{}", source.video_index)]);
+    } else if streams.is_empty() {
+        return Err("This video has no audio.".to_owned());
+    }
+    if encode.pass != Pass::First {
+        for stream in &streams {
+            add(&["-map", &format!("0:{}", stream.index)]);
+        }
+    }
     let mut subtitle_args = Vec::new();
-    if keep.subtitles {
+    if keep.subtitles && audio_only.is_none() && encode.pass != Pass::First {
         let mut mapped = 0;
         for subtitle in &source.subtitles {
-            let encoder = if copying {
+            let encoder = if copying_video {
                 Some("copy")
             } else {
                 subtitle_encoder(extension, &subtitle.codec)
@@ -667,30 +1214,55 @@ fn plan(job: &ClipJob, extension: &str, output: &Path) -> Result<Vec<OsString>, 
     let subtitle_args: Vec<&str> = subtitle_args.iter().map(String::as_str).collect();
     add(&subtitle_args);
 
-    if let Some(codec) = codec {
+    if let (Some(codec), Some(hardware)) = (codec, &hardware) {
         // H.264 here is 8-bit, which can't hold HDR.
         let tone_map = source.is_hdr() && (!keep.hdr || codec == Codec::H264);
-        if tone_map {
-            if !job.tools.zscale {
-                return Err(
-                    "Converting HDR to SDR needs an ffmpeg with zimg. Keep HDR, in a format that can, or install another build."
-                        .to_owned(),
-                );
-            }
-            add(&["-vf", TONE_MAP]);
+        if tone_map && !job.tools.zscale {
+            return Err(
+                "Converting HDR to SDR needs an ffmpeg with zimg. Keep HDR, in a format that can, or install another build."
+                    .to_owned(),
+            );
         }
-        let video = video_args(codec, extension, job, tone_map)?;
+        let ten_bit = source.is_hdr() && !tone_map;
+        let vaapi = hardware.device.is_some();
+        if let Some(filters) = video_filters(job, tone_map, ten_bit, vaapi) {
+            add(&["-vf", &filters]);
+        }
+        let video = video_args(&hardware.encoder, codec, extension, job, tone_map, encode);
         let video: Vec<&str> = video.iter().map(String::as_str).collect();
         add(&video);
-        if source.audio_codecs.iter().all(|c| audio_fits(extension, c)) {
-            add(&["-c:a", "copy"]);
-        } else if extension == "webm" {
-            add(&["-c:a", "libopus", "-b:a", "160k"]);
-        } else {
-            add(&["-c:a", "aac", "-b:a", "192k"]);
+    } else if copying_video {
+        add(&["-c:v", "copy"]);
+    }
+
+    if encode.pass == Pass::First {
+        // Only the notes are wanted of this one.
+        add(&["-an", "-sn", "-f", "null"]);
+        args.push("-".into());
+        return Ok(args);
+    }
+
+    let kbps = encode.rate.map(|(_, audio)| audio).or(settings.audio_kbps);
+    if let Some((_, encoder, usual)) = audio_only {
+        add(&["-vn", "-c:a", encoder]);
+        if let Some(kbps) = usual.and(settings.audio_kbps).or(usual) {
+            add(&["-b:a", &format!("{kbps}k")]);
         }
+    } else if streams.is_empty() {
+        add(&["-an"]);
+    } else if let Some(kbps) = kbps {
+        let encoder = if extension == "webm" {
+            "libopus"
+        } else {
+            "aac"
+        };
+        add(&["-c:a", encoder, "-b:a", &format!("{kbps}k")]);
+    } else if copying_video || streams.iter().all(|a| audio_fits(extension, &a.codec)) {
+        add(&["-c:a", "copy"]);
+    } else if extension == "webm" {
+        add(&["-c:a", "libopus", "-b:a", "160k"]);
     } else {
-        add(&["-c:v", "copy", "-c:a", "copy"]);
+        add(&["-c:a", "aac", "-b:a", "192k"]);
     }
 
     add(&["-map_chapters", if keep.subtitles { "0" } else { "-1" }]);
@@ -767,12 +1339,22 @@ fn run(mut job: ClipJob, p: &Progress) -> Result<(), (PathBuf, String)> {
     if job.settings.copies(&job.source) {
         job.start = keyframe_before(&job.input, &job.source, job.start).map_err(fail)?;
     }
-    p.set_time_total(job.end - job.start);
+    let length = job.end - job.start;
+    p.set_time_total(length);
 
     let dir = reachable(&job.dir);
     let temporary = unique_path(&dir, OsStr::new(&format!(".{}.part.{extension}", job.name)));
-    let args = plan(&job, &extension, &temporary).map_err(fail)?;
-    let result = encode(&args, p);
+    let result = make(&job, &extension, &temporary, length, p).map_err(|err| {
+        if job.settings.hardware
+            && job
+                .settings
+                .hardware_available(&job.source, &job.tools, &original)
+        {
+            format!("{err} Try without the hardware encoder.")
+        } else {
+            err
+        }
+    });
     let result = result.and_then(|()| {
         if p.cancelled() {
             return Ok(None);
@@ -801,10 +1383,126 @@ fn run(mut job: ClipJob, p: &Progress) -> Result<(), (PathBuf, String)> {
     }
 }
 
-/// Runs ffmpeg with `args`, showing its progress, until it ends or the job is
-/// cancelled.
-fn encode(args: &[OsString], p: &Progress) -> Result<(), String> {
-    let mut child = command("ffmpeg")
+/// Writes the output to `temporary`: at a target size, as many times as it
+/// takes to fit.
+fn make(
+    job: &ClipJob,
+    extension: &str,
+    temporary: &Path,
+    length: f64,
+    p: &Progress,
+) -> Result<(), String> {
+    let Some(limit) = job.settings.target_bytes() else {
+        let args = plan(job, extension, temporary, Encode::default())?;
+        return encode(&args, None, 0.0, p);
+    };
+    let fit = job.settings.fit(&job.source, length)?;
+    let codec = job.settings.format.codec().or_else(|| {
+        let (_, codec) = job.settings.container(&job.source, extension).ok()?;
+        codec
+    });
+    let encoder = match codec {
+        Some(codec) => encoder_for(job, codec)?.encoder,
+        None => return Err("Can't aim for a size without encoding.".to_owned()),
+    };
+    let mut video_bps = fit.video_bps;
+    let rate = |video_bps| Some((video_bps, fit.audio_kbps));
+    let two_passes = has_two_passes(&encoder);
+    let notes = if two_passes {
+        Some(Notes::new().map_err(|err| format!("Can't make a temporary folder: {err}"))?)
+    } else {
+        None
+    };
+    let cwd = notes.as_ref().map(|notes| notes.dir.as_path());
+    let mut base = 0.0;
+    if two_passes {
+        p.set_time_total(length * 2.0);
+        p.set_status(&format!("{}: reading the video", job.name));
+        let first = Encode {
+            rate: rate(video_bps),
+            pass: Pass::First,
+        };
+        encode(&plan(job, extension, temporary, first)?, cwd, 0.0, p)?;
+        base = length;
+    }
+    let pass = if two_passes { Pass::Second } else { Pass::Only };
+    for attempt in 0..MAX_ATTEMPTS {
+        if p.cancelled() {
+            return Ok(());
+        }
+        // ffmpeg won't write over a try that came out too big.
+        let _ = disk::remove_file(temporary);
+        p.set_status(&if attempt == 0 {
+            format!("{}: encoding", job.name)
+        } else {
+            format!("{}: was too big, encoding smaller", job.name)
+        });
+        let this = Encode {
+            rate: rate(video_bps),
+            pass,
+        };
+        encode(&plan(job, extension, temporary, this)?, cwd, base, p)?;
+        if p.cancelled() {
+            return Ok(());
+        }
+        let size = disk::metadata(temporary)
+            .map_err(|err| err.to_string())?
+            .len() as f64;
+        if size <= limit {
+            return Ok(());
+        }
+        video_bps = smaller_bitrate(video_bps, size, limit, length);
+        if video_bps < MIN_VIDEO_BITRATE {
+            break;
+        }
+    }
+    Err(format!(
+        "Couldn't get it under {} MB. Try a lower resolution or frame rate.",
+        job.settings.target_mb
+    ))
+}
+
+/// The video bitrate to try after `bitrate` made `size` bytes against a `limit`:
+/// less by what was over, and by the margin, but at most half as much.
+fn smaller_bitrate(bitrate: f64, size: f64, limit: f64, length: f64) -> f64 {
+    let over = (size - limit * TARGET_MARGIN) * 8.0 / length.max(0.001);
+    (bitrate - over).max(bitrate / 2.0)
+}
+
+/// A folder of its own for a two-pass encode's notes, which encoders can only
+/// be given a name for, and gone when this is.
+struct Notes {
+    dir: PathBuf,
+}
+
+impl Notes {
+    fn new() -> std::io::Result<Self> {
+        let name = format!("egui-files-clip-{}", disk::process_id());
+        let dir = unique_path(&std::env::temp_dir(), OsStr::new(&name));
+        disk::create_dir(&dir)?;
+        Ok(Self { dir })
+    }
+}
+
+impl Drop for Notes {
+    fn drop(&mut self) {
+        if let Ok(entries) = disk::read_dir(&self.dir) {
+            for entry in entries.flatten() {
+                let _ = disk::remove_file(entry.path());
+            }
+        }
+        let _ = disk::remove_dir(&self.dir);
+    }
+}
+
+/// Runs ffmpeg with `args`, in `cwd` if given, showing its progress from `base`
+/// seconds on, until it ends or the job is cancelled.
+fn encode(args: &[OsString], cwd: Option<&Path>, base: f64, p: &Progress) -> Result<(), String> {
+    let mut ffmpeg = command("ffmpeg");
+    if let Some(cwd) = cwd {
+        ffmpeg.current_dir(cwd);
+    }
+    let mut child = ffmpeg
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -835,7 +1533,7 @@ fn encode(args: &[OsString], p: &Progress) -> Result<(), String> {
         match progress.recv_timeout(Duration::from_millis(100)) {
             Ok(line) => {
                 if let Some(seconds) = parse_progress(&line) {
-                    p.set_time_done(seconds);
+                    p.set_time_done(base + seconds);
                 }
             }
             Err(RecvTimeoutError::Timeout) => {}
@@ -854,7 +1552,7 @@ fn encode(args: &[OsString], p: &Progress) -> Result<(), String> {
     let text = errors
         .recv_timeout(Duration::from_secs(2))
         .unwrap_or_default();
-    Err(last_line(&text))
+    Err(first_error(&text))
 }
 
 #[cfg(test)]
@@ -883,6 +1581,7 @@ mod tests {
         Tools {
             encoders: encoders.iter().map(|&e| e.to_owned()).collect(),
             zscale: true,
+            hardware: Vec::new(),
         }
     }
 
@@ -900,7 +1599,7 @@ mod tests {
     }
 
     fn planned(job: &ClipJob, extension: &str) -> Vec<String> {
-        plan(job, extension, Path::new("/in/out"))
+        plan(job, extension, Path::new("/in/out"), Encode::default())
             .unwrap()
             .iter()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -1007,7 +1706,7 @@ mod tests {
 
         let mut job = job(settings);
         job.tools.zscale = false;
-        assert!(plan(&job, "mp4", Path::new("/out")).is_err());
+        assert!(plan(&job, "mp4", Path::new("/out"), Encode::default()).is_err());
     }
 
     #[test]
@@ -1058,6 +1757,253 @@ mod tests {
         assert!(!Format::WebmVp9.available(&few));
         let lgpl = tools(&["libopenh264"]);
         assert_eq!(Codec::H264.encoder(&lgpl), Some("libopenh264"));
+    }
+
+    #[test]
+    fn upright_videos_are_measured_upright() {
+        let turned = r#"{"streams": [{"codec_type": "video", "width": 1920, "height": 1080,
+            "side_data_list": [{"rotation": -90}]}], "format": {"duration": "9"}}"#;
+        let source = parse_probe(turned).unwrap();
+        assert_eq!((source.width, source.height), (1080, 1920));
+        assert_eq!(source.short_side(), 1080);
+        let mut job = job(Settings {
+            resolution: Some(720),
+            ..Settings::default()
+        });
+        job.source = source;
+        let args = planned(&job, "mkv");
+        assert!(has(&args, "-vf", "scale=720:-2:flags=lanczos"));
+    }
+
+    #[test]
+    fn never_scales_up_or_adds_frames() {
+        let source = parse_probe(PROBED).unwrap();
+        let settings = Settings {
+            resolution: Some(4320),
+            fps: Some(60),
+            ..Settings::default()
+        };
+        assert!(settings.copies(&source), "nothing to change");
+        let settings = Settings {
+            resolution: Some(1080),
+            fps: Some(24),
+            ..Settings::default()
+        };
+        assert!(!settings.copies(&source));
+        let args = planned(&job(settings), "mkv");
+        assert!(has(&args, "-vf", "scale=-2:1080:flags=lanczos,fps=24"));
+    }
+
+    #[test]
+    fn audio_goes_as_asked_without_touching_the_video() {
+        let mut settings = Settings {
+            audio: AudioChoice::None,
+            ..Settings::default()
+        };
+        assert!(settings.copies(&parse_probe(PROBED).unwrap()));
+        let args = planned(&job(settings), "mkv");
+        assert!(has(&args, "-c:v", "copy"));
+        assert!(args.iter().any(|arg| arg == "-an"));
+        assert!(!has(&args, "-map", "0:2"));
+
+        settings.audio = AudioChoice::One(2);
+        settings.audio_kbps = Some(96);
+        let args = planned(&job(settings), "mkv");
+        assert!(has(&args, "-map", "0:2"));
+        assert!(has(&args, "-c:v", "copy"));
+        assert!(has(&args, "-c:a", "aac") && has(&args, "-b:a", "96k"));
+    }
+
+    #[test]
+    fn audio_alone_leaves_the_rest_out() {
+        let settings = Settings {
+            format: Format::Mp3,
+            audio: AudioChoice::None,
+            ..Settings::default()
+        };
+        let source = parse_probe(PROBED).unwrap();
+        assert_eq!(settings.extension(&source, "mkv").unwrap(), "mp3");
+        let mut job = job(settings);
+        job.tools.encoders.insert("libmp3lame".to_owned());
+        let args = planned(&job, "mp3");
+        assert!(args.iter().any(|arg| arg == "-vn"));
+        assert!(has(&args, "-map", "0:2"), "its one track, asked or not");
+        assert!(!has(&args, "-map", "0:1") && !has(&args, "-map", "0:4"));
+        assert!(has(&args, "-c:a", "libmp3lame") && has(&args, "-b:a", "192k"));
+
+        job.source.audio.clear();
+        assert!(plan(&job, "mp3", Path::new("/out"), Encode::default()).is_err());
+    }
+
+    #[test]
+    fn a_target_size_is_shared_out_or_refused() {
+        let source = parse_probe(PROBED).unwrap();
+        let settings = Settings {
+            use_target: true,
+            target_mb: 25.0,
+            ..Settings::default()
+        };
+        assert!(!settings.copies(&source));
+        let fit = settings.fit(&source, 100.0).unwrap();
+        // 25 MB over 100 s is 2 Mbit/s, less the margin.
+        assert_eq!(fit.audio_kbps, 128);
+        assert!((fit.video_bps - (1_940_000.0 - 128_000.0)).abs() < 1.0);
+        assert!(fit.looks_poor(), "4K at under 2 Mbit/s");
+        let side = settings.suggested_resolution(&source, &fit).unwrap();
+        assert!(side < 2160, "{side}");
+
+        // Too little even for smears.
+        let tiny = Settings {
+            target_mb: 0.1,
+            ..settings
+        };
+        let err = tiny.fit(&source, 600.0).unwrap_err();
+        assert!(err.contains("at least"), "{err}");
+        // Audio gets less when there's little to go round, down to a point.
+        let small = Settings {
+            target_mb: 1.0,
+            ..settings
+        };
+        assert_eq!(small.fit(&source, 60.0).unwrap().audio_kbps, 48);
+    }
+
+    #[test]
+    fn each_encoder_takes_two_passes_its_own_way() {
+        let settings = Settings {
+            exact: true,
+            use_target: true,
+            format: Format::Mp4H264,
+            ..Settings::default()
+        };
+        let encode = |pass| Encode {
+            rate: Some((1_000_000.0, 96)),
+            pass,
+        };
+        let plain = |job: &ClipJob, pass| -> Vec<String> {
+            plan(job, "mp4", Path::new("/out"), encode(pass))
+                .unwrap()
+                .iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect()
+        };
+        let job_264 = job(settings);
+        let first = plain(&job_264, Pass::First);
+        assert!(has(&first, "-pass", "1") && has(&first, "-b:v", "1000000"));
+        assert!(first.iter().any(|arg| arg == "-an"));
+        assert!(has(&first, "-f", "null"));
+        assert!(!has(&first, "-map", "0:2"), "no audio to read");
+        let second = plain(&job_264, Pass::Second);
+        assert!(has(&second, "-pass", "2") && has(&second, "-b:a", "96k"));
+        assert!(has(&second, "-map", "0:2"));
+
+        let job_265 = job(Settings {
+            format: Format::Mp4Hevc,
+            ..settings
+        });
+        let first = plain(&job_265, Pass::First);
+        assert!(!first.iter().any(|arg| arg == "-pass"));
+        assert!(has(
+            &first,
+            "-x265-params",
+            "log-level=error:pass=1:stats=pass.log"
+        ));
+
+        assert!(!has_two_passes("libsvtav1") && !has_two_passes("libopenh264"));
+        assert!(!has_two_passes("h264_vaapi"));
+    }
+
+    #[test]
+    fn errors_say_the_first_thing_that_went_wrong() {
+        let errors = "[h264_vaapi @ 0x56] Hardware does not support encoding at size 160x96\n\
+                      [vost#0:0/h264_vaapi @ 0x57] Error while opening encoder\n\
+                      Conversion failed!\n";
+        assert_eq!(
+            first_error(errors),
+            "Hardware does not support encoding at size 160x96"
+        );
+        assert_eq!(
+            first_error("\nb.mp4: No such file\n"),
+            "b.mp4: No such file"
+        );
+        assert_eq!(first_error(""), "ffmpeg failed");
+        assert_eq!(first_error("[not a tag] stays"), "[not a tag] stays");
+    }
+
+    #[test]
+    fn a_retry_asks_for_less() {
+        // 1 MB over 10 s came out of a limit of 900 kB: 100 kB and the margin
+        // over, in bits a second.
+        let next = smaller_bitrate(800_000.0, 1e6, 9e5, 10.0);
+        assert!((next - (800_000.0 - 101_600.0)).abs() < 1.0, "{next}");
+        assert_eq!(smaller_bitrate(100_000.0, 1e7, 1e6, 10.0), 50_000.0);
+    }
+
+    #[test]
+    fn hardware_is_used_only_if_asked_and_there() {
+        let mut job = job(Settings {
+            format: Format::Mp4H264,
+            hardware: true,
+            ..Settings::default()
+        });
+        assert!(has(&planned(&job, "mp4"), "-c:v", "libx264"), "none found");
+        job.tools.hardware = vec![Hardware {
+            encoder: "h264_vaapi".to_owned(),
+            device: Some("/dev/dri/renderD128".to_owned()),
+        }];
+        let args = planned(&job, "mp4");
+        assert!(has(&args, "-c:v", "h264_vaapi"));
+        assert!(has(&args, "-vaapi_device", "/dev/dri/renderD128"));
+        assert!(args.iter().any(|arg| arg.ends_with("format=nv12,hwupload")));
+        assert!(!args.iter().any(|arg| arg == "-pix_fmt"));
+
+        job.settings.format = Format::WebmVp9;
+        let args = planned(&job, "webm");
+        assert!(has(&args, "-c:v", "libvpx-vp9"), "none for VP9");
+        job.settings.hardware = false;
+        job.settings.format = Format::Mp4H264;
+        assert!(has(&planned(&job, "mp4"), "-c:v", "libx264"));
+    }
+
+    #[test]
+    fn new_tabs_remember_how_but_not_what_to_leave_out() {
+        let mut used = Settings {
+            format: Format::WebmVp9,
+            quality: Quality::Small,
+            use_target: true,
+            target_mb: 50.0,
+            resolution: Some(720),
+            fps: Some(30),
+            exact: true,
+            audio: AudioChoice::None,
+            hardware: true,
+            ..Settings::default()
+        };
+        used.keep.location = false;
+        let next = used.for_new_tab();
+        assert_eq!(next.format, Format::WebmVp9);
+        assert_eq!((next.target_mb, next.resolution), (50.0, Some(720)));
+        assert!(next.use_target && next.hardware);
+        assert_eq!(next.keep, Keep::default());
+        assert_eq!(next.audio, AudioChoice::All);
+        assert!(!next.exact);
+    }
+
+    #[test]
+    fn settings_saved_before_new_ones_existed_load() {
+        let old = "(format:Mp4H264,quality:Small,exact:true,keep:(details:true,location:false,subtitles:true,hdr:true))";
+        let settings: Settings = ron::from_str(old).unwrap();
+        assert_eq!(settings.format, Format::Mp4H264);
+        assert!(!settings.keep.location);
+        assert_eq!(settings.target_mb, 25.0);
+    }
+
+    #[test]
+    fn notes_are_cleared_away() {
+        let notes = Notes::new().unwrap();
+        let dir = notes.dir.clone();
+        std::fs::write(dir.join("pass-0.log"), "x").unwrap();
+        drop(notes);
+        assert!(!dir.exists());
     }
 
     /// What ffprobe says of a file.
@@ -1340,6 +2286,167 @@ mod tests {
                 "{}",
                 color(&converted)
             );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn target_sizes_are_met() {
+        let dir = temp_dir("target");
+        let Some(input) = sample(&dir) else {
+            eprintln!("no ffmpeg: skipped");
+            return;
+        };
+        let tools = super::tools().unwrap();
+        for (format, mb) in [
+            (Format::Mp4H264, 0.3),
+            (Format::Mp4H264, 0.12),
+            (Format::Mp4Hevc, 0.2),
+            (Format::WebmVp9, 0.2),
+            (Format::Mp4Av1, 0.2),
+        ] {
+            if !format.available(&tools) {
+                eprintln!("no encoder for {format:?}: skipped");
+                continue;
+            }
+            let settings = Settings {
+                format,
+                use_target: true,
+                target_mb: mb,
+                ..Settings::default()
+            };
+            let out = run_job(&dir, &input, settings, (0.0, 10.0));
+            let size = std::fs::metadata(&out).unwrap().len() as f64;
+            assert!(size <= mb * 1e6, "{format:?} at {mb} MB made {size}");
+            assert!(
+                size >= mb * 1e6 * 0.3,
+                "{format:?} at {mb} MB wasted it: {size}"
+            );
+            assert!((duration(&out) - 10.0).abs() < 0.5);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resizes_and_lowers_the_frame_rate() {
+        let dir = temp_dir("resize");
+        let Some(input) = sample(&dir) else {
+            eprintln!("no ffmpeg: skipped");
+            return;
+        };
+        let settings = Settings {
+            resolution: Some(50),
+            fps: Some(5),
+            ..Settings::default()
+        };
+        let out = run_job(&dir, &input, settings, (0.0, 2.0));
+        let shape = entries(&out, "stream=width,height,avg_frame_rate");
+        assert!(shape.contains("88,50,5/1"), "{shape}");
+
+        // A phone's upright video stays upright.
+        let upright = dir.join("upright.mp4");
+        let turned = command("ffmpeg")
+            .args(["-v", "error", "-display_rotation", "90", "-i"])
+            .arg(&input)
+            .args(["-c", "copy"])
+            .arg(&upright)
+            .status();
+        assert!(turned.unwrap().success());
+        let source = probe(&upright).unwrap();
+        assert!(source.height > source.width);
+        let settings = Settings {
+            resolution: Some(50),
+            ..Settings::default()
+        };
+        let out = run_job(&dir, &upright, settings, (0.0, 2.0));
+        let shape = entries(&out, "stream=width,height");
+        assert!(shape.contains("50,88"), "{shape}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn audio_comes_off_or_alone() {
+        let dir = temp_dir("audio");
+        let Some(input) = sample(&dir) else {
+            eprintln!("no ffmpeg: skipped");
+            return;
+        };
+        let silent = Settings {
+            audio: AudioChoice::None,
+            ..Settings::default()
+        };
+        let out = run_job(&dir, &input, silent, (0.0, 4.0));
+        assert!(!entries(&out, "stream=codec_type").contains("audio"));
+        let tools = super::tools().unwrap();
+        for (format, codec) in [
+            (Format::Mp3, "mp3"),
+            (Format::M4a, "aac"),
+            (Format::Opus, "opus"),
+            (Format::Flac, "flac"),
+            (Format::Wav, "pcm_s16le"),
+        ] {
+            if !format.available(&tools) {
+                eprintln!("no encoder for {format:?}: skipped");
+                continue;
+            }
+            let settings = Settings {
+                format,
+                ..Settings::default()
+            };
+            let out = run_job(&dir, &input, settings, (1.0, 3.0));
+            let streams = entries(&out, "stream=codec_name");
+            assert_eq!(streams.trim().trim_end_matches(','), codec, "{format:?}");
+            assert!((duration(&out) - 2.0).abs() < 0.2, "{format:?}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hardware_encoders_export_if_there_are_any() {
+        let dir = temp_dir("hardware");
+        // They have a smallest picture they'll take.
+        let input = dir.join("large.mp4");
+        let made = command("ffmpeg")
+            .args(["-v", "error", "-f", "lavfi", "-i"])
+            .arg("testsrc2=size=1280x720:rate=30:duration=4")
+            .args(["-c:v", "libx264", "-preset", "ultrafast"])
+            .arg(&input)
+            .status();
+        if !made.is_ok_and(|status| status.success()) {
+            eprintln!("no ffmpeg: skipped");
+            return;
+        }
+        let tools = super::tools().unwrap();
+        for hardware in &tools.hardware {
+            let format = match hardware.encoder.split('_').next() {
+                Some("h264") => Format::Mp4H264,
+                Some("hevc") => Format::Mp4Hevc,
+                _ => Format::Mp4Av1,
+            };
+            let quality = Settings {
+                format,
+                hardware: true,
+                ..Settings::default()
+            };
+            let out = run_job(&dir, &input, quality, (0.0, 4.0));
+            assert!((duration(&out) - 4.0).abs() < 0.5, "{}", hardware.encoder);
+            let codec = entries(&out, "stream=codec_name");
+            let expected = hardware.encoder.split('_').next().unwrap();
+            assert!(
+                codec.contains(expected),
+                "{} made {codec}",
+                hardware.encoder
+            );
+            let sized = Settings {
+                use_target: true,
+                target_mb: 0.5,
+                resolution: Some(360),
+                ..quality
+            };
+            let out = run_job(&dir, &input, sized, (0.0, 4.0));
+            let size = std::fs::metadata(&out).unwrap().len() as f64;
+            assert!(size <= 0.5e6, "{} made {size}", hardware.encoder);
+            assert!(entries(&out, "stream=height").contains("360"));
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

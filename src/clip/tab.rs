@@ -13,7 +13,7 @@ use egui::{
 use egui_phosphor::regular as icon;
 use serde::{Deserialize, Serialize};
 
-use super::ffmpeg::{self, ClipJob, Format, Quality, Settings, Source, Tools};
+use super::ffmpeg::{self, AudioChoice, ClipJob, Format, Quality, Settings, Source, Tools};
 use crate::{
     archive::FolderPicker,
     fs::{display_name, human_size},
@@ -28,6 +28,13 @@ const MIN_LENGTH: f64 = 0.1;
 const GRAB: f32 = 8.0;
 /// The width of the settings column beside the video.
 const SETTINGS_WIDTH: f32 = 290.0;
+/// Shorter sides to shrink to, largest first.
+pub(super) const RESOLUTIONS: [u32; 6] = [2160, 1440, 1080, 720, 480, 360];
+const FRAME_RATES: [u32; 5] = [60, 50, 30, 24, 15];
+/// Audio bitrates to choose from, in kbit/s.
+const AUDIO_BITRATES: [u32; 7] = [64, 96, 128, 160, 192, 256, 320];
+/// Target sizes a click away, in MB.
+const TARGET_PRESETS: [f64; 5] = [10.0, 25.0, 50.0, 100.0, 500.0];
 
 type Loaded = Result<(Source, Tools), String>;
 /// The start a keyframe was asked for, and when known, the answer.
@@ -131,13 +138,13 @@ pub struct ClipTab {
 }
 
 impl ClipTab {
-    pub fn new(id: u64, clip: PathBuf) -> Self {
+    pub fn new(id: u64, clip: PathBuf, settings: Settings) -> Self {
         Self {
             id,
             clip,
             start: 0.0,
             end: None,
-            settings: Settings::default(),
+            settings,
             runtime: Runtime::default(),
         }
     }
@@ -180,6 +187,11 @@ impl ClipTab {
             }
             Some(Ok(loaded)) => loaded,
         };
+        // Remembered from another video, which may have had what this hasn't.
+        let format = self.settings.format;
+        if !format.available(&tools) || (format.is_audio_only() && source.audio.is_empty()) {
+            self.settings.format = Format::Original;
+        }
         let end = self.end.unwrap_or(source.duration).min(source.duration);
         self.end = Some(end);
         self.start = self.start.clamp(0.0, (end - MIN_LENGTH).max(0.0));
@@ -416,66 +428,13 @@ impl ClipTab {
         ));
         ui.add_space(6.0);
 
-        egui::Grid::new(("clip-format", self.id))
-            .num_columns(2)
-            .spacing(vec2(8.0, 6.0))
-            .show(ui, |ui| {
-                ui.label("Format:");
-                ComboBox::from_id_salt(("format", self.id))
-                    .selected_text(self.settings.format.label())
-                    .width(170.0)
-                    .show_ui(ui, |ui| {
-                        for format in Format::ALL {
-                            ui.add_enabled_ui(format.available(tools), |ui| {
-                                ui.selectable_value(
-                                    &mut self.settings.format,
-                                    format,
-                                    format.label(),
-                                )
-                                .on_disabled_hover_text("Your ffmpeg has no encoder for this");
-                            });
-                        }
-                    });
-                ui.end_row();
-            });
-
-        let plain_format = self.settings.format == Format::Original;
-        ui.add_enabled_ui(plain_format, |ui| {
-            ui.checkbox(&mut self.settings.exact, "Frame-exact cut")
-                .on_hover_text(
-                    "Re-encodes to start on the exact frame. Without it, the streams are copied: it's quick and loses nothing, but can only start on a keyframe.",
-                );
-        });
-
-        let copies = self.settings.copies(source);
-        if copies {
-            let keyframe = self.keyframe(ui, source);
-            let known_keyframe = keyframe.as_ref().and_then(|k| k.as_ref().ok()).copied();
-            match keyframe {
-                Some(Ok(keyframe)) if (keyframe - self.start).abs() > 0.001 => {
-                    ui.weak(format!(
-                        "Starts at {}, the keyframe before your mark",
-                        precise_time(keyframe)
-                    ));
-                }
-                Some(Err(err)) => {
-                    ui.colored_label(ui.visuals().warn_fg_color, err);
-                }
-                _ => {}
-            }
-            let from = known_keyframe.unwrap_or(self.start);
-            let share = (end - from) / source.duration.max(MIN_LENGTH);
-            ui.weak(format!(
-                "About {}",
-                human_size((source.size as f64 * share) as u64)
-            ));
-        } else {
-            ui.horizontal(|ui| {
-                ui.label("Quality:");
-                for quality in Quality::ALL {
-                    ui.selectable_value(&mut self.settings.quality, quality, quality.label());
-                }
-            });
+        self.format_ui(ui, source, tools);
+        if !self.settings.format.is_audio_only() {
+            self.video_ui(ui, source, tools, end);
+        }
+        if !source.audio.is_empty() {
+            ui.add_space(6.0);
+            self.audio_ui(ui, source);
         }
 
         ui.add_space(6.0);
@@ -501,14 +460,269 @@ impl ClipTab {
         self.output(ui, shared, source, tools);
     }
 
-    /// Where it's saved, and the Export button.
-    fn output(&mut self, ui: &mut Ui, shared: &mut Shared, source: &Source, tools: &Tools) {
-        let original = self
-            .clip
+    fn format_ui(&mut self, ui: &mut Ui, source: &Source, tools: &Tools) {
+        ui.horizontal(|ui| {
+            ui.label("Format:");
+            ComboBox::from_id_salt(("format", self.id))
+                .selected_text(self.settings.format.label())
+                .width(170.0)
+                // All of them, without scrolling to find the audio ones.
+                .height(400.0)
+                .show_ui(ui, |ui| {
+                    let mut audio_begun = false;
+                    for format in Format::ALL {
+                        if format.is_audio_only() && !audio_begun {
+                            audio_begun = true;
+                            ui.separator();
+                            ui.weak("Audio only");
+                        }
+                        let no_audio = format.is_audio_only() && source.audio.is_empty();
+                        ui.add_enabled_ui(format.available(tools) && !no_audio, |ui| {
+                            ui.selectable_value(&mut self.settings.format, format, format.label())
+                                .on_disabled_hover_text(if no_audio {
+                                    "This video has no audio"
+                                } else {
+                                    "Your ffmpeg has no encoder for this"
+                                });
+                        });
+                    }
+                });
+        });
+    }
+
+    /// How the video is cut and how big it comes out.
+    fn video_ui(&mut self, ui: &mut Ui, source: &Source, tools: &Tools, end: f64) {
+        let anyway = self.settings.encodes_anyway(source);
+        ui.add_enabled_ui(!anyway, |ui| {
+            let mut exact = self.settings.exact || anyway;
+            let hover = "Re-encodes to start on the exact frame. Without it, the video is copied: it's quick and loses nothing, but can only start on a keyframe.";
+            if ui
+                .checkbox(&mut exact, "Frame-exact cut")
+                .on_hover_text(hover)
+                .on_disabled_hover_text("These settings re-encode, which cuts on the frame anyway")
+                .changed()
+                && !anyway
+            {
+                self.settings.exact = exact;
+            }
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("Size:");
+            ui.selectable_value(&mut self.settings.use_target, false, "By quality");
+            ui.selectable_value(&mut self.settings.use_target, true, "Target size");
+        });
+        if self.settings.use_target {
+            self.target_ui(ui, source, end);
+        } else if self.settings.copies(source) {
+            self.copy_note(ui, source, end);
+        } else {
+            ui.horizontal(|ui| {
+                ui.label("Quality:");
+                for quality in Quality::ALL {
+                    ui.selectable_value(&mut self.settings.quality, quality, quality.label());
+                }
+            });
+        }
+
+        ui.horizontal(|ui| {
+            ui.label("Resolution:");
+            let selected = self
+                .settings
+                .resolution
+                .filter(|side| *side < source.short_side())
+                .map_or("Original".to_owned(), |side| format!("{side}p"));
+            ComboBox::from_id_salt(("resolution", self.id))
+                .selected_text(selected)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.settings.resolution, None, "Original");
+                    for side in RESOLUTIONS.into_iter().filter(|s| *s < source.short_side()) {
+                        let label = format!("{side}p");
+                        ui.selectable_value(&mut self.settings.resolution, Some(side), label);
+                    }
+                });
+        });
+        ui.horizontal(|ui| {
+            ui.label("Frame rate:");
+            let lower = |fps: &u32| f64::from(*fps) < source.fps() - 0.5;
+            let selected = self
+                .settings
+                .fps
+                .filter(lower)
+                .map_or("Original".to_owned(), |fps| format!("{fps} fps"));
+            ComboBox::from_id_salt(("fps", self.id))
+                .selected_text(selected)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.settings.fps, None, "Original");
+                    for fps in FRAME_RATES.into_iter().filter(|fps| lower(fps)) {
+                        let label = format!("{fps} fps");
+                        ui.selectable_value(&mut self.settings.fps, Some(fps), label);
+                    }
+                });
+        });
+        if self
+            .settings
+            .hardware_available(source, tools, self.original_extension())
+        {
+            ui.checkbox(&mut self.settings.hardware, "Hardware encoder")
+                .on_hover_text(
+                    "Encodes on the GPU: much faster, but the file is larger for the same quality.",
+                );
+        }
+    }
+
+    /// What copying will really do.
+    fn copy_note(&mut self, ui: &mut Ui, source: &Source, end: f64) {
+        let keyframe = self.keyframe(ui, source);
+        let known_keyframe = keyframe.as_ref().and_then(|k| k.as_ref().ok()).copied();
+        match keyframe {
+            Some(Ok(keyframe)) if (keyframe - self.start).abs() > 0.001 => {
+                ui.weak(format!(
+                    "Starts at {}, the keyframe before your mark",
+                    precise_time(keyframe)
+                ));
+            }
+            Some(Err(err)) => {
+                ui.colored_label(ui.visuals().warn_fg_color, err);
+            }
+            _ => {}
+        }
+        let from = known_keyframe.unwrap_or(self.start);
+        let share = (end - from) / source.duration.max(MIN_LENGTH);
+        ui.weak(format!(
+            "About {}",
+            human_size((source.size as f64 * share) as u64)
+        ));
+    }
+
+    /// The size to aim for, and how that will go.
+    fn target_ui(&mut self, ui: &mut Ui, source: &Source, end: f64) {
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::DragValue::new(&mut self.settings.target_mb)
+                    .range(0.1..=100_000.0)
+                    .speed(1.0)
+                    .suffix(" MB"),
+            );
+            for preset in TARGET_PRESETS {
+                let label = format!("{preset}");
+                if ui.small_button(label).clicked() {
+                    self.settings.target_mb = preset;
+                }
+            }
+        });
+        let length = end - self.start;
+        match self.settings.fit(source, length) {
+            Ok(fit) => {
+                ui.weak(format!(
+                    "Video at {:.0} kbit/s, audio at {} kbit/s",
+                    fit.video_bps / 1000.0,
+                    fit.audio_kbps
+                ));
+                if fit.looks_poor() {
+                    let advice = match self.settings.suggested_resolution(source, &fit) {
+                        Some(side) => format!("It may look poor at this size. Try {side}p."),
+                        None => "It may look poor at this size. Try a shorter clip.".to_owned(),
+                    };
+                    ui.colored_label(ui.visuals().warn_fg_color, advice);
+                }
+                // Copying would keep all the quality there is.
+                let share = length / source.duration.max(MIN_LENGTH);
+                let copied = source.size as f64 * share;
+                if self.settings.format == Format::Original
+                    && copied < self.settings.target_mb * 1e6 * 0.9
+                {
+                    ui.weak(format!(
+                        "It would already fit without re-encoding, at about {}.",
+                        human_size(copied as u64)
+                    ));
+                }
+            }
+            Err(err) => {
+                ui.colored_label(ui.visuals().warn_fg_color, err);
+            }
+        }
+    }
+
+    /// Which audio goes in, and how much of the file it gets.
+    fn audio_ui(&mut self, ui: &mut Ui, source: &Source) {
+        let audio_only = self.settings.format.is_audio_only();
+        ui.horizontal(|ui| {
+            ui.label("Audio:");
+            let label_of = |choice: AudioChoice| match choice {
+                AudioChoice::All if source.audio.len() > 1 => "All tracks".to_owned(),
+                AudioChoice::All => "Keep".to_owned(),
+                AudioChoice::None => "Remove".to_owned(),
+                AudioChoice::One(index) => source
+                    .audio
+                    .iter()
+                    .find(|a| a.index == index)
+                    .map_or("Keep".to_owned(), |a| a.label.clone()),
+            };
+            // A file of audio always has some.
+            if audio_only && self.settings.audio == AudioChoice::None {
+                self.settings.audio = AudioChoice::All;
+            }
+            let shown = if audio_only && self.settings.audio == AudioChoice::All {
+                source
+                    .audio
+                    .first()
+                    .map_or_else(String::new, |a| a.label.clone())
+            } else {
+                label_of(self.settings.audio)
+            };
+            ComboBox::from_id_salt(("audio", self.id))
+                .selected_text(shown)
+                .width(170.0)
+                .show_ui(ui, |ui| {
+                    if !audio_only {
+                        for choice in [AudioChoice::All, AudioChoice::None] {
+                            let label = label_of(choice);
+                            ui.selectable_value(&mut self.settings.audio, choice, label);
+                        }
+                    }
+                    if audio_only || source.audio.len() > 1 {
+                        for stream in &source.audio {
+                            let choice = AudioChoice::One(stream.index);
+                            let label = stream.label.clone();
+                            ui.selectable_value(&mut self.settings.audio, choice, label);
+                        }
+                    }
+                });
+        });
+        let has_rate = !self.settings.format.is_lossless()
+            && (audio_only || self.settings.audio != AudioChoice::None);
+        if has_rate {
+            ui.horizontal(|ui| {
+                ui.label("Audio bitrate:");
+                let selected = self
+                    .settings
+                    .audio_kbps
+                    .map_or("Auto".to_owned(), |kbps| format!("{kbps} kbit/s"));
+                ComboBox::from_id_salt(("audio-rate", self.id))
+                    .selected_text(selected)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.settings.audio_kbps, None, "Auto")
+                            .on_hover_text("Keeps the audio as it is where it can");
+                        for kbps in AUDIO_BITRATES {
+                            let label = format!("{kbps} kbit/s");
+                            ui.selectable_value(&mut self.settings.audio_kbps, Some(kbps), label);
+                        }
+                    });
+            });
+        }
+    }
+
+    fn original_extension(&self) -> &str {
+        self.clip
             .extension()
             .and_then(OsStr::to_str)
-            .unwrap_or_default();
-        let extension = self.settings.extension(source, original);
+            .unwrap_or_default()
+    }
+
+    /// Where it's saved, and the Export button.
+    fn output(&mut self, ui: &mut Ui, shared: &mut Shared, source: &Source, tools: &Tools) {
+        let extension = self.settings.extension(source, self.original_extension());
         let clip = self.clip.clone();
         let name = self.runtime.name.get_or_insert_with(|| {
             let stem = clip.file_stem().unwrap_or_default().to_string_lossy();
@@ -541,10 +755,18 @@ impl ClipTab {
 
         ui.add_space(6.0);
         let label = RichText::new(format!("{} Export", icon::EXPORT)).strong();
+        let end = self.end.unwrap_or(source.duration);
+        let fits = !self.settings.use_target
+            || self.settings.format.is_audio_only()
+            || self.settings.fit(source, end - self.start).is_ok();
         if ui
-            .add_enabled(!name_invalid && extension.is_ok(), Button::new(label))
+            .add_enabled(
+                !name_invalid && extension.is_ok() && fits,
+                Button::new(label),
+            )
             .clicked()
         {
+            shared.clip_settings = self.settings;
             shared.jobs.start(JobKind::Clip(Box::new(ClipJob {
                 input: self.clip.clone(),
                 dir,
@@ -646,7 +868,7 @@ mod tests {
 
     #[test]
     fn saved_state_comes_back() {
-        let mut tab = ClipTab::new(3, "/v/a.mp4".into());
+        let mut tab = ClipTab::new(3, "/v/a.mp4".into(), Settings::default());
         tab.start = 2.5;
         tab.end = Some(9.0);
         tab.settings.exact = true;

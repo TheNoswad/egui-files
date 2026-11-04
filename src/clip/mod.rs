@@ -8,7 +8,7 @@ mod tab;
 
 use std::path::Path;
 
-pub use ffmpeg::{ClipJob, export};
+pub use ffmpeg::{ClipJob, Settings, export};
 pub use tab::ClipTab;
 
 /// Where the editor can show the video: its player only runs on Linux yet (see
