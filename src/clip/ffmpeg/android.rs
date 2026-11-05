@@ -1,41 +1,86 @@
-//! Reading and copying videos with Android's own classes. Copying only, so
-//! far: nothing is decoded or encoded, so it's quick and loses nothing.
+//! Reading videos with Android's own classes. [`super::android_encode`] makes
+//! new ones with them.
 
 use std::path::Path;
 
 use jni::{
     Env, JValue, jni_sig, jni_str,
-    objects::{JObject, JString},
+    objects::{JObject, JObjectArray, JString},
 };
 
-use super::{AudioChoice, AudioStream, ClipJob, Format, Source, Subtitle, Tools, android_logic};
-use crate::{android::with_env, jobs::Progress};
+use super::{AudioStream, Source, Subtitle, Tools, android_logic};
+use crate::android::with_env;
 
 /// `MediaMetadataRetriever.METADATA_KEY_LOCATION`.
 const KEY_LOCATION: i32 = 23;
 /// `MediaExtractor.SEEK_TO_PREVIOUS_SYNC`.
 const SEEK_TO_PREVIOUS_SYNC: i32 = 0;
-/// `MediaExtractor.SAMPLE_FLAG_*` and what `MediaCodec.BUFFER_FLAG_*` calls
-/// the same things.
-const SAMPLE_SYNC: i32 = 1;
-const SAMPLE_PARTIAL: i32 = 4;
-const BUFFER_KEY_FRAME: i32 = 1;
-const BUFFER_PARTIAL: i32 = 8;
-/// Room for one sample, unless a track says it needs more.
-const SAMPLE_BUFFER: i32 = 8 << 20;
+/// `MediaCodecList.REGULAR_CODECS`: those that run in real time.
+const REGULAR_CODECS: i32 = 0;
 
-/// What can be done here: AAC audio copied into an M4A is all there's an
-/// "encoder" for yet.
-pub fn tools() -> Tools {
-    Tools {
-        encoders: ["aac".to_owned()].into_iter().collect(),
+/// What can be done here: which types this phone has an encoder for.
+pub fn tools() -> Result<Tools, String> {
+    let mut encoders = encoder_types()?;
+    // What ffmpeg calls the one audio format so far.
+    if encoders.contains("audio/mp4a-latm") {
+        encoders.insert("aac".to_owned());
+    }
+    Ok(Tools {
+        encoders,
         zscale: false,
         hardware: Vec::new(),
-        copies_only: true,
-    }
+        phone: true,
+    })
 }
 
-fn new_extractor<'local>(
+fn encoder_types() -> Result<std::collections::HashSet<String>, String> {
+    with_env("list the phone's encoders", |env| {
+        let list = env.new_object(
+            jni_str!("android/media/MediaCodecList"),
+            jni_sig!("(I)V"),
+            &[JValue::Int(REGULAR_CODECS)],
+        )?;
+        let infos = env
+            .call_method(
+                &list,
+                jni_str!("getCodecInfos"),
+                jni_sig!("()[Landroid/media/MediaCodecInfo;"),
+                &[],
+            )?
+            .l()?;
+        let infos = env.cast_local::<JObjectArray>(infos)?;
+        let mut types = std::collections::HashSet::new();
+        for index in 0..infos.len(env)? {
+            env.with_local_frame(8, |env| -> jni::errors::Result<()> {
+                let info = infos.get_element(env, index)?;
+                let encoder = env
+                    .call_method(&info, jni_str!("isEncoder"), jni_sig!("()Z"), &[])?
+                    .z()?;
+                if !encoder {
+                    return Ok(());
+                }
+                let names = env
+                    .call_method(
+                        &info,
+                        jni_str!("getSupportedTypes"),
+                        jni_sig!("()[Ljava/lang/String;"),
+                        &[],
+                    )?
+                    .l()?;
+                let names = env.cast_local::<JObjectArray>(names)?;
+                for at in 0..names.len(env)? {
+                    let name = names.get_element(env, at)?;
+                    let name = env.cast_local::<JString>(name)?.try_to_string(env)?;
+                    types.insert(name.to_ascii_lowercase());
+                }
+                Ok(())
+            })?;
+        }
+        Ok(types)
+    })
+}
+
+pub(super) fn new_extractor<'local>(
     env: &mut Env<'local>,
     path: &str,
 ) -> jni::errors::Result<JObject<'local>> {
@@ -56,7 +101,7 @@ fn new_extractor<'local>(
 
 /// Lets go of a Java object, whatever went wrong before: a pending exception
 /// would stop any call being made, so it's put aside first and returned.
-fn release<T>(
+pub(super) fn release<T>(
     env: &mut Env,
     object: &JObject,
     result: jni::errors::Result<T>,
@@ -70,7 +115,7 @@ fn release<T>(
     result
 }
 
-fn track_format<'local>(
+pub(super) fn track_format<'local>(
     env: &mut Env<'local>,
     extractor: &JObject,
     index: i32,
@@ -84,7 +129,11 @@ fn track_format<'local>(
     .l()
 }
 
-fn text_of(env: &mut Env, format: &JObject, key: &str) -> jni::errors::Result<Option<String>> {
+pub(super) fn text_of(
+    env: &mut Env,
+    format: &JObject,
+    key: &str,
+) -> jni::errors::Result<Option<String>> {
     let key = env.new_string(key)?;
     let value = env
         .call_method(
@@ -101,7 +150,11 @@ fn text_of(env: &mut Env, format: &JObject, key: &str) -> jni::errors::Result<Op
 }
 
 /// A number from a track's format, whichever kind of number it's kept as.
-fn number_of(env: &mut Env, format: &JObject, key: &str) -> jni::errors::Result<Option<f64>> {
+pub(super) fn number_of(
+    env: &mut Env,
+    format: &JObject,
+    key: &str,
+) -> jni::errors::Result<Option<f64>> {
     let key = env.new_string(key)?;
     let value = env
         .call_method(
@@ -240,7 +293,7 @@ fn location_of(path: &str) -> Result<Option<String>, String> {
     })
 }
 
-fn seek_to(env: &mut Env, extractor: &JObject, seconds: f64) -> jni::errors::Result<()> {
+pub(super) fn seek_to(env: &mut Env, extractor: &JObject, seconds: f64) -> jni::errors::Result<()> {
     env.call_method(
         extractor,
         jni_str!("seekTo"),
@@ -253,7 +306,7 @@ fn seek_to(env: &mut Env, extractor: &JObject, seconds: f64) -> jni::errors::Res
     Ok(())
 }
 
-fn sample_time(env: &mut Env, extractor: &JObject) -> jni::errors::Result<i64> {
+pub(super) fn sample_time(env: &mut Env, extractor: &JObject) -> jni::errors::Result<i64> {
     env.call_method(extractor, jni_str!("getSampleTime"), jni_sig!("()J"), &[])?
         .j()
 }
@@ -284,215 +337,4 @@ pub fn keyframe_before(path: &Path, source: &Source, at: f64) -> Result<f64, Str
         })();
         release(env, &extractor, result)
     })
-}
-
-/// Which tracks go in.
-fn chosen_tracks(job: &ClipJob) -> Vec<i32> {
-    let audio_only = job.settings.format.is_audio_only();
-    let mut tracks = Vec::new();
-    if !audio_only {
-        tracks.push(job.source.video_index as i32);
-    }
-    tracks.extend(
-        job.settings
-            .audio_streams(&job.source)
-            .into_iter()
-            .map(|stream| stream.index as i32),
-    );
-    tracks
-}
-
-/// Copies what `job` asks for to `output`. Stops early, leaving a file that the
-/// caller removes, if the job's cancelled.
-pub fn copy(job: &ClipJob, extension: &str, output: &Path, p: &Progress) -> Result<(), String> {
-    if job.settings.format == Format::M4a
-        && job
-            .settings
-            .audio_streams(&job.source)
-            .first()
-            .is_none_or(|stream| stream.codec != "aac")
-    {
-        return Err("Only AAC audio can go into an M4A here, as nothing's encoded yet.".to_owned());
-    }
-    if job.settings.audio == AudioChoice::None && job.settings.format.is_audio_only() {
-        return Err("There's no audio chosen to save.".to_owned());
-    }
-    let input = job
-        .input
-        .to_str()
-        .ok_or("the file's name isn't valid Unicode")?;
-    let output = output
-        .to_str()
-        .ok_or("the file's name isn't valid Unicode")?;
-    let tracks = chosen_tracks(job);
-    let location = job
-        .source
-        .location
-        .first()
-        .filter(|_| job.settings.keep.location)
-        .and_then(|(_, text)| android_logic::parse_location(text));
-    let format = android_logic::muxer_format(extension);
-    with_env("export a video", |env| {
-        let extractor = new_extractor(env, input)?;
-        let result = (|| -> jni::errors::Result<()> {
-            let file = env.new_string(output)?;
-            let muxer = env.new_object(
-                jni_str!("android/media/MediaMuxer"),
-                jni_sig!("(Ljava/lang/String;I)V"),
-                &[JValue::Object(&file), JValue::Int(format)],
-            )?;
-            let result = write_samples(env, &extractor, &muxer, job, &tracks, location, p);
-            release(env, &muxer, result)
-        })();
-        release(env, &extractor, result)
-    })
-}
-
-fn write_samples(
-    env: &mut Env,
-    extractor: &JObject,
-    muxer: &JObject,
-    job: &ClipJob,
-    tracks: &[i32],
-    location: Option<(f32, f32)>,
-    p: &Progress,
-) -> jni::errors::Result<()> {
-    if !job.settings.format.is_audio_only() {
-        env.call_method(
-            muxer,
-            jni_str!("setOrientationHint"),
-            jni_sig!("(I)V"),
-            &[JValue::Int(job.source.rotation as i32)],
-        )?;
-    }
-    if let Some((latitude, longitude)) = location {
-        env.call_method(
-            muxer,
-            jni_str!("setLocation"),
-            jni_sig!("(FF)V"),
-            &[JValue::Float(latitude), JValue::Float(longitude)],
-        )?;
-    }
-    // Which of the muxer's tracks each of the file's becomes.
-    let mut outputs = Vec::new();
-    let mut room = SAMPLE_BUFFER;
-    for &track in tracks {
-        env.call_method(
-            extractor,
-            jni_str!("selectTrack"),
-            jni_sig!("(I)V"),
-            &[JValue::Int(track)],
-        )?;
-        let format = track_format(env, extractor, track)?;
-        if let Some(size) = number_of(env, &format, "max-input-size")? {
-            room = room.max(size as i32);
-        }
-        let output = env
-            .call_method(
-                muxer,
-                jni_str!("addTrack"),
-                jni_sig!("(Landroid/media/MediaFormat;)I"),
-                &[JValue::Object(&format)],
-            )?
-            .i()?;
-        outputs.push((track, output));
-    }
-    let buffer = env
-        .call_static_method(
-            jni_str!("java/nio/ByteBuffer"),
-            jni_str!("allocateDirect"),
-            jni_sig!("(I)Ljava/nio/ByteBuffer;"),
-            &[JValue::Int(room)],
-        )?
-        .l()?;
-    let info = env.new_object(
-        jni_str!("android/media/MediaCodec$BufferInfo"),
-        jni_sig!("()V"),
-        &[],
-    )?;
-    env.call_method(muxer, jni_str!("start"), jni_sig!("()V"), &[])?;
-    let start = (job.start * 1_000_000.0) as i64;
-    let end = (job.end * 1_000_000.0) as i64;
-    seek_to(env, extractor, job.start)?;
-    let mut written = 0u64;
-    loop {
-        if p.cancelled() {
-            // What's there is thrown away by the caller.
-            return Ok(());
-        }
-        let time = sample_time(env, extractor)?;
-        let size = env
-            .call_method(
-                extractor,
-                jni_str!("readSampleData"),
-                jni_sig!("(Ljava/nio/ByteBuffer;I)I"),
-                &[JValue::Object(&buffer), JValue::Int(0)],
-            )?
-            .i()?;
-        if size < 0 || time < 0 {
-            break;
-        }
-        // Tracks are stored close together, so this is past all of them, with
-        // room for pictures stored out of order.
-        if time > end + 2_000_000 {
-            break;
-        }
-        // Before the start, audio that came with the keyframe; after the
-        // end, what was read past it.
-        if time >= start && time <= end {
-            let track = env
-                .call_method(
-                    extractor,
-                    jni_str!("getSampleTrackIndex"),
-                    jni_sig!("()I"),
-                    &[],
-                )?
-                .i()?;
-            let flags = env
-                .call_method(extractor, jni_str!("getSampleFlags"), jni_sig!("()I"), &[])?
-                .i()?;
-            if let Some((_, output)) = outputs.iter().find(|(from, _)| *from == track) {
-                let mut buffer_flags = 0;
-                if flags & SAMPLE_SYNC != 0 {
-                    buffer_flags |= BUFFER_KEY_FRAME;
-                }
-                if flags & SAMPLE_PARTIAL != 0 {
-                    buffer_flags |= BUFFER_PARTIAL;
-                }
-                env.call_method(
-                    &info,
-                    jni_str!("set"),
-                    jni_sig!("(IIJI)V"),
-                    &[
-                        JValue::Int(0),
-                        JValue::Int(size),
-                        JValue::Long(time - start),
-                        JValue::Int(buffer_flags),
-                    ],
-                )?;
-                env.call_method(
-                    muxer,
-                    jni_str!("writeSampleData"),
-                    jni_sig!("(ILjava/nio/ByteBuffer;Landroid/media/MediaCodec$BufferInfo;)V"),
-                    &[
-                        JValue::Int(*output),
-                        JValue::Object(&buffer),
-                        JValue::Object(&info),
-                    ],
-                )?;
-                written += 1;
-                if written.is_multiple_of(32) {
-                    p.set_time_done((time - start) as f64 / 1_000_000.0);
-                }
-            }
-        }
-        let more = env
-            .call_method(extractor, jni_str!("advance"), jni_sig!("()Z"), &[])?
-            .z()?;
-        if !more {
-            break;
-        }
-    }
-    env.call_method(muxer, jni_str!("stop"), jni_sig!("()V"), &[])?;
-    Ok(())
 }

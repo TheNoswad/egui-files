@@ -47,6 +47,95 @@ pub fn language_label(tag: &str) -> Option<&str> {
         .then_some(tag)
 }
 
+/// What's needed of a file's audio that goes in a container: whether `codec`
+/// can be copied into it as it is.
+pub fn audio_copies(extension: &str, codec: &str) -> bool {
+    match extension {
+        "webm" => matches!(codec, "opus" | "vorbis"),
+        _ => codec == "aac",
+    }
+}
+
+/// The type of audio encoder a container takes, and its usual kbit/s.
+pub fn audio_encoder(extension: &str) -> (&'static str, u32) {
+    if extension == "webm" {
+        ("audio/opus", 128)
+    } else {
+        ("audio/mp4a-latm", 192)
+    }
+}
+
+/// The picture's width and height, shrunk so its shorter side is `side`, both
+/// even, as encoders need.
+pub fn output_size((width, height): (u32, u32), side: Option<u32>) -> (u32, u32) {
+    let even = |value: f64| (((value / 2.0).round() as u32) * 2).max(2);
+    let short = f64::from(width.min(height).max(1));
+    let scale = side.map_or(1.0, |side| (f64::from(side) / short).min(1.0));
+    (
+        even(f64::from(width) * scale),
+        even(f64::from(height) * scale),
+    )
+}
+
+/// The video bitrate for a quality given in bits for each pixel of each frame.
+/// H.264 needs the most; never more than the original had, which adds nothing.
+pub fn video_bitrate(bpp: f64, is_h264: bool, pixels_per_second: f64, source_bps: f64) -> f64 {
+    let wanted = bpp * pixels_per_second * if is_h264 { 1.0 } else { 0.65 };
+    let limit = if source_bps > 0.0 {
+        source_bps
+    } else {
+        f64::MAX
+    };
+    wanted.min(limit).max(100_000.0)
+}
+
+/// Picks which frames stay at a lower frame rate: those that have reached the
+/// next time due, which then moves on past them.
+pub struct FrameRate {
+    next: i64,
+    step: i64,
+}
+
+impl FrameRate {
+    pub fn new(start: i64, fps: Option<u32>) -> Self {
+        Self {
+            next: start,
+            step: fps.map_or(0, |fps| 1_000_000 / i64::from(fps.max(1))),
+        }
+    }
+
+    pub fn keeps(&mut self, time: i64) -> bool {
+        if self.step == 0 {
+            return true;
+        }
+        if time < self.next {
+            return false;
+        }
+        while self.next <= time {
+            self.next += self.step;
+        }
+        true
+    }
+}
+
+/// Which frames of decoded audio to keep, of `frames` starting at `time`
+/// microseconds, for a range: how many to skip, and how many after that. `None`
+/// once past the range's end, which ends the track.
+pub fn audio_window(
+    time: i64,
+    frames: usize,
+    rate: u32,
+    (start, end): (i64, i64),
+) -> Option<(usize, usize)> {
+    if time >= end {
+        return None;
+    }
+    let frames_in = |micros: i64| (micros.max(0) as f64 * f64::from(rate) / 1e6) as usize;
+    let skip = frames_in(start - time).min(frames);
+    let until = frames_in(end - time).min(frames);
+    Some((skip, until.saturating_sub(skip)))
+}
+
 /// A location like `+37.7749-122.4194/`, as latitude and longitude.
 pub fn parse_location(text: &str) -> Option<(f32, f32)> {
     let text = text.trim().trim_end_matches('/');
@@ -66,6 +155,70 @@ pub fn parse_location(text: &str) -> Option<(f32, f32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audio_goes_where_it_fits() {
+        assert!(audio_copies("mp4", "aac"));
+        assert!(audio_copies("m4a", "aac"));
+        assert!(!audio_copies("mp4", "opus"));
+        assert!(audio_copies("webm", "opus"));
+        assert!(!audio_copies("webm", "aac"));
+        assert_eq!(audio_encoder("webm").0, "audio/opus");
+        assert_eq!(audio_encoder("mp4").0, "audio/mp4a-latm");
+    }
+
+    #[test]
+    fn sizes_come_out_even_and_never_grow() {
+        assert_eq!(output_size((1920, 1080), None), (1920, 1080));
+        assert_eq!(output_size((1920, 1080), Some(720)), (1280, 720));
+        // A phone's upright video is stored on its side: the short side's the same.
+        assert_eq!(output_size((1080, 1920), Some(720)), (720, 1280));
+        assert_eq!(output_size((1920, 1080), Some(2160)), (1920, 1080));
+        assert_eq!(output_size((853, 481), None), (854, 482));
+        assert_eq!(output_size((1920, 1080), Some(1)), (2, 2));
+    }
+
+    #[test]
+    fn bitrates_follow_the_picture_up_to_the_original() {
+        let hd = 1920.0 * 1080.0 * 30.0;
+        assert_eq!(video_bitrate(0.08, true, hd, 0.0).round(), 4_976_640.0);
+        assert!(video_bitrate(0.08, false, hd, 0.0) < video_bitrate(0.08, true, hd, 0.0));
+        assert_eq!(video_bitrate(0.08, true, hd, 1_000_000.0), 1_000_000.0);
+        assert_eq!(video_bitrate(0.08, true, 100.0, 0.0), 100_000.0);
+    }
+
+    #[test]
+    fn a_lower_frame_rate_keeps_the_frames_it_is_due() {
+        // 60 fps to 30: every other frame.
+        let mut rate = FrameRate::new(1000, Some(30));
+        let kept = (0..60)
+            .map(|frame| 1000 + frame * 16_683)
+            .filter(|time| rate.keeps(*time))
+            .count();
+        assert_eq!(kept, 30);
+        let mut all = FrameRate::new(0, None);
+        assert!(all.keeps(0) && all.keeps(1) && all.keeps(1));
+        // Starts from the start, wherever frames fall.
+        let mut late = FrameRate::new(0, Some(10));
+        assert!(late.keeps(250_000));
+        assert!(!late.keeps(290_000));
+        assert!(late.keeps(300_000));
+    }
+
+    #[test]
+    fn audio_is_cut_to_the_range() {
+        let range = (1_000_000, 2_000_000);
+        // Wholly before it: nothing kept, but not the end.
+        assert_eq!(audio_window(0, 1000, 1000, range), Some((1000, 0)));
+        // Across the start.
+        assert_eq!(audio_window(500_000, 1000, 1000, range), Some((500, 500)));
+        // Inside it.
+        assert_eq!(audio_window(1_200_000, 100, 1000, range), Some((0, 100)));
+        // Across the end.
+        assert_eq!(audio_window(1_900_000, 300, 1000, range), Some((0, 100)));
+        // Past it.
+        assert_eq!(audio_window(2_000_000, 100, 1000, range), None);
+    }
 
     #[test]
     fn only_real_languages_are_shown() {

@@ -261,8 +261,8 @@ impl ClipTab {
             }
             Some(Ok(loaded)) => loaded,
         };
-        if tools.copies_only() {
-            self.settings = self.settings.only_copying();
+        if tools.phone() {
+            self.settings = self.settings.for_phone();
         }
         // Remembered from another video, which may have had what this hasn't.
         if !tools.can_make(self.settings.format, &source) {
@@ -619,12 +619,12 @@ impl ClipTab {
         if !format.is_audio_only() {
             self.video_ui(ui, source, tools, end);
         }
-        if !tools.copies_only() {
+        if !tools.phone() {
             self.speed_ui(ui);
         }
         if !source.audio.is_empty() && !format.is_animated() {
             ui.add_space(6.0);
-            self.audio_ui(ui, source, tools);
+            self.audio_ui(ui, source);
         }
 
         // An animation has no tags to speak of.
@@ -639,16 +639,23 @@ impl ClipTab {
 
     /// What's carried over from the source.
     fn keep_ui(&mut self, ui: &mut Ui, source: &Source, tools: &Tools) {
-        if tools.copies_only() {
-            // The muxer takes a location, and has nowhere for the rest.
-            if source.has_location() {
+        if tools.phone() {
+            // The muxer takes a location, except in WebM, and has nowhere for
+            // the rest.
+            let extension = self.settings.extension(source, self.original_extension());
+            let webm = extension.is_ok_and(|extension| extension == "webm");
+            if source.has_location() && !webm {
                 ui.add_space(6.0);
                 ui.checkbox(&mut self.settings.keep.location, "Keep the location")
                     .on_hover_text(
                         "Where it was filmed. Anyone you send the file to can read this.",
                     );
             }
-            ui.weak("Other details, like the title and date, aren't kept on Android.");
+            ui.weak(if source.has_subtitles_or_chapters() {
+                "Other details, like the title and date, and subtitles and chapters, aren't kept on Android."
+            } else {
+                "Other details, like the title and date, aren't kept on Android."
+            });
             return;
         }
         ui.add_space(6.0);
@@ -802,8 +809,8 @@ impl ClipTab {
                             ui.selectable_value(&mut self.settings.format, format, format.label())
                                 .on_disabled_hover_text(if no_audio {
                                     "This video has no audio"
-                                } else if tools.copies_only() {
-                                    "This needs re-encoding, which isn't here on Android yet"
+                                } else if tools.phone() {
+                                    "This phone can't make this yet"
                                 } else {
                                     "Your ffmpeg has no encoder for this"
                                 });
@@ -815,11 +822,6 @@ impl ClipTab {
 
     /// How the video is cut and how big it comes out.
     fn video_ui(&mut self, ui: &mut Ui, source: &Source, tools: &Tools, end: f64) {
-        if tools.copies_only() {
-            self.copy_note(ui, source, end);
-            ui.weak("Only cutting for now: re-encoding isn't here on Android yet.");
-            return;
-        }
         let anyway = self.settings.encodes_anyway(source);
         ui.add_enabled_ui(!anyway, |ui| {
             let mut exact = self.settings.exact || anyway;
@@ -853,7 +855,11 @@ impl ClipTab {
             });
         }
 
-        self.picture_ui(ui, source);
+        if !tools.phone() {
+            self.picture_ui(ui, source);
+        } else if source.is_hdr() && !self.settings.copies(source) {
+            ui.weak("HDR comes out as standard colour when re-encoded.");
+        }
 
         let animated = self.settings.format.is_animated();
         ui.horizontal(|ui| {
@@ -991,7 +997,7 @@ impl ClipTab {
     }
 
     /// Which audio goes in, and how much of the file it gets.
-    fn audio_ui(&mut self, ui: &mut Ui, source: &Source, tools: &Tools) {
+    fn audio_ui(&mut self, ui: &mut Ui, source: &Source) {
         let audio_only = self.settings.format.is_audio_only();
         ui.horizontal(|ui| {
             ui.label("Audio:");
@@ -1036,8 +1042,7 @@ impl ClipTab {
                     }
                 });
         });
-        let has_rate = !tools.copies_only()
-            && !self.settings.format.is_lossless()
+        let has_rate = !self.settings.format.is_lossless()
             && (audio_only || self.settings.audio != AudioChoice::None);
         if has_rate {
             ui.horizontal(|ui| {

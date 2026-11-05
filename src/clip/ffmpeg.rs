@@ -6,8 +6,12 @@
 
 #[cfg(target_os = "android")]
 mod android;
+#[cfg(target_os = "android")]
+mod android_encode;
 #[cfg(any(target_os = "android", test))]
 mod android_logic;
+#[cfg(any(target_os = "android", test))]
+mod scale;
 
 use std::{
     collections::HashSet,
@@ -150,22 +154,19 @@ pub struct Tools {
     /// Hardware encoders that made a video here just now. ffmpeg lists all it
     /// was built with, whatever the computer has.
     hardware: Vec<Hardware>,
-    /// It can only copy what's there: nothing to encode with, on Android.
-    copies_only: bool,
+    /// It's a phone's own codecs, which can do less: no pictures changed yet,
+    /// and only MP4 and WebM to put things in.
+    phone: bool,
 }
 
 impl Tools {
-    pub fn copies_only(&self) -> bool {
-        self.copies_only
+    pub fn phone(&self) -> bool {
+        self.phone
     }
 
-    /// Whether `format` can be made from `source`: there must be audio to save,
-    /// and if nothing can be encoded, audio that fits as it is.
+    /// Whether `format` can be made from `source`: there must be audio to save.
     pub fn can_make(&self, format: Format, source: &Source) -> bool {
-        let has_aac = || source.audio.iter().any(|stream| stream.codec == "aac");
-        format.available(self)
-            && (!format.is_audio_only() || !source.audio.is_empty())
-            && (!self.copies_only || format != Format::M4a || has_aac())
+        format.available(self) && (!format.is_audio_only() || !source.audio.is_empty())
     }
 }
 
@@ -187,10 +188,11 @@ enum Codec {
 impl Codec {
     fn encoder(self, tools: &Tools) -> Option<&'static str> {
         let candidates: &[&str] = match self {
-            Self::H264 => &["libx264", "libopenh264"],
-            Self::Hevc => &["libx265"],
-            Self::Av1 => &["libsvtav1", "libaom-av1"],
-            Self::Vp9 => &["libvpx-vp9"],
+            // After ffmpeg's names, what Android calls them.
+            Self::H264 => &["libx264", "libopenh264", "video/avc"],
+            Self::Hevc => &["libx265", "video/hevc"],
+            Self::Av1 => &["libsvtav1", "libaom-av1", "video/av01"],
+            Self::Vp9 => &["libvpx-vp9", "video/x-vnd.on2.vp9"],
         };
         candidates
             .iter()
@@ -341,6 +343,10 @@ impl Format {
         }
         if let Some((_, encoder)) = self.animated() {
             return tools.encoders.contains(encoder);
+        }
+        // A phone's muxer doesn't make MKV.
+        if tools.phone && self == Self::MkvH264 {
+            return false;
         }
         self.target()
             .is_none_or(|(_, codec)| codec.encoder(tools).is_some())
@@ -541,18 +547,18 @@ impl Settings {
         self
     }
 
-    /// What's left of these where nothing can be encoded: just cutting, and
-    /// taking AAC audio out.
-    pub fn only_copying(self) -> Self {
+    /// What's left of these on a phone, which can't change the picture yet.
+    pub fn for_phone(self) -> Self {
         let fresh = Self::default();
         Self {
-            format: match self.format {
-                Format::M4a => Format::M4a,
-                _ => Format::Original,
-            },
-            keep: self.keep,
-            audio: self.audio,
-            ..fresh
+            crop: fresh.crop,
+            crop_shape: fresh.crop_shape,
+            turn: fresh.turn,
+            flip_horizontal: fresh.flip_horizontal,
+            flip_vertical: fresh.flip_vertical,
+            speed: fresh.speed,
+            hardware: fresh.hardware,
+            ..self
         }
     }
 
@@ -755,6 +761,8 @@ impl Settings {
         original: &str,
     ) -> Result<(String, Option<Codec>), String> {
         let original = original.to_ascii_lowercase();
+        #[cfg(target_os = "android")]
+        let original = android_logic::output_extension(&original);
         if let Some((extension, _, _)) = self.format.audio_only() {
             return Ok((extension.to_owned(), None));
         }
@@ -762,8 +770,6 @@ impl Settings {
             return Ok((extension.to_owned(), None));
         }
         if self.copies(source) {
-            #[cfg(target_os = "android")]
-            let original = android_logic::output_extension(&original);
             return Ok((original, None));
         }
         if let Some((extension, codec)) = self.format.target() {
@@ -874,7 +880,7 @@ fn reachable(path: &Path) -> PathBuf {
 /// What this ffmpeg can do. Blocks while it starts.
 pub fn tools() -> Result<Tools, String> {
     #[cfg(target_os = "android")]
-    return Ok(android::tools());
+    return android::tools();
     #[cfg(not(target_os = "android"))]
     desktop_tools()
 }
@@ -887,7 +893,7 @@ fn desktop_tools() -> Result<Tools, String> {
         hardware: working_hardware(&parse_names(&encoders)),
         encoders: parse_names(&encoders),
         zscale: parse_names(&filters).contains("zscale"),
-        copies_only: false,
+        phone: false,
     })
 }
 
@@ -1780,8 +1786,7 @@ fn make(
 ) -> Result<(), String> {
     #[cfg(target_os = "android")]
     {
-        let _ = length;
-        android::copy(job, extension, temporary, p)
+        android_encode::make(job, extension, temporary, length, p)
     }
     #[cfg(not(target_os = "android"))]
     make_with_ffmpeg(job, extension, temporary, length, p)
@@ -2050,7 +2055,7 @@ mod tests {
             encoders: encoders.iter().map(|&e| e.to_owned()).collect(),
             zscale: true,
             hardware: Vec::new(),
-            copies_only: false,
+            phone: false,
         }
     }
 
@@ -2121,23 +2126,22 @@ mod tests {
     }
 
     #[test]
-    fn m4a_needs_aac_where_nothing_is_encoded() {
+    fn what_a_phone_can_make() {
         let mut source = parse_probe(PROBED).unwrap();
-        let copying = Tools {
-            copies_only: true,
-            ..tools(&["aac"])
+        let phone = Tools {
+            phone: true,
+            ..tools(&["aac", "video/avc", "video/hevc"])
         };
-        assert!(source.audio.iter().any(|stream| stream.codec == "aac"));
-        assert!(copying.can_make(Format::M4a, &source));
-        for stream in &mut source.audio {
-            stream.codec = "opus".to_owned();
-        }
-        assert!(!copying.can_make(Format::M4a, &source));
-        // It can be encoded when there's an encoder to do it.
-        assert!(tools(&["aac"]).can_make(Format::M4a, &source));
-        assert!(copying.can_make(Format::Original, &source));
+        assert!(phone.can_make(Format::Original, &source));
+        assert!(phone.can_make(Format::Mp4H264, &source));
+        assert!(phone.can_make(Format::Mp4Hevc, &source));
+        assert!(phone.can_make(Format::M4a, &source));
+        assert!(!phone.can_make(Format::WebmVp9, &source), "no encoder");
+        assert!(!phone.can_make(Format::MkvH264, &source), "no muxer");
+        assert!(!phone.can_make(Format::Gif, &source));
+        assert!(!phone.can_make(Format::Mp3, &source));
         source.audio.clear();
-        assert!(!tools(&["aac"]).can_make(Format::M4a, &source));
+        assert!(!phone.can_make(Format::M4a, &source), "no audio");
     }
 
     #[test]
@@ -2613,18 +2617,15 @@ mod tests {
             audio: AudioChoice::None,
             ..Settings::default()
         };
-        let limited = wanted.only_copying();
-        assert!(limited.copies(&parse_probe(PROBED).unwrap()));
-        assert_eq!(
-            limited.audio,
-            AudioChoice::None,
-            "removing audio is copying"
-        );
-        let m4a = Settings {
-            format: Format::M4a,
-            ..Settings::default()
-        };
-        assert_eq!(m4a.only_copying().format, Format::M4a);
+        let limited = wanted.for_phone();
+        assert!(limited.crop.is_none());
+        assert_eq!(limited.turn, Turn::None);
+        assert!(!limited.changes_speed());
+        // What a phone can do stays.
+        assert_eq!(limited.format, Format::WebmVp9);
+        assert!(limited.exact && limited.use_target);
+        assert_eq!(limited.resolution, Some(720));
+        assert_eq!(limited.audio, AudioChoice::None);
     }
 
     #[test]

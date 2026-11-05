@@ -57,7 +57,7 @@
 
 ## Video editor
 
-Trims and converts with the user's own ffmpeg, so the app ships no codecs (`src/clip/`). Android will use Media3 with the device's codecs instead: no pure Rust stack covers H.264 and H.265 yet, which is most of what phones film.
+Trims and converts with the user's own ffmpeg, so the app ships no codecs (`src/clip/`). Android uses its own MediaCodec and MediaMuxer classes instead: no pure Rust stack covers H.264 and H.265 yet, which is most of what phones film.
 
 - [x] Editor tab: timeline with start and end handles, I and O, fast cut from a keyframe or frame-exact, formats, quality, what to keep, exports queued in the jobs bar
 - [x] Target size: under the limit (two passes where the encoder has them, check, retry lower), refused if it's impossibly small
@@ -71,7 +71,10 @@ Trims and converts with the user's own ffmpeg, so the app ships no codecs (`src/
 - [ ] Windows on real hardware: only run under Wine so far, with no GPU. Check hardware decoding (`auto-copy-safe`), hardware encoders, high DPI and a 4K video
 - [ ] macOS: not planned for now, nothing here to build or run it on
 - [ ] Before shipping publicly, decide what the ffmpeg and libmpv downloads fetch. They take the newest third-party build, checked only against a hash from the same place; libmpv's build is GPL and its releases last about 6 weeks. The recommendation is our own LGPL builds on this project's releases, with hashes pinned in the app
-- [ ] Android: re-encoding with MediaCodec (frame-exact, target size, resize, crop, turn, speed, other formats, GIF). The app builds with cargo-apk, which has no Java step, so it's built on Android's own APIs rather than Media3
+- [x] Android: re-encoding with MediaCodec: frame-exact, target size, quality, resolution, frame rate, H.264, H.265, AV1, VP9, AAC and Opus (`src/clip/ffmpeg/android_encode.rs`). Frames go through memory and are scaled in Rust, so there's no OpenGL or Java. Checked on a Pixel 7a
+- [ ] Android: crop, turn, mirror and speed in the editor. `scale.rs` can already turn frames
+- [ ] Android: GIF, animated WebP and the other audio formats
+- [ ] Android: a long export after leaving the app: there's no foreground service, as cargo-apk has no Java step, so Android may freeze it. Untested; at least keep the screen on while exporting
 - [ ] Try exporting from a phone's mount: the path is mapped, but no test or run has covered it
 
 ## Markdown

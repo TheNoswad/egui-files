@@ -617,7 +617,10 @@ impl Jobs {
                         }
                     }
                     if !finished {
-                        ui.add(ProgressBar::new(p.fraction()).desired_width(220.0));
+                        // On a phone there may be no room for it all, and
+                        // this would run over the title.
+                        let width = (ui.available_width() * 0.6).min(220.0);
+                        ui.add(ProgressBar::new(p.fraction()).desired_width(width));
                         let bytes = p.total_bytes.load(Relaxed);
                         let detail = if p.in_time.load(Relaxed) {
                             let time =
@@ -639,7 +642,9 @@ impl Jobs {
                                 }
                             )
                         };
-                        ui.weak(detail);
+                        if ui.available_width() > 120.0 {
+                            ui.weak(detail);
+                        }
                         let current = p.current.lock().expect("current poisoned").clone();
                         ui.add(egui::Label::new(RichText::new(current).weak().small()).truncate());
                     } else if let Some(first) = errors.first()

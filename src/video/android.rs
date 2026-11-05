@@ -591,6 +591,15 @@ fn copy_image(
             pixel_stride: pixel_stride.max(1) as usize,
         });
     }
+    // Ten-bit video comes as two bytes a sample, with the top eight bits in the
+    // second, while the image claims to be 8-bit. Its colors give it away: each
+    // is four bytes on, not two. Seen on a Pixel 7a.
+    if read.get(1).is_some_and(|u| u.pixel_stride == 4) {
+        read[0].pixel_stride = 2;
+        for plane in &mut read {
+            plane.data = plane.data.get(1..).unwrap_or_default();
+        }
+    }
     let [y, u, v]: [Plane; 3] = read
         .try_into()
         .map_err(|_| jni::errors::Error::JavaException)?;
