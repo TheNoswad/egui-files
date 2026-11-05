@@ -595,7 +595,15 @@ fn video_player(
         vec2(size.x, ui.spacing().interact_size.y),
         Layout::left_to_right(Align::Center),
         |ui| {
-            ui.spacing_mut().slider_width = size.x;
+            // A phone's screen edges are the system's back gesture, and dragging
+            // from the start of a video would be taken for one.
+            let inset = if cfg!(target_os = "android") {
+                24.0
+            } else {
+                0.0
+            };
+            ui.add_space(inset);
+            ui.spacing_mut().slider_width = (size.x - inset * 2.0).max(0.0);
             let slider = egui::Slider::new(&mut position, 0.0..=status.duration.max(0.001))
                 .show_value(false);
             if ui.add_enabled(status.duration > 0.0, slider).changed() {

@@ -8,6 +8,8 @@
 //! Like [`crate::images::ImageCache`], players are requested every frame and
 //! dropped once nothing asks for them.
 
+#[cfg(target_os = "android")]
+mod android;
 #[cfg(target_os = "linux")]
 mod egl;
 mod mpv;
@@ -15,6 +17,8 @@ mod mpv;
 mod renderer;
 #[cfg(windows)]
 mod wgl;
+#[cfg(any(target_os = "android", test))]
+mod yuv;
 
 use std::{
     collections::HashMap,
@@ -400,7 +404,9 @@ impl Backend {
         let error = Arc::new(OnceLock::new());
         #[cfg(any(target_os = "linux", windows))]
         renderer::spawn(ctx.clone(), receiver, sender.clone(), error.clone());
-        #[cfg(not(any(target_os = "linux", windows)))]
+        #[cfg(target_os = "android")]
+        android::spawn(ctx.clone(), receiver, error.clone());
+        #[cfg(not(any(target_os = "linux", windows, target_os = "android")))]
         {
             let _ = (ctx, receiver);
             let _ = error.set("video playback is not implemented on this platform yet".into());

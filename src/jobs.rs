@@ -51,6 +51,9 @@ pub(crate) fn block_on<T>(future: impl Future<Output = T>) -> T {
 const MAX_ERRORS: usize = 50;
 /// How long successful jobs stay in the bar after finishing.
 const LINGER: Duration = Duration::from_secs(4);
+/// Whether errors show in full under their job. Elsewhere there's only room for
+/// the start of one, with the rest on hover, which a phone hasn't got.
+const ERRORS_WRAP: bool = cfg!(target_os = "android");
 
 pub enum JobKind {
     Copy {
@@ -639,7 +642,9 @@ impl Jobs {
                         ui.weak(detail);
                         let current = p.current.lock().expect("current poisoned").clone();
                         ui.add(egui::Label::new(RichText::new(current).weak().small()).truncate());
-                    } else if let Some(first) = errors.first() {
+                    } else if let Some(first) = errors.first()
+                        && !ERRORS_WRAP
+                    {
                         ui.add(
                             egui::Label::new(
                                 RichText::new(first).color(ui.visuals().error_fg_color),
@@ -649,6 +654,11 @@ impl Jobs {
                     }
                 });
             });
+            if finished && ERRORS_WRAP {
+                for error in errors.iter().take(3) {
+                    ui.colored_label(ui.visuals().error_fg_color, error);
+                }
+            }
         }
         if let Some(index) = dismiss {
             self.jobs.remove(index);

@@ -224,6 +224,15 @@ fn with_activity<T>(
     })
 }
 
+/// Runs `f` with what it takes to call Java, on any thread. An exception is
+/// cleared, and comes back as the error.
+pub fn with_env<T>(
+    what: &str,
+    f: impl FnOnce(&mut Env) -> jni::errors::Result<T>,
+) -> Result<T, String> {
+    with_activity(what, |env, _| f(env))
+}
+
 /// The app's folder in shared storage for media (`Android/media/<package>`),
 /// which other apps can be given files from, unlike the app's own storage.
 pub fn media_dir() -> Option<std::path::PathBuf> {

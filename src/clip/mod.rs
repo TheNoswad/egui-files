@@ -13,7 +13,7 @@ pub use ffmpeg::{ClipJob, Settings, export};
 pub use tab::ClipTab;
 
 /// Where the editor can show the video: where the player runs.
-const AVAILABLE: bool = cfg!(any(target_os = "linux", windows));
+const AVAILABLE: bool = cfg!(any(target_os = "linux", windows, target_os = "android"));
 
 /// Whether the editor can open `path`: ffmpeg needs a file it can reach, which
 /// a phone's are, through their mount.

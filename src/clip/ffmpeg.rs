@@ -1,4 +1,13 @@
-//! Reads what a video holds with ffprobe, and exports it with ffmpeg.
+//! Reads what a video holds with ffprobe, and exports it with ffmpeg. Android
+//! has neither, and uses its own classes (see [`android`]) for what it can.
+
+// Most of this is the ffmpeg that Android hasn't got.
+#![cfg_attr(target_os = "android", allow(dead_code))]
+
+#[cfg(target_os = "android")]
+mod android;
+#[cfg(any(target_os = "android", test))]
+mod android_logic;
 
 use std::{
     collections::HashSet,
@@ -94,6 +103,8 @@ pub struct Source {
     chapters: usize,
     /// Tags saying where it was filmed.
     location: Vec<(String, String)>,
+    /// How far it's turned when shown, for a copy to say so too.
+    rotation: u32,
 }
 
 impl Source {
@@ -139,6 +150,23 @@ pub struct Tools {
     /// Hardware encoders that made a video here just now. ffmpeg lists all it
     /// was built with, whatever the computer has.
     hardware: Vec<Hardware>,
+    /// It can only copy what's there: nothing to encode with, on Android.
+    copies_only: bool,
+}
+
+impl Tools {
+    pub fn copies_only(&self) -> bool {
+        self.copies_only
+    }
+
+    /// Whether `format` can be made from `source`: there must be audio to save,
+    /// and if nothing can be encoded, audio that fits as it is.
+    pub fn can_make(&self, format: Format, source: &Source) -> bool {
+        let has_aac = || source.audio.iter().any(|stream| stream.codec == "aac");
+        format.available(self)
+            && (!format.is_audio_only() || !source.audio.is_empty())
+            && (!self.copies_only || format != Format::M4a || has_aac())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -513,6 +541,21 @@ impl Settings {
         self
     }
 
+    /// What's left of these where nothing can be encoded: just cutting, and
+    /// taking AAC audio out.
+    pub fn only_copying(self) -> Self {
+        let fresh = Self::default();
+        Self {
+            format: match self.format {
+                Format::M4a => Format::M4a,
+                _ => Format::Original,
+            },
+            keep: self.keep,
+            audio: self.audio,
+            ..fresh
+        }
+    }
+
     /// Whether the video can be copied as it is.
     pub fn copies(&self, source: &Source) -> bool {
         self.format == Format::Original
@@ -719,6 +762,8 @@ impl Settings {
             return Ok((extension.to_owned(), None));
         }
         if self.copies(source) {
+            #[cfg(target_os = "android")]
+            let original = android_logic::output_extension(&original);
             return Ok((original, None));
         }
         if let Some((extension, codec)) = self.format.target() {
@@ -760,6 +805,21 @@ impl ClipJob {
     }
 }
 
+/// How to say the ffmpeg it looked for isn't there.
+pub fn not_found_message() -> String {
+    message_for_missing(crate::tools::custom_ffmpeg().as_deref())
+}
+
+fn message_for_missing(chosen: Option<&Path>) -> String {
+    match chosen {
+        Some(path) => format!(
+            "The FFmpeg chosen in Settings isn't there: {}. Change it under Files and apps.",
+            path.display()
+        ),
+        None => NOT_INSTALLED.to_owned(),
+    }
+}
+
 /// A program of ffmpeg's.
 fn command(program: &str) -> Command {
     let mut command = Command::new(match program {
@@ -780,7 +840,7 @@ fn command(program: &str) -> Command {
 /// Runs a program of ffmpeg's to the end, for what it prints.
 fn output(command: &mut Command) -> Result<String, String> {
     let output = command.output().map_err(|err| match err.kind() {
-        std::io::ErrorKind::NotFound => NOT_INSTALLED.to_owned(),
+        std::io::ErrorKind::NotFound => not_found_message(),
         _ => err.to_string(),
     })?;
     if output.status.success() {
@@ -813,12 +873,21 @@ fn reachable(path: &Path) -> PathBuf {
 
 /// What this ffmpeg can do. Blocks while it starts.
 pub fn tools() -> Result<Tools, String> {
+    #[cfg(target_os = "android")]
+    return Ok(android::tools());
+    #[cfg(not(target_os = "android"))]
+    desktop_tools()
+}
+
+#[cfg(not(target_os = "android"))]
+fn desktop_tools() -> Result<Tools, String> {
     let encoders = output(command("ffmpeg").args(["-hide_banner", "-encoders"]))?;
     let filters = output(command("ffmpeg").args(["-hide_banner", "-filters"]))?;
     Ok(Tools {
         hardware: working_hardware(&parse_names(&encoders)),
         encoders: parse_names(&encoders),
         zscale: parse_names(&filters).contains("zscale"),
+        copies_only: false,
     })
 }
 
@@ -917,6 +986,14 @@ fn parse_names(text: &str) -> HashSet<String> {
 
 /// Reads what `path` holds. Blocks while ffprobe reads it.
 pub fn probe(path: &Path) -> Result<Source, String> {
+    #[cfg(target_os = "android")]
+    return android::probe(path);
+    #[cfg(not(target_os = "android"))]
+    probe_with_ffprobe(path)
+}
+
+#[cfg(not(target_os = "android"))]
+fn probe_with_ffprobe(path: &Path) -> Result<Source, String> {
     let text = output(
         command("ffprobe")
             .args([
@@ -1063,6 +1140,14 @@ fn parse_rate(text: &str) -> Option<f64> {
 /// Where a copy asked to start at `at` really starts: the last keyframe, as
 /// nothing before one can be decoded. Blocks while ffprobe reads around it.
 pub fn keyframe_before(path: &Path, source: &Source, at: f64) -> Result<f64, String> {
+    #[cfg(target_os = "android")]
+    return android::keyframe_before(path, source, at);
+    #[cfg(not(target_os = "android"))]
+    keyframe_with_ffprobe(path, source, at)
+}
+
+#[cfg(not(target_os = "android"))]
+fn keyframe_with_ffprobe(path: &Path, source: &Source, at: f64) -> Result<f64, String> {
     if at <= 0.0 {
         return Ok(0.0);
     }
@@ -1693,6 +1778,23 @@ fn make(
     length: f64,
     p: &Progress,
 ) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        let _ = length;
+        android::copy(job, extension, temporary, p)
+    }
+    #[cfg(not(target_os = "android"))]
+    make_with_ffmpeg(job, extension, temporary, length, p)
+}
+
+#[cfg(not(target_os = "android"))]
+fn make_with_ffmpeg(
+    job: &ClipJob,
+    extension: &str,
+    temporary: &Path,
+    length: f64,
+    p: &Progress,
+) -> Result<(), String> {
     let Some(limit) = job.settings.target_bytes() else {
         let args = plan(job, extension, temporary, Encode::default())?;
         return encode(&args, None, 0.0, p);
@@ -1874,7 +1976,7 @@ fn encode(args: &[OsString], cwd: Option<&Path>, base: f64, p: &Progress) -> Res
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|err| match err.kind() {
-            std::io::ErrorKind::NotFound => NOT_INSTALLED.to_owned(),
+            std::io::ErrorKind::NotFound => not_found_message(),
             _ => err.to_string(),
         })?;
     let (lines, progress) = mpsc::channel();
@@ -1948,6 +2050,7 @@ mod tests {
             encoders: encoders.iter().map(|&e| e.to_owned()).collect(),
             zscale: true,
             hardware: Vec::new(),
+            copies_only: false,
         }
     }
 
@@ -2015,6 +2118,26 @@ mod tests {
         assert_eq!(parse_keyframe(packets, 3.5), Some(2.0));
         assert_eq!(parse_keyframe(packets, 2.0), Some(2.0));
         assert_eq!(parse_keyframe("N/A,K__\n1.000000,___\n", 3.0), None);
+    }
+
+    #[test]
+    fn m4a_needs_aac_where_nothing_is_encoded() {
+        let mut source = parse_probe(PROBED).unwrap();
+        let copying = Tools {
+            copies_only: true,
+            ..tools(&["aac"])
+        };
+        assert!(source.audio.iter().any(|stream| stream.codec == "aac"));
+        assert!(copying.can_make(Format::M4a, &source));
+        for stream in &mut source.audio {
+            stream.codec = "opus".to_owned();
+        }
+        assert!(!copying.can_make(Format::M4a, &source));
+        // It can be encoded when there's an encoder to do it.
+        assert!(tools(&["aac"]).can_make(Format::M4a, &source));
+        assert!(copying.can_make(Format::Original, &source));
+        source.audio.clear();
+        assert!(!tools(&["aac"]).can_make(Format::M4a, &source));
     }
 
     #[test]
@@ -2475,6 +2598,40 @@ mod tests {
             ..Settings::default()
         };
         assert_eq!(used.for_new_tab(), Settings::default());
+    }
+
+    #[test]
+    fn copying_only_leaves_what_needs_no_encoding() {
+        let wanted = Settings {
+            format: Format::WebmVp9,
+            exact: true,
+            use_target: true,
+            resolution: Some(720),
+            speed: 2.0,
+            turn: Turn::Half,
+            crop: Some(Crop::FULL),
+            audio: AudioChoice::None,
+            ..Settings::default()
+        };
+        let limited = wanted.only_copying();
+        assert!(limited.copies(&parse_probe(PROBED).unwrap()));
+        assert_eq!(
+            limited.audio,
+            AudioChoice::None,
+            "removing audio is copying"
+        );
+        let m4a = Settings {
+            format: Format::M4a,
+            ..Settings::default()
+        };
+        assert_eq!(m4a.only_copying().format, Format::M4a);
+    }
+
+    #[test]
+    fn a_missing_chosen_ffmpeg_is_not_called_uninstalled() {
+        assert_eq!(message_for_missing(None), NOT_INSTALLED);
+        let message = message_for_missing(Some(Path::new("/gone/ffmpeg")));
+        assert!(message.contains("/gone/ffmpeg") && message.contains("Settings"));
     }
 
     #[test]

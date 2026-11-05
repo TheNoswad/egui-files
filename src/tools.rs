@@ -60,16 +60,21 @@ fn program_file(name: &str) -> String {
 /// How to run ffmpeg's program `name`: its bare name means the system's.
 fn program(name: &str) -> PathBuf {
     if let Some(custom) = custom_ffmpeg() {
-        return if name == "ffmpeg" {
-            custom
-        } else {
-            custom.with_file_name(program_file(name))
-        };
+        return beside_custom(&custom, name);
     }
     let downloaded = downloads_dir().map(|dir| dir.join(program_file(name)));
     match downloaded {
         Some(path) if disk::is_file(&path) => path,
         _ => PathBuf::from(name),
+    }
+}
+
+/// Program `name` of the ffmpeg at `custom`.
+fn beside_custom(custom: &Path, name: &str) -> PathBuf {
+    if name == "ffmpeg" {
+        custom.to_path_buf()
+    } else {
+        custom.with_file_name(program_file(name))
     }
 }
 
@@ -612,12 +617,11 @@ mod tests {
 
     #[test]
     fn a_chosen_ffmpeg_brings_its_ffprobe() {
-        let chosen = std::env::temp_dir().join("custom").join("ffmpeg");
-        set_custom_ffmpeg(Some(chosen.clone()));
-        assert_eq!(ffmpeg(), chosen);
+        // Not through the setting: other tests are running ffmpeg meanwhile.
+        let chosen = Path::new("custom").join("ffmpeg");
+        assert_eq!(beside_custom(&chosen, "ffmpeg"), chosen);
         let probe = chosen.with_file_name(program_file("ffprobe"));
-        assert_eq!(ffprobe(), probe);
-        set_custom_ffmpeg(None);
+        assert_eq!(beside_custom(&chosen, "ffprobe"), probe);
     }
 
     /// Fetches the real thing, so it needs the network and takes a while.

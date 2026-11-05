@@ -70,7 +70,8 @@ Trims and converts with the user's own ffmpeg, so the app ships no codecs (`src/
 - [x] Windows: the player and editor, run under Wine with the downloaded tools and the export tests
 - [ ] Windows on real hardware: only run under Wine so far, with no GPU. Check hardware decoding (`auto-copy-safe`), hardware encoders, high DPI and a 4K video
 - [ ] macOS: not planned for now, nothing here to build or run it on
-- [ ] Android: Media3 Transformer to export, ExoPlayer to show (getting its frames into egui needs a prototype)
+- [ ] Before shipping publicly, decide what the ffmpeg and libmpv downloads fetch. They take the newest third-party build, checked only against a hash from the same place; libmpv's build is GPL and its releases last about 6 weeks. The recommendation is our own LGPL builds on this project's releases, with hashes pinned in the app
+- [ ] Android: re-encoding with MediaCodec (frame-exact, target size, resize, crop, turn, speed, other formats, GIF). The app builds with cargo-apk, which has no Java step, so it's built on Android's own APIs rather than Media3
 - [ ] Try exporting from a phone's mount: the path is mapped, but no test or run has covered it
 
 ## Markdown

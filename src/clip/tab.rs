@@ -28,8 +28,20 @@ use crate::{
 
 /// The shortest range worth cutting, in seconds.
 const MIN_LENGTH: f64 = 0.1;
-/// How far from a handle, in points, a press still takes it.
-const GRAB: f32 = 8.0;
+/// How far from a handle, in points, a press still takes it: fingers are wider
+/// than pointers.
+const GRAB: f32 = if cfg!(target_os = "android") {
+    20.0
+} else {
+    8.0
+};
+/// How far in from its sides the timeline's ends are. A phone's need to be clear
+/// of the screen's edges, where dragging sideways is the system's back gesture.
+const TIMELINE_INSET: f32 = if cfg!(target_os = "android") {
+    36.0
+} else {
+    GRAB
+};
 /// The width of the settings column beside the video.
 const SETTINGS_WIDTH: f32 = 290.0;
 /// Shorter sides to shrink to, largest first.
@@ -249,9 +261,11 @@ impl ClipTab {
             }
             Some(Ok(loaded)) => loaded,
         };
+        if tools.copies_only() {
+            self.settings = self.settings.only_copying();
+        }
         // Remembered from another video, which may have had what this hasn't.
-        let format = self.settings.format;
-        if !format.available(&tools) || (format.is_audio_only() && source.audio.is_empty()) {
+        if !tools.can_make(self.settings.format, &source) {
             self.settings.format = Format::Original;
         }
         let end = self.end.unwrap_or(source.duration).min(source.duration);
@@ -365,7 +379,7 @@ impl ClipTab {
 
         ui.add_space(6.0);
         let (track, timeline) = ui.allocate_exact_size(vec2(width, 34.0), Sense::click_and_drag());
-        let inner = track.shrink2(vec2(GRAB, 0.0));
+        let inner = track.shrink2(vec2(TIMELINE_INSET, 0.0));
         let duration = source.duration.max(MIN_LENGTH);
         let x_of =
             |time: f64| inner.left() + inner.width() * (time / duration).clamp(0.0, 1.0) as f32;
@@ -605,15 +619,17 @@ impl ClipTab {
         if !format.is_audio_only() {
             self.video_ui(ui, source, tools, end);
         }
-        self.speed_ui(ui);
+        if !tools.copies_only() {
+            self.speed_ui(ui);
+        }
         if !source.audio.is_empty() && !format.is_animated() {
             ui.add_space(6.0);
-            self.audio_ui(ui, source);
+            self.audio_ui(ui, source, tools);
         }
 
         // An animation has no tags to speak of.
         if !format.is_animated() {
-            self.keep_ui(ui, source);
+            self.keep_ui(ui, source, tools);
         }
 
         ui.add_space(6.0);
@@ -622,7 +638,19 @@ impl ClipTab {
     }
 
     /// What's carried over from the source.
-    fn keep_ui(&mut self, ui: &mut Ui, source: &Source) {
+    fn keep_ui(&mut self, ui: &mut Ui, source: &Source, tools: &Tools) {
+        if tools.copies_only() {
+            // The muxer takes a location, and has nowhere for the rest.
+            if source.has_location() {
+                ui.add_space(6.0);
+                ui.checkbox(&mut self.settings.keep.location, "Keep the location")
+                    .on_hover_text(
+                        "Where it was filmed. Anyone you send the file to can read this.",
+                    );
+            }
+            ui.weak("Other details, like the title and date, aren't kept on Android.");
+            return;
+        }
         ui.add_space(6.0);
         ui.label("Keep:");
         let speed_changes = self.settings.changes_speed();
@@ -770,10 +798,12 @@ impl ClipTab {
                             ui.weak("Animation, no sound");
                         }
                         let no_audio = format.is_audio_only() && source.audio.is_empty();
-                        ui.add_enabled_ui(format.available(tools) && !no_audio, |ui| {
+                        ui.add_enabled_ui(tools.can_make(format, source), |ui| {
                             ui.selectable_value(&mut self.settings.format, format, format.label())
                                 .on_disabled_hover_text(if no_audio {
                                     "This video has no audio"
+                                } else if tools.copies_only() {
+                                    "This needs re-encoding, which isn't here on Android yet"
                                 } else {
                                     "Your ffmpeg has no encoder for this"
                                 });
@@ -785,6 +815,11 @@ impl ClipTab {
 
     /// How the video is cut and how big it comes out.
     fn video_ui(&mut self, ui: &mut Ui, source: &Source, tools: &Tools, end: f64) {
+        if tools.copies_only() {
+            self.copy_note(ui, source, end);
+            ui.weak("Only cutting for now: re-encoding isn't here on Android yet.");
+            return;
+        }
         let anyway = self.settings.encodes_anyway(source);
         ui.add_enabled_ui(!anyway, |ui| {
             let mut exact = self.settings.exact || anyway;
@@ -956,7 +991,7 @@ impl ClipTab {
     }
 
     /// Which audio goes in, and how much of the file it gets.
-    fn audio_ui(&mut self, ui: &mut Ui, source: &Source) {
+    fn audio_ui(&mut self, ui: &mut Ui, source: &Source, tools: &Tools) {
         let audio_only = self.settings.format.is_audio_only();
         ui.horizontal(|ui| {
             ui.label("Audio:");
@@ -1001,7 +1036,8 @@ impl ClipTab {
                     }
                 });
         });
-        let has_rate = !self.settings.format.is_lossless()
+        let has_rate = !tools.copies_only()
+            && !self.settings.format.is_lossless()
             && (audio_only || self.settings.audio != AudioChoice::None);
         if has_rate {
             ui.horizontal(|ui| {
