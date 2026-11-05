@@ -21,11 +21,10 @@ use jni::{
 };
 
 use super::{
-    AudioChoice, ClipJob, Codec, MAX_ATTEMPTS, MIN_VIDEO_BITRATE, Turn,
+    AudioChoice, ClipJob, Codec, MAX_ATTEMPTS, Tries, Turn,
     android::{new_extractor, number_of, release, sample_time, seek_to, text_of, track_format},
     android_logic::{self, FrameRate},
     scale::{Orientation, Scaler, Source as PlaneIn, Target as PlaneOut},
-    smaller_bitrate,
     tempo::Tempo,
 };
 use crate::{android::with_env, clip::crop::Crop, jobs::Progress};
@@ -76,6 +75,7 @@ pub fn make(
     p: &Progress,
 ) -> Result<(), String> {
     let mut rates = Rates::for_job(job, length)?;
+    let mut tries = Tries::new(job.settings.target_mb);
     let Some(limit) = job.settings.target_bytes() else {
         return encode(job, extension, temporary, rates, p);
     };
@@ -102,16 +102,9 @@ pub fn make(
         }
         let video = rates.video_bps.unwrap_or(0.0);
         // What matters is how long it plays for.
-        let next = smaller_bitrate(video, size, limit, length / job.settings.speed);
-        if next < MIN_VIDEO_BITRATE {
-            break;
-        }
-        rates.video_bps = Some(next);
+        rates.video_bps = Some(tries.next(video, size, limit, length / job.settings.speed)?);
     }
-    Err(format!(
-        "Couldn't get it under {} MB. Try a lower resolution or frame rate.",
-        job.settings.target_mb
-    ))
+    Err(tries.gave_up())
 }
 
 /// The bitrates asked for: `None` where there's nothing that's asked, so it's
@@ -125,7 +118,7 @@ struct Rates {
 impl Rates {
     fn for_job(job: &ClipJob, length: f64) -> Result<Self, String> {
         if job.settings.target_bytes().is_some() {
-            let fit = job.settings.fit(&job.source, length)?;
+            let fit = job.settings.fit(&job.source, &job.tools, length)?;
             return Ok(Self {
                 video_bps: Some(fit.video_bps),
                 audio_kbps: Some(fit.audio_kbps),

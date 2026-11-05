@@ -61,6 +61,11 @@ Trims and converts with the user's own ffmpeg, so the app ships no codecs (`src/
 
 - [x] Editor tab: timeline with start and end handles, I and O, fast cut from a keyframe or frame-exact, formats, quality, what to keep, exports queued in the jobs bar
 - [x] Target size: under the limit (two passes where the encoder has them, check, retry lower), refused if it's impossibly small
+- [x] Target size limits: refused below 0.005 bits a pixel (frames past 60 fps not counted) and below hardware encoders' least bits a frame, with a button for the largest picture and frame rate that fits (or the software encoder); the container's index is in the budget; a try stops as soon as its file is over, and tries stop when the encoder goes no lower. Checked on a 10 minute 1440p 165 fps game recording
+    - [ ] The 0.005 limit was judged from one frame of one recording, and the hardware floors (6.5 kbit a frame for H.264, 4.5 for others) were measured on one AMD card with game footage. Busier video needs more, which the early stop catches only after a try
+- [x] Speed: VAAPI decodes and resizes on the GPU when nothing needs the processor (falls back on its own if decoding fails), frames are dropped before anything else, and an "Encoding speed" choice for software encoders. On that recording: a hardware resize to 720p went from 31 s to 12 s a minute, a software 480p at 30 fps from 29 s to 16 s
+    - [ ] NVENC and QuickSync have no such GPU path (`-hwaccel cuda`/`qsv`), nor Windows
+    - [ ] "Fast" is only measured for x264; check x265, SVT-AV1, VP9 and AOM on real footage (VP9's faster setting was slower on noise)
 - [x] Resize and frame rate; audio: remove, choose a track, bitrate, audio only
 - [x] Hardware encoders, as a toggle when one is found (run here: VAAPI; NVENC and QuickSync only have their arguments tested)
 - [ ] Target size for audio on its own (only the bitrate can be chosen there)
@@ -73,6 +78,9 @@ Trims and converts with the user's own ffmpeg, so the app ships no codecs (`src/
 - [ ] Before shipping publicly, decide what the ffmpeg and libmpv downloads fetch. They take the newest third-party build, checked only against a hash from the same place; libmpv's build is GPL and its releases last about 6 weeks. The recommendation is our own LGPL builds on this project's releases, with hashes pinned in the app
 - [x] Android: re-encoding with MediaCodec: frame-exact, target size, quality, resolution, frame rate, H.264, H.265, AV1, VP9, AAC and Opus (`src/clip/ffmpeg/android_encode.rs`). Frames go through memory and are scaled in Rust, so there's no OpenGL or Java. Checked on a Pixel 7a
 - [x] Android: crop, turn and mirror (drawn in `scale.rs`, compared with ffmpeg's result at each stored rotation)
+- [ ] Android: faster re-encoding. On the Pixel 7a most of the time is copying frames out of the decoder (about 12 ms a 4K frame at the same size, 26 ms resizing), not the codecs. Tried, no help: codec `operating-rate`/`priority`, the scaler on 4 threads (slower), reading rows in bulk
+    - [ ] Same-size exports: the decoder renders straight into the encoder's input Surface (`createInputSurface`, `releaseOutputBuffer(index, time)`), no frame touching the processor and no Java needed. HDR to SDR needs checking there
+    - [ ] Resizing (and crop, turn, mirror): draw between the two Surfaces with OpenGL ES (EGL from the NDK, a SurfaceTexture polled with `updateTexImage`)
 - [x] Android: speed. Frames get new times, and `tempo.rs` changes the audio without changing its pitch (WSOLA), as ffmpeg's atempo does on desktop
 - [ ] Android: GIF and animated WebP, written in Rust as Android has no encoder for them, with a target-size loop like desktop's
 - [ ] Android: other audio formats. WAV is simple and Opus files should be, as the phone can encode Opus; MP3 and FLAC take more

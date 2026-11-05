@@ -854,7 +854,7 @@ impl ClipTab {
             ui.selectable_value(&mut self.settings.use_target, true, "Target size");
         });
         if self.settings.use_target {
-            self.target_ui(ui, source, end);
+            self.target_ui(ui, source, tools, end);
         } else if self.settings.copies(source) {
             self.copy_note(ui, source, end);
         } else {
@@ -927,6 +927,27 @@ impl ClipTab {
                     "Encodes on the GPU: much faster, but the file is larger for the same quality.",
                 );
         }
+        let hardware = self.settings.hardware
+            && self
+                .settings
+                .hardware_available(source, tools, self.original_extension());
+        let encodes = !self.settings.copies(source)
+            && !self.settings.format.is_audio_only()
+            && !self.settings.format.is_animated();
+        if !tools.phone() && !hardware && encodes {
+            ui.horizontal(|ui| {
+                ui.label("Encoding speed:");
+                ComboBox::from_id_salt(("effort", self.id))
+                    .selected_text(self.settings.effort.label())
+                    .show_ui(ui, |ui| {
+                        for effort in ffmpeg::Effort::ALL {
+                            ui.selectable_value(&mut self.settings.effort, effort, effort.label());
+                        }
+                    });
+            })
+            .response
+            .on_hover_text("Fast takes less time, but the file is bigger or a little worse.");
+        }
     }
 
     /// What copying will really do.
@@ -954,7 +975,7 @@ impl ClipTab {
     }
 
     /// The size to aim for, and how that will go.
-    fn target_ui(&mut self, ui: &mut Ui, source: &Source, end: f64) {
+    fn target_ui(&mut self, ui: &mut Ui, source: &Source, tools: &Tools, end: f64) {
         ui.horizontal(|ui| {
             ui.add(
                 egui::DragValue::new(&mut self.settings.target_mb)
@@ -974,7 +995,15 @@ impl ClipTab {
             return;
         }
         let length = end - self.start;
-        match self.settings.fit(source, length) {
+        let warn = ui.visuals().warn_fg_color;
+        let fit = self.settings.fit(source, tools, length);
+        // Only when there's something wrong with what's asked.
+        let suggestion = fit
+            .as_ref()
+            .map_or(true, |fit| fit.looks_poor())
+            .then(|| self.settings.suggested_output(source, tools, length))
+            .flatten();
+        match fit {
             Ok(fit) => {
                 ui.weak(format!(
                     "Video at {:.0} kbit/s, audio at {} kbit/s",
@@ -982,11 +1011,26 @@ impl ClipTab {
                     fit.audio_kbps
                 ));
                 if fit.looks_poor() {
-                    let advice = match self.settings.suggested_resolution(source, &fit) {
-                        Some(side) => format!("It may look poor at this size. Try {side}p."),
-                        None => "It may look poor at this size. Try a shorter clip.".to_owned(),
-                    };
-                    ui.colored_label(ui.visuals().warn_fg_color, advice);
+                    let hardware = self.settings.hardware
+                        && self.settings.hardware_available(
+                            source,
+                            tools,
+                            self.original_extension(),
+                        );
+                    ui.colored_label(
+                        warn,
+                        if hardware {
+                            "It will look poor at this size, and a hardware encoder may not get this small."
+                        } else {
+                            "It will look poor at this size."
+                        },
+                    );
+                }
+                if self
+                    .settings
+                    .reads_twice(source, tools, self.original_extension())
+                {
+                    ui.weak("Goes through the video twice, so it takes longer than other exports.");
                 }
                 // Copying would keep all the quality there is.
                 let share = length / source.duration.max(MIN_LENGTH);
@@ -1001,8 +1045,15 @@ impl ClipTab {
                 }
             }
             Err(err) => {
-                ui.colored_label(ui.visuals().warn_fg_color, err);
+                ui.colored_label(warn, err);
             }
+        }
+        if let Some(suggestion) = suggestion
+            && ui.button(format!("Use {}", suggestion.label())).clicked()
+        {
+            self.settings.resolution = suggestion.side.or(self.settings.resolution);
+            self.settings.fps = suggestion.fps.or(self.settings.fps);
+            self.settings.hardware &= !suggestion.software;
         }
     }
 
@@ -1126,7 +1177,7 @@ impl ClipTab {
         let fits = !self.settings.use_target
             || self.settings.format.is_audio_only()
             || self.settings.format.is_animated()
-            || self.settings.fit(source, end - self.start).is_ok();
+            || self.settings.fit(source, tools, end - self.start).is_ok();
         if ui
             .add_enabled(
                 !name_invalid && extension.is_ok() && fits,

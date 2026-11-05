@@ -30,6 +30,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use web_time::Instant;
 
 use super::crop::{Crop, View};
 use crate::{
@@ -67,6 +68,24 @@ const TARGET_MARGIN: f64 = 0.97;
 /// which it looks fine: enough for a guide, however much codecs differ.
 const POOR_BPP: f64 = 0.02;
 const FINE_BPP: f64 = 0.04;
+/// Below this it's hardly recognisable, and takes as long as a good one, so it
+/// isn't offered.
+const UNWORKABLE_BPP: f64 = 0.005;
+/// Frames past this rate are so alike that they cost little more, so they don't
+/// count towards what a picture needs.
+const MOST_COUNTED_FPS: f64 = 60.0;
+/// What a container spends on listing each frame or packet, which a long video
+/// at a small size notices. Measured from MP4s.
+const INDEX_BYTES_EACH: f64 = 13.0;
+/// Encoders of audio mostly send about this many packets a second.
+const AUDIO_PACKETS_A_SECOND: f64 = 50.0;
+/// The least hardware encoders spent on a frame, in bits, whatever they were
+/// asked: measured on an AMD card, on game footage, and more on anything busier.
+const HARDWARE_H264_FRAME_BITS: f64 = 6_500.0;
+const HARDWARE_OTHER_FRAME_BITS: f64 = 4_500.0;
+/// A second try at this share of the bitrate or less, that comes out at more
+/// than this share of the size, says the encoder has gone as low as it goes.
+const STUCK_SHARE: f64 = 0.9;
 
 /// An audio stream of the source.
 #[derive(Clone, Debug, PartialEq)]
@@ -97,6 +116,7 @@ pub struct Source {
     start_time: f64,
     video_index: u64,
     video_codec: String,
+    pixel_format: String,
     /// As shown, so a phone's upright video is taller than it's wide.
     width: u32,
     height: u32,
@@ -389,6 +409,32 @@ impl Quality {
     }
 }
 
+/// How hard a software encoder works.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Effort {
+    #[default]
+    Balanced,
+    Fast,
+}
+
+impl Effort {
+    pub const ALL: [Self; 2] = [Self::Balanced, Self::Fast];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Balanced => "Balanced",
+            Self::Fast => "Fast",
+        }
+    }
+
+    fn pick<T>(self, balanced: T, fast: T) -> T {
+        match self {
+            Self::Balanced => balanced,
+            Self::Fast => fast,
+        }
+    }
+}
+
 /// What to carry over from the source.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Keep {
@@ -481,6 +527,7 @@ pub struct Settings {
     pub audio_kbps: Option<u32>,
     /// Encode on the GPU, where there's an encoder for it.
     pub hardware: bool,
+    pub effort: Effort,
     /// The part of the picture to keep.
     pub crop: Option<Crop>,
     /// The shape to keep the crop to, as width and height.
@@ -506,6 +553,7 @@ impl Default for Settings {
             audio: AudioChoice::default(),
             audio_kbps: None,
             hardware: false,
+            effort: Effort::Balanced,
             crop: None,
             crop_shape: None,
             turn: Turn::None,
@@ -523,6 +571,31 @@ pub struct Fit {
     pub audio_kbps: u32,
     /// Bits for each pixel of each frame.
     bpp: f64,
+}
+
+/// What to change to better suit a target size.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Suggestion {
+    pub side: Option<u32>,
+    pub fps: Option<u32>,
+    /// Leave the hardware encoder.
+    pub software: bool,
+}
+
+impl Suggestion {
+    pub fn label(self) -> String {
+        let picture = match (self.side, self.fps) {
+            (Some(side), Some(fps)) => format!("{side}p at {fps} fps"),
+            (Some(side), None) => format!("{side}p"),
+            (None, Some(fps)) => format!("{fps} fps"),
+            (None, None) => String::new(),
+        };
+        match (self.software, picture.is_empty()) {
+            (true, true) => "the software encoder".to_owned(),
+            (true, false) => format!("the software encoder and {picture}"),
+            (false, _) => picture,
+        }
+    }
 }
 
 impl Fit {
@@ -676,46 +749,149 @@ impl Settings {
     }
 
     /// How `length` seconds fit the target size; an error says if they can't.
-    pub fn fit(&self, source: &Source, length: f64) -> Result<Fit, String> {
+    pub fn fit(&self, source: &Source, tools: &Tools, length: f64) -> Result<Fit, String> {
         let bytes = self.target_bytes().unwrap_or(0.0);
         // What matters is how long it plays for.
         let length = (length / self.speed).max(0.001);
-        let budget = bytes * 8.0 * TARGET_MARGIN / length;
         let tracks = self.audio_streams(source).len() as f64;
+        let (pixels, fps) = self.output_rate(source);
+        let index = INDEX_BYTES_EACH * length * (fps + tracks * AUDIO_PACKETS_A_SECOND);
+        let budget = (bytes * TARGET_MARGIN - index).max(0.0) * 8.0 / length;
         // The audio gets a little of what there is, within what still sounds
         // right: at a target size, its original could be most of the file.
-        let audio_kbps = self.audio_kbps.unwrap_or_else(|| {
-            let share = budget * 0.15 / tracks.max(1.0) / 1000.0;
-            share.clamp(48.0, 128.0) as u32
-        });
-        let audio_bps = f64::from(audio_kbps) * 1000.0 * tracks;
-        let video_bps = budget - audio_bps;
-        if video_bps < MIN_VIDEO_BITRATE {
-            let needed = (MIN_VIDEO_BITRATE + audio_bps) * length / 8.0 / TARGET_MARGIN / 1e6;
+        let audio_kbps_at = |budget: f64| {
+            self.audio_kbps.unwrap_or_else(|| {
+                let share = budget * 0.15 / tracks.max(1.0) / 1000.0;
+                share.clamp(48.0, 128.0) as u32
+            })
+        };
+        let audio_bps_at = |budget| f64::from(audio_kbps_at(budget)) * 1000.0 * tracks;
+        let audio_kbps = audio_kbps_at(budget);
+        let video_bps = budget - audio_bps_at(budget);
+        let counted = (pixels * fps.min(MOST_COUNTED_FPS)).max(1.0);
+        let hardware_least = self
+            .hardware_codec(source, tools)
+            .map_or(0.0, |codec| match codec {
+                Codec::H264 => HARDWARE_H264_FRAME_BITS * fps,
+                _ => HARDWARE_OTHER_FRAME_BITS * fps,
+            });
+        let any_encoder_least = MIN_VIDEO_BITRATE.max(UNWORKABLE_BPP * counted);
+        let least = any_encoder_least.max(hardware_least);
+        if video_bps < least {
+            // More room means more for the audio too, a little less each time.
+            let enough = (0..8).fold(least, |enough, _| least + audio_bps_at(enough));
+            let needed = (enough * length / 8.0 + index) / TARGET_MARGIN / 1e6;
+            // Up, so that what it says really is enough.
+            let needed = (needed * 10.0).ceil() / 10.0;
             return Err(format!(
-                "{} MB is too small for this much video. It needs at least {:.1} MB, or less audio.",
-                self.target_mb, needed
+                "{} MB is too small for this much video at this picture size and frame rate{}. It needs at least {needed:.1} MB.",
+                self.target_mb,
+                if hardware_least > any_encoder_least {
+                    " on the hardware encoder"
+                } else {
+                    ""
+                },
             ));
         }
-        let (pixels, fps) = self.output_rate(source);
         Ok(Fit {
             video_bps,
             audio_kbps,
-            bpp: video_bps / (pixels * fps).max(1.0),
+            bpp: video_bps / counted,
         })
     }
 
-    /// A shorter side to shrink to, if at this target size it would look fine.
-    pub fn suggested_resolution(&self, source: &Source, fit: &Fit) -> Option<u32> {
-        let (pixels, fps) = self.output_rate(source);
+    /// The codec, if it's going to a hardware encoder.
+    fn hardware_codec(&self, source: &Source, tools: &Tools) -> Option<Codec> {
+        let codec = self
+            .format
+            .codec()
+            .or_else(|| Codec::of_source(&source.video_codec))?;
+        (self.hardware && codec.hardware(tools).is_some()).then_some(codec)
+    }
+
+    /// A lower resolution and frame rate that suit the target size better: the
+    /// largest that looks fine, or else that looks passable, or else that can
+    /// be done at all. If only leaving the hardware encoder makes that possible,
+    /// that too. `None` where nothing's better than what's asked already.
+    pub fn suggested_output(
+        &self,
+        source: &Source,
+        tools: &Tools,
+        length: f64,
+    ) -> Option<Suggestion> {
         let visible = self.visible_short_side(source);
-        let side = f64::from(self.scale_to(source).unwrap_or(visible));
-        // Pixels go by the square of the side.
-        let fine = side * (fit.video_bps / (pixels * fps).max(1.0) / FINE_BPP).sqrt();
-        super::tab::RESOLUTIONS
-            .iter()
-            .copied()
-            .find(|preset| f64::from(*preset) <= fine && f64::from(*preset) < side)
+        let side_now = self.scale_to(source).unwrap_or(visible);
+        let sides = std::iter::once(None).chain(
+            super::tab::RESOLUTIONS
+                .into_iter()
+                .filter(|side| *side < side_now)
+                .map(Some),
+        );
+        let fps_now = self.output_rate(source).1;
+        let mut options = Vec::new();
+        for side in sides {
+            for fps in [None, Some(60), Some(30)] {
+                if fps.is_some_and(|fps| f64::from(fps) >= fps_now - 0.5) {
+                    continue;
+                }
+                let changed = Self {
+                    resolution: side.or(self.resolution),
+                    fps: fps.or(self.fps),
+                    ..*self
+                };
+                if let Ok(fit) = changed.fit(source, tools, length) {
+                    let (pixels, fps_out) = changed.output_rate(source);
+                    options.push((
+                        fit.bpp,
+                        (pixels, fps_out),
+                        Suggestion {
+                            side,
+                            fps,
+                            software: false,
+                        },
+                    ));
+                }
+            }
+        }
+        let fit_now = self.fit(source, tools, length);
+        let now = fit_now.as_ref().map_or(0.0, |fit| fit.bpp);
+        let better = [FINE_BPP, POOR_BPP, 0.0].into_iter().find_map(|enough| {
+            let mut best: Option<&(f64, (f64, f64), Suggestion)> = None;
+            for option in options.iter().filter(|option| option.0 >= enough) {
+                // The sharpest, then the smoothest, as each frame gets more
+                // bits with fewer of them.
+                if best.is_none_or(|best| option.1 > best.1) {
+                    best = Some(option);
+                }
+            }
+            // Changing nothing is no suggestion, and it must be some improvement.
+            best.filter(|best| best.2 != Suggestion::default() && best.0 > now)
+                .map(|best| best.2)
+        });
+        if better.is_some() || fit_now.is_ok() || self.hardware_codec(source, tools).is_none() {
+            return better;
+        }
+        let software = Self {
+            hardware: false,
+            ..*self
+        };
+        let works = software.fit(source, tools, length).is_ok();
+        software
+            .suggested_output(source, tools, length)
+            .or(works.then_some(Suggestion::default()))
+            .map(|suggestion| Suggestion {
+                software: true,
+                ..suggestion
+            })
+    }
+
+    /// Whether a target size means going through the video twice.
+    pub fn reads_twice(&self, source: &Source, tools: &Tools, original: &str) -> bool {
+        let Ok((_, Some(codec))) = self.container(source, original) else {
+            return false;
+        };
+        let hardware = self.hardware && codec.hardware(tools).is_some();
+        !hardware && codec.encoder(tools).is_some_and(has_two_passes)
     }
 
     /// The output's extension, for a source with the extension `original`.
@@ -1029,6 +1205,7 @@ fn parse_probe(text: &str) -> Result<Source, String> {
                 found_video = true;
                 source.video_index = index;
                 source.video_codec = codec;
+                source.pixel_format = text_of(stream, "pix_fmt").unwrap_or_default();
                 let side = |key| stream.get(key).and_then(Value::as_u64).unwrap_or(0) as u32;
                 let (width, height) = (side("width"), side("height"));
                 // Phones film sideways and say which way up it goes.
@@ -1203,6 +1380,8 @@ struct Encode {
     pass: Pass,
     /// For an animation at a target size: the shorter side to shrink to.
     side: Option<u32>,
+    /// Keep the frames in memory, after decoding on the GPU didn't work.
+    cpu_frames: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1249,6 +1428,7 @@ fn video_args(
     encode: Encode,
 ) -> Vec<String> {
     let quality = job.settings.quality;
+    let effort = job.settings.effort;
     let mut args: Vec<String> = vec!["-c:v".into(), encoder.into()];
     let mut add = |more: &[&str]| args.extend(more.iter().map(|&arg| arg.to_owned()));
     let crf =
@@ -1260,14 +1440,14 @@ fn video_args(
         .map(|(video, _)| ((video * 1.5) as u64).to_string());
     match encoder {
         "libx264" => {
-            add(&["-preset", "medium"]);
+            add(&["-preset", effort.pick("medium", "veryfast")]);
             match &rate {
                 Some(rate) => add(&["-b:v", rate]),
                 None => add(&["-crf", &crf(18, 23, 28)]),
             }
         }
         "libx265" => {
-            add(&["-preset", "medium"]);
+            add(&["-preset", effort.pick("medium", "veryfast")]);
             match &rate {
                 Some(rate) => add(&["-b:v", rate]),
                 None => add(&["-crf", &crf(20, 26, 31)]),
@@ -1281,21 +1461,28 @@ fn video_args(
             add(&["-x265-params", &params]);
         }
         "libsvtav1" => {
-            add(&["-preset", "8"]);
+            add(&["-preset", effort.pick("8", "10")]);
             match &rate {
                 Some(rate) => add(&["-b:v", rate]),
                 None => add(&["-crf", &crf(24, 32, 42)]),
             }
         }
         "libaom-av1" => {
-            add(&["-cpu-used", "6", "-row-mt", "1"]);
+            add(&["-cpu-used", effort.pick("6", "8"), "-row-mt", "1"]);
             match &rate {
                 Some(rate) => add(&["-b:v", rate]),
                 None => add(&["-crf", &crf(24, 32, 42), "-b:v", "0"]),
             }
         }
         "libvpx-vp9" => {
-            add(&["-deadline", "good", "-cpu-used", "3", "-row-mt", "1"]);
+            add(&[
+                "-deadline",
+                "good",
+                "-cpu-used",
+                effort.pick("3", "5"),
+                "-row-mt",
+                "1",
+            ]);
             match &rate {
                 Some(rate) => add(&["-b:v", rate]),
                 None => add(&["-crf", &crf(24, 32, 40), "-b:v", "0"]),
@@ -1367,19 +1554,35 @@ fn video_args(
 /// The name a two-pass encode's notes go by, in a folder of their own.
 const STATS: &str = "pass";
 
-/// The filters a re-encode runs the video through: what's kept of the picture,
-/// then which way up it goes, then how big, then how fast.
+/// The filters a re-encode runs the video through: how fast, then what's kept of
+/// the picture, then which way up it goes, then how big.
 fn video_filters(
     job: &ClipJob,
     encode: Encode,
     tone_map: bool,
     ten_bit: bool,
     vaapi: bool,
+    gpu_frames: bool,
 ) -> Option<String> {
     let ClipJob {
         source, settings, ..
     } = job;
     let mut filters: Vec<String> = Vec::new();
+    let surface = if ten_bit { "p010" } else { "nv12" };
+    // First, so that the rest only work on the frames that are kept.
+    if settings.changes_speed() {
+        filters.push(format!("setpts=PTS/{}", settings.speed));
+    }
+    if let Some(fps) = settings.fps_to(source) {
+        filters.push(format!("fps={fps}"));
+    } else if settings.changes_speed() {
+        // Or it would change along with the speed.
+        filters.push(format!("fps={:.3}", source.fps));
+    }
+    if gpu_frames {
+        // Frames are on the GPU already, unless it couldn't decode this one.
+        filters.push(format!("format={surface}|vaapi,hwupload"));
+    }
     if tone_map {
         filters.push(TONE_MAP.to_owned());
     }
@@ -1406,27 +1609,16 @@ fn video_filters(
     }
     if let Some(side) = encode.side.or_else(|| settings.scale_to(source)) {
         let (width, height) = settings.visible_size(source);
-        filters.push(if width >= height {
-            format!("scale=-2:{side}:flags=lanczos")
-        } else {
-            format!("scale={side}:-2:flags=lanczos")
+        filters.push(match (width >= height, gpu_frames) {
+            (true, true) => format!("scale_vaapi=-2:{side}"),
+            (false, true) => format!("scale_vaapi={side}:-2"),
+            (true, false) => format!("scale=-2:{side}:flags=lanczos"),
+            (false, false) => format!("scale={side}:-2:flags=lanczos"),
         });
     }
-    if settings.changes_speed() {
-        filters.push(format!("setpts=PTS/{}", settings.speed));
-    }
-    if let Some(fps) = settings.fps_to(source) {
-        filters.push(format!("fps={fps}"));
-    } else if settings.changes_speed() {
-        // Or it would change along with the speed.
-        filters.push(format!("fps={:.3}", source.fps));
-    }
-    if vaapi {
+    if vaapi && !gpu_frames {
         // Last, as the others work on pictures in memory.
-        filters.push(format!(
-            "format={},hwupload",
-            if ten_bit { "p010" } else { "nv12" }
-        ));
+        filters.push(format!("format={surface},hwupload"));
     }
     if settings.format == Format::Gif {
         // The best 256 colors for this video, not some general ones.
@@ -1439,6 +1631,26 @@ fn video_filters(
         ));
     }
     (!filters.is_empty()).then(|| filters.join(","))
+}
+
+/// Whether the frames can go from decoder to encoder without leaving the GPU:
+/// nothing's asked of them that only the processor does, and they're as many
+/// bits as the encoder is given.
+fn stays_on_gpu(job: &ClipJob, encode: Encode, tone_map: bool, ten_bit: bool) -> bool {
+    let settings = &job.settings;
+    let format = job.source.pixel_format.as_str();
+    let decodes_to_it = if ten_bit {
+        matches!(format, "yuv420p10le" | "p010le")
+    } else {
+        matches!(format, "yuv420p" | "yuvj420p" | "nv12")
+    };
+    !encode.cpu_frames
+        && decodes_to_it
+        && !tone_map
+        && settings.crop.is_none()
+        && settings.turn == Turn::None
+        && !settings.flip_horizontal
+        && !settings.flip_vertical
 }
 
 /// `atempo` filters for a speed: each only goes from half to double.
@@ -1487,12 +1699,21 @@ fn plan(
     let audio_only = settings.format.audio_only();
     let keep = settings.keep;
     let hardware = codec.map(|codec| encoder_for(job, codec)).transpose()?;
+    // HDR that's kept is the only ten-bit output, as elsewhere here.
+    let keeps_hdr = source.is_hdr() && keep.hdr && codec.is_some_and(|codec| codec != Codec::H264);
+    let tone_map = source.is_hdr() && !keeps_hdr;
+    let device = hardware.as_ref().and_then(|h| h.device.as_deref());
+    let gpu_frames = device.is_some() && stays_on_gpu(job, encode, tone_map, keeps_hdr);
     let mut args: Vec<OsString> = Vec::new();
     let mut add = |more: &[&str]| args.extend(more.iter().map(OsString::from));
     add(&["-hide_banner", "-v", "error", "-nostdin", "-nostats", "-n"]);
     add(&["-progress", "pipe:1"]);
-    if let Some(device) = hardware.as_ref().and_then(|h| h.device.as_deref()) {
+    if let Some(device) = device {
         add(&["-vaapi_device", device]);
+        if gpu_frames {
+            add(&["-hwaccel", "vaapi", "-hwaccel_device", device]);
+            add(&["-hwaccel_output_format", "vaapi"]);
+        }
     }
     let animated = settings.format.animated();
     let copying_video = codec.is_none() && audio_only.is_none() && animated.is_none();
@@ -1556,7 +1777,7 @@ fn plan(
         if tone_map && !job.tools.zscale {
             return Err(NO_ZIMG.to_owned());
         }
-        if let Some(filters) = video_filters(job, encode, tone_map, false, false) {
+        if let Some(filters) = video_filters(job, encode, tone_map, false, false, false) {
             add(&["-vf", &filters]);
         }
         add(&["-c:v", encoder, "-an", "-sn", "-loop", "0"]);
@@ -1571,13 +1792,12 @@ fn plan(
 
     if let (Some(codec), Some(hardware)) = (codec, &hardware) {
         // H.264 here is 8-bit, which can't hold HDR.
-        let tone_map = source.is_hdr() && (!keep.hdr || codec == Codec::H264);
         if tone_map && !job.tools.zscale {
             return Err(NO_ZIMG.to_owned());
         }
         let ten_bit = source.is_hdr() && !tone_map;
         let vaapi = hardware.device.is_some();
-        if let Some(filters) = video_filters(job, encode, tone_map, ten_bit, vaapi) {
+        if let Some(filters) = video_filters(job, encode, tone_map, ten_bit, vaapi, gpu_frames) {
             add(&["-vf", &filters]);
         }
         let video = video_args(&hardware.encoder, codec, extension, job, tone_map, encode);
@@ -1773,13 +1993,13 @@ fn make_with_ffmpeg(
     p: &Progress,
 ) -> Result<(), String> {
     let Some(limit) = job.settings.target_bytes() else {
-        let args = plan(job, extension, temporary, Encode::default())?;
-        return encode(&args, None, 0.0, p);
+        let plain = Encode::default();
+        return encode_planned(job, extension, temporary, plain, None, 0.0, p, None).map(|_| ());
     };
     if job.settings.format.is_animated() {
         return make_animation(job, extension, temporary, limit, p);
     }
-    let fit = job.settings.fit(&job.source, length)?;
+    let fit = job.settings.fit(&job.source, &job.tools, length)?;
     // From here on, how long it plays for.
     let length = length / job.settings.speed;
     let codec = job.settings.format.codec().or_else(|| {
@@ -1791,6 +2011,7 @@ fn make_with_ffmpeg(
         None => return Err("Can't aim for a size without encoding.".to_owned()),
     };
     let mut video_bps = fit.video_bps;
+    let mut tries = Tries::new(job.settings.target_mb);
     let rate = |video_bps| Some((video_bps, fit.audio_kbps));
     let two_passes = has_two_passes(&encoder);
     let notes = if two_passes {
@@ -1806,7 +2027,7 @@ fn make_with_ffmpeg(
         let first = Encode {
             rate: rate(video_bps),
             pass: Pass::First,
-            side: None,
+            ..Encode::default()
         };
         encode(&plan(job, extension, temporary, first)?, cwd, 0.0, p)?;
         base = length;
@@ -1826,27 +2047,104 @@ fn make_with_ffmpeg(
         let this = Encode {
             rate: rate(video_bps),
             pass,
-            side: None,
+            ..Encode::default()
         };
-        encode(&plan(job, extension, temporary, this)?, cwd, base, p)?;
+        let watch = Some(Watch { limit, length });
+        let stopped = encode_planned(job, extension, temporary, this, cwd, base, p, watch)?;
         if p.cancelled() {
             return Ok(());
         }
-        let size = disk::metadata(temporary)
-            .map_err(|err| err.to_string())?
-            .len() as f64;
+        let size = match stopped {
+            Some(size) => size,
+            None => disk::metadata(temporary)
+                .map_err(|err| err.to_string())?
+                .len() as f64,
+        };
         if size <= limit {
             return Ok(());
         }
-        video_bps = smaller_bitrate(video_bps, size, limit, length);
-        if video_bps < MIN_VIDEO_BITRATE {
-            break;
+        video_bps = tries.next(video_bps, size, limit, length)?;
+    }
+    Err(tries.gave_up())
+}
+
+/// What a target size has come to so far, and so what to try next.
+struct Tries {
+    target_mb: f64,
+    /// The last try's bitrate and size.
+    last: Option<(f64, f64)>,
+}
+
+impl Tries {
+    fn new(target_mb: f64) -> Self {
+        Self {
+            target_mb,
+            last: None,
         }
     }
-    Err(format!(
-        "Couldn't get it under {} MB. Try a lower resolution or frame rate.",
-        job.settings.target_mb
-    ))
+
+    fn gave_up(&self) -> String {
+        format!(
+            "Couldn't get it under {} MB. Try a lower resolution or frame rate.",
+            self.target_mb
+        )
+    }
+
+    /// The bitrate to try after `bitrate` made `size` bytes, or why not to.
+    fn next(&mut self, bitrate: f64, size: f64, limit: f64, length: f64) -> Result<f64, String> {
+        if let Some((last_bitrate, last_size)) = self.last
+            && bitrate <= last_bitrate * STUCK_SHARE
+            && size >= last_size * STUCK_SHARE
+        {
+            return Err(format!(
+                "The encoder can't go this small: it came to about {:.0} MB. Try a lower resolution or frame rate.",
+                size / 1e6
+            ));
+        }
+        self.last = Some((bitrate, size));
+        let next = smaller_bitrate(bitrate, size, limit, length);
+        if next < MIN_VIDEO_BITRATE {
+            return Err(self.gave_up());
+        }
+        Ok(next)
+    }
+}
+
+/// Runs a plan, again without decoding on the GPU if that's what went wrong.
+/// With a `watch`, the size it was on course for if it was stopped early.
+#[allow(clippy::too_many_arguments)]
+fn encode_planned(
+    job: &ClipJob,
+    extension: &str,
+    temporary: &Path,
+    this: Encode,
+    cwd: Option<&Path>,
+    base: f64,
+    p: &Progress,
+    watch: Option<Watch>,
+) -> Result<Option<f64>, String> {
+    let args = plan(job, extension, temporary, this)?;
+    let writes = watch.map(|watch| (temporary, watch));
+    let result = encode_watching(&args, cwd, base, p, writes);
+    if result.is_err() && !p.cancelled() && args.iter().any(|arg| arg == "-hwaccel") {
+        // ffmpeg won't write over what it got done.
+        let _ = disk::remove_file(temporary);
+        let again = Encode {
+            cpu_frames: true,
+            ..this
+        };
+        let args = plan(job, extension, temporary, again)?;
+        return encode_watching(&args, cwd, base, p, writes);
+    }
+    result
+}
+
+/// A file to stop writing as soon as it's over a limit.
+#[derive(Clone, Copy)]
+struct Watch {
+    limit: f64,
+    /// How long the output plays for, in seconds.
+    length: f64,
 }
 
 /// Writes an animation small enough for `limit` bytes. These have no bitrate to
@@ -1907,6 +2205,15 @@ fn smaller_side(side: f64, size: f64, limit: f64) -> f64 {
     ((wanted / 2.0).floor() * 2.0).min(side - 2.0)
 }
 
+/// How often to look at how big a file has got.
+const WATCH_EVERY: Duration = Duration::from_millis(500);
+
+/// The size a file will come to, with `written` bytes `done` seconds into
+/// `length`.
+fn on_course_for(written: f64, done: f64, length: f64) -> f64 {
+    written * (length / done.max(length * 0.01)).max(1.0)
+}
+
 /// The video bitrate to try after `bitrate` made `size` bytes against a `limit`:
 /// less by what was over, and by the margin, but at most half as much.
 fn smaller_bitrate(bitrate: f64, size: f64, limit: f64, length: f64) -> f64 {
@@ -1943,6 +2250,19 @@ impl Drop for Notes {
 /// Runs ffmpeg with `args`, in `cwd` if given, showing its progress from `base`
 /// seconds on, until it ends or the job is cancelled.
 fn encode(args: &[OsString], cwd: Option<&Path>, base: f64, p: &Progress) -> Result<(), String> {
+    encode_watching(args, cwd, base, p, None).map(|_| ())
+}
+
+/// As [`encode`], but stops when the file it's writing goes over a limit, since
+/// it can only grow: there's no sense in finishing. Says if so, with the size it
+/// was on course for.
+fn encode_watching(
+    args: &[OsString],
+    cwd: Option<&Path>,
+    base: f64,
+    p: &Progress,
+    watch: Option<(&Path, Watch)>,
+) -> Result<Option<f64>, String> {
     let mut ffmpeg = command("ffmpeg");
     if let Some(cwd) = cwd {
         ffmpeg.current_dir(cwd);
@@ -1974,10 +2294,13 @@ fn encode(args: &[OsString], cwd: Option<&Path>, base: f64, p: &Progress) -> Res
             let _ = errors_done.send(text);
         });
     }
+    let mut done = 0.0;
+    let mut looked = Instant::now();
     loop {
         match progress.recv_timeout(Duration::from_millis(100)) {
             Ok(line) => {
                 if let Some(seconds) = parse_progress(&line) {
+                    done = seconds;
                     p.set_time_done(base + seconds);
                 }
             }
@@ -1987,12 +2310,23 @@ fn encode(args: &[OsString], cwd: Option<&Path>, base: f64, p: &Progress) -> Res
         if p.cancelled() {
             let _ = child.kill();
             let _ = child.wait();
-            return Ok(());
+            return Ok(None);
+        }
+        if let Some((path, watch)) = watch
+            && looked.elapsed() >= WATCH_EVERY
+        {
+            looked = Instant::now();
+            let written = disk::metadata(path).map_or(0.0, |file| file.len() as f64);
+            if written > watch.limit {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Ok(Some(on_course_for(written, done, watch.length)));
+            }
         }
     }
     let status = child.wait().map_err(|err| err.to_string())?;
     if status.success() {
-        return Ok(());
+        return Ok(None);
     }
     let text = errors
         .recv_timeout(Duration::from_secs(2))
@@ -2256,7 +2590,7 @@ mod tests {
         };
         assert!(!settings.copies(&source));
         let args = planned(&job(settings), "mkv");
-        assert!(has(&args, "-vf", "scale=-2:1080:flags=lanczos,fps=24"));
+        assert!(has(&args, "-vf", "fps=24,scale=-2:1080:flags=lanczos"));
     }
 
     #[test]
@@ -2309,27 +2643,274 @@ mod tests {
             ..Settings::default()
         };
         assert!(!settings.copies(&source));
-        let fit = settings.fit(&source, 100.0).unwrap();
-        // 25 MB over 100 s is 2 Mbit/s, less the margin.
+        let fit = settings.fit(&source, &Tools::default(), 100.0).unwrap();
+        // 25 MB over 100 s is 2 Mbit/s, less the margin and the file's index.
         assert_eq!(fit.audio_kbps, 128);
-        assert!((fit.video_bps - (1_940_000.0 - 128_000.0)).abs() < 1.0);
+        let index = 13.0 * 100.0 * (source.fps + 50.0) * 8.0 / 100.0;
+        assert!((fit.video_bps - (1_940_000.0 - index - 128_000.0)).abs() < 1.0);
         assert!(fit.looks_poor(), "4K at under 2 Mbit/s");
-        let side = settings.suggested_resolution(&source, &fit).unwrap();
-        assert!(side < 2160, "{side}");
+        let better = settings
+            .suggested_output(&source, &Tools::default(), 100.0)
+            .unwrap();
+        assert!(better.side.unwrap() < 2160, "{better:?}");
 
         // Too little even for smears.
         let tiny = Settings {
             target_mb: 0.1,
             ..settings
         };
-        let err = tiny.fit(&source, 600.0).unwrap_err();
+        let err = tiny.fit(&source, &Tools::default(), 600.0).unwrap_err();
         assert!(err.contains("at least"), "{err}");
         // Audio gets less when there's little to go round, down to a point.
         let small = Settings {
             target_mb: 1.0,
+            resolution: Some(360),
             ..settings
         };
-        assert_eq!(small.fit(&source, 60.0).unwrap().audio_kbps, 48);
+        assert_eq!(
+            small
+                .fit(&source, &Tools::default(), 60.0)
+                .unwrap()
+                .audio_kbps,
+            48
+        );
+    }
+
+    /// What a long, fast game recording is.
+    fn replay() -> Source {
+        Source {
+            duration: 600.0,
+            width: 2560,
+            height: 1440,
+            fps: 165.0,
+            audio: vec![AudioStream {
+                index: 1,
+                codec: "opus".to_owned(),
+                label: String::new(),
+            }],
+            ..Source::default()
+        }
+    }
+
+    #[test]
+    fn an_impossible_size_is_refused_with_something_better() {
+        let source = replay();
+        let settings = Settings {
+            use_target: true,
+            target_mb: 10.0,
+            ..Settings::default()
+        };
+        let err = settings.fit(&source, &Tools::default(), 600.0).unwrap_err();
+        assert!(err.contains("at least"), "{err}");
+        // What it says it needs is what it takes.
+        let needed: f64 = err
+            .split("at least ")
+            .nth(1)
+            .and_then(|rest| rest.split(' ').next())
+            .and_then(|mb| mb.parse().ok())
+            .unwrap();
+        let enough = Settings {
+            target_mb: needed,
+            ..settings
+        };
+        assert!(
+            enough.fit(&source, &Tools::default(), 600.0).is_ok(),
+            "{needed}"
+        );
+        let less = Settings {
+            target_mb: needed - 0.2,
+            ..settings
+        };
+        assert!(
+            less.fit(&source, &Tools::default(), 600.0).is_err(),
+            "{needed}"
+        );
+
+        let better = settings
+            .suggested_output(&source, &Tools::default(), 600.0)
+            .unwrap();
+        assert_eq!(better.fps, Some(30));
+        let side = better.side.unwrap();
+        assert!(side <= 480, "{better:?}");
+        let taken = Settings {
+            resolution: better.side,
+            fps: better.fps,
+            ..settings
+        };
+        assert!(taken.fit(&source, &Tools::default(), 600.0).is_ok());
+    }
+
+    #[test]
+    fn nothing_better_is_suggested_when_all_is_well_or_hopeless() {
+        let source = replay();
+        let settings = Settings {
+            use_target: true,
+            target_mb: 3000.0,
+            ..Settings::default()
+        };
+        assert_eq!(
+            settings.suggested_output(&source, &Tools::default(), 600.0),
+            None
+        );
+        let hopeless = Settings {
+            target_mb: 0.1,
+            ..settings
+        };
+        assert_eq!(
+            hopeless.suggested_output(&source, &Tools::default(), 600.0),
+            None
+        );
+    }
+
+    #[test]
+    fn the_frames_past_sixty_do_not_count_towards_the_limit() {
+        let source = replay();
+        let at = |fps| Settings {
+            use_target: true,
+            target_mb: 100.0,
+            fps,
+            ..Settings::default()
+        };
+        // 1 Mbit/s or so, which is fine for 1440p whether it's at 60 or at 165.
+        assert!(at(None).fit(&source, &Tools::default(), 600.0).is_ok());
+        assert!(at(Some(60)).fit(&source, &Tools::default(), 600.0).is_ok());
+    }
+
+    #[test]
+    fn tries_stop_when_an_encoder_goes_no_lower() {
+        let mut tries = Tries::new(10.0);
+        let limit = 10e6;
+        let next = tries.next(80_000.0, 80e6, limit, 600.0).unwrap();
+        assert_eq!(next, 40_000.0);
+        let err = tries.next(next, 79e6, limit, 600.0).unwrap_err();
+        assert!(err.contains("can't go this small"), "{err}");
+        assert!(err.contains("79 MB"), "{err}");
+
+        // But coming down is fine, however far there is to go.
+        let mut tries = Tries::new(10.0);
+        let next = tries.next(80_000.0, 12e6, limit, 600.0).unwrap();
+        assert!(tries.next(next, 10.5e6, limit, 600.0).is_ok());
+    }
+
+    #[test]
+    fn tries_give_up_below_the_lowest_bitrate() {
+        let err = Tries::new(10.0)
+            .next(MIN_VIDEO_BITRATE, 80e6, 10e6, 600.0)
+            .unwrap_err();
+        assert!(err.contains("Couldn't get it under"), "{err}");
+    }
+
+    #[test]
+    fn a_size_is_worked_out_from_how_far_it_got() {
+        assert_eq!(on_course_for(10.0, 60.0, 600.0), 100.0);
+        // Nothing to go on yet doesn't mean it's infinitely big.
+        assert_eq!(on_course_for(10.0, 0.0, 600.0), 1000.0);
+        // Past the end, it's what it is.
+        assert_eq!(on_course_for(10.0, 700.0, 600.0), 10.0);
+    }
+
+    fn vaapi_job(settings: Settings, pixel_format: &str) -> ClipJob {
+        let mut job = job(settings);
+        job.source.pixel_format = pixel_format.to_owned();
+        job.source.color_transfer = None;
+        job.tools.hardware = vec![Hardware {
+            encoder: "h264_vaapi".to_owned(),
+            device: Some("/dev/dri/renderD128".to_owned()),
+        }];
+        job
+    }
+
+    #[test]
+    fn frames_stay_on_the_gpu_unless_the_processor_has_work_to_do() {
+        let settings = Settings {
+            format: Format::Mp4H264,
+            hardware: true,
+            resolution: Some(90),
+            ..Settings::default()
+        };
+        let args = planned(&vaapi_job(settings, "yuvj420p"), "mp4");
+        assert!(has(&args, "-hwaccel", "vaapi"), "{args:?}");
+        let filters = args[args.iter().position(|a| a == "-vf").unwrap() + 1].clone();
+        assert!(
+            filters.starts_with("format=nv12|vaapi,hwupload,scale_vaapi="),
+            "{filters}"
+        );
+
+        let turned = Settings {
+            turn: Turn::Quarter,
+            ..settings
+        };
+        let args = planned(&vaapi_job(turned, "yuv420p"), "mp4");
+        assert!(!args.iter().any(|a| a == "-hwaccel"), "{args:?}");
+        let filters = args[args.iter().position(|a| a == "-vf").unwrap() + 1].clone();
+        assert!(filters.ends_with("format=nv12,hwupload"), "{filters}");
+
+        // A format we can't vouch for goes through memory.
+        let args = planned(&vaapi_job(settings, "yuv444p"), "mp4");
+        assert!(!args.iter().any(|a| a == "-hwaccel"), "{args:?}");
+
+        // Nor does a second try use it.
+        let job = vaapi_job(settings, "yuv420p");
+        let again = Encode {
+            cpu_frames: true,
+            ..Encode::default()
+        };
+        let args: Vec<String> = plan(&job, "mp4", Path::new("/out"), again)
+            .unwrap()
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(!args.iter().any(|a| a == "-hwaccel"), "{args:?}");
+    }
+
+    #[test]
+    fn hardware_floors_refuse_what_software_can_still_do() {
+        let source = replay();
+        let settings = Settings {
+            format: Format::Mp4H264,
+            hardware: true,
+            use_target: true,
+            target_mb: 10.0,
+            resolution: Some(480),
+            fps: Some(30),
+            ..Settings::default()
+        };
+        let tools = Tools {
+            hardware: vec![Hardware {
+                encoder: "h264_vaapi".to_owned(),
+                device: Some("/dev/dri/renderD128".to_owned()),
+            }],
+            encoders: ["libx264".to_owned()].into(),
+            ..Tools::default()
+        };
+        let err = settings.fit(&source, &tools, 600.0).unwrap_err();
+        assert!(err.contains("hardware"), "{err}");
+        let leave = settings.suggested_output(&source, &tools, 600.0).unwrap();
+        assert_eq!(leave.label(), "the software encoder");
+        // Where only software and a smaller picture will do, it says both.
+        let native = Settings {
+            resolution: None,
+            fps: None,
+            ..settings
+        };
+        let err = native.fit(&source, &tools, 600.0).unwrap_err();
+        assert!(!err.contains("hardware"), "not what's in the way: {err}");
+        let both = native.suggested_output(&source, &tools, 600.0).unwrap();
+        assert_eq!(both.label(), "the software encoder and 480p at 30 fps");
+        // No hardware encoder here means no such limit.
+        assert!(settings.fit(&source, &Tools::default(), 600.0).is_ok());
+    }
+
+    #[test]
+    fn effort_changes_what_software_encoders_are_told() {
+        let settings = Settings {
+            format: Format::Mp4H264,
+            exact: true,
+            effort: Effort::Fast,
+            ..Settings::default()
+        };
+        let job = job(settings);
+        assert!(has(&planned(&job, "mp4"), "-preset", "veryfast"));
     }
 
     #[test]
@@ -2343,7 +2924,7 @@ mod tests {
         let encode = |pass| Encode {
             rate: Some((1_000_000.0, 96)),
             pass,
-            side: None,
+            ..Encode::default()
         };
         let plain = |job: &ClipJob, pass| -> Vec<String> {
             plan(job, "mp4", Path::new("/out"), encode(pass))
@@ -2418,7 +2999,7 @@ mod tests {
         assert!(has(
             &args,
             "-vf",
-            "crop=1920:2160:1920:0,transpose=clock,hflip,scale=-2:720:flags=lanczos,setpts=PTS/2,fps=29.970"
+            "setpts=PTS/2,fps=29.970,crop=1920:2160:1920:0,transpose=clock,hflip,scale=-2:720:flags=lanczos"
         ));
     }
 
@@ -2527,8 +3108,14 @@ mod tests {
             use_target: true,
             ..Settings::default()
         };
-        let quick = sized.fit(&source, 100.0).unwrap().video_bps;
-        let slow = plain.fit(&source, 100.0).unwrap().video_bps;
+        let quick = sized
+            .fit(&source, &Tools::default(), 100.0)
+            .unwrap()
+            .video_bps;
+        let slow = plain
+            .fit(&source, &Tools::default(), 100.0)
+            .unwrap()
+            .video_bps;
         assert!(quick > slow * 1.9, "{quick} {slow}");
     }
 
@@ -2544,9 +3131,11 @@ mod tests {
         job.tools.encoders.insert("gif".to_owned());
         let args = planned(&job, "gif");
         let filters = args.windows(2).find(|w| w[0] == "-vf").unwrap()[1].clone();
-        assert!(filters.starts_with(TONE_MAP), "{filters}");
+        assert!(
+            filters.starts_with(&format!("fps=15,{TONE_MAP}")),
+            "{filters}"
+        );
         assert!(filters.contains("scale=-2:480"), "{filters}");
-        assert!(filters.contains(",fps=15,"), "{filters}");
         assert!(filters.contains("palettegen"), "{filters}");
         assert!(args.iter().any(|arg| arg == "-an"));
         assert!(!has(&args, "-map", "0:2") && !has(&args, "-map", "0:4"));
