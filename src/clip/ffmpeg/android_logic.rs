@@ -77,6 +77,26 @@ pub fn output_size((width, height): (u32, u32), side: Option<u32>) -> (u32, u32)
     )
 }
 
+/// A rectangle (x, y, width, height) of the upright picture, as a rectangle of
+/// the frame stored `rotation` degrees short of upright, whose size is `stored`.
+pub fn stored_rect(
+    (x, y, width, height): (u32, u32, u32, u32),
+    rotation: u32,
+    (stored_width, stored_height): (u32, u32),
+) -> (u32, u32, u32, u32) {
+    match rotation {
+        90 => (y, stored_height.saturating_sub(x + width), height, width),
+        180 => (
+            stored_width.saturating_sub(x + width),
+            stored_height.saturating_sub(y + height),
+            width,
+            height,
+        ),
+        270 => (stored_width.saturating_sub(y + height), x, height, width),
+        _ => (x, y, width, height),
+    }
+}
+
 /// The video bitrate for a quality given in bits for each pixel of each frame.
 /// H.264 needs the most; never more than the original had, which adds nothing.
 pub fn video_bitrate(bpp: f64, is_h264: bool, pixels_per_second: f64, source_bps: f64) -> f64 {
@@ -176,6 +196,24 @@ mod tests {
         assert_eq!(output_size((1920, 1080), Some(2160)), (1920, 1080));
         assert_eq!(output_size((853, 481), None), (854, 482));
         assert_eq!(output_size((1920, 1080), Some(1)), (2, 2));
+    }
+
+    #[test]
+    fn a_rectangle_of_the_picture_is_found_in_the_stored_frame() {
+        // A frame 8 by 4, with a 3 by 1 rectangle of it at (1, 0):
+        //   . a a a . . . .
+        //   . . . . . . . .   (and two rows more)
+        let rect = (1, 0, 3, 1);
+        let stored = (8, 4);
+        assert_eq!(stored_rect(rect, 0, stored), rect);
+        // Stored upside down, it's at the far corner.
+        assert_eq!(stored_rect(rect, 180, stored), (4, 3, 3, 1));
+        // Shown turned a quarter clockwise the frame is 4 wide and 8 high, and
+        // what's along the top of that is down the left of the frame.
+        assert_eq!(stored_rect((0, 1, 1, 3), 90, stored), (1, 3, 3, 1));
+        // And a quarter the other way, along the top is down the right... of a
+        // frame turned back, so its right end, reading up.
+        assert_eq!(stored_rect((0, 1, 1, 3), 270, stored), (4, 0, 3, 1));
     }
 
     #[test]

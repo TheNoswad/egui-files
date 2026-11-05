@@ -21,13 +21,13 @@ use jni::{
 };
 
 use super::{
-    AudioChoice, ClipJob, Codec, MAX_ATTEMPTS, MIN_VIDEO_BITRATE,
+    AudioChoice, ClipJob, Codec, MAX_ATTEMPTS, MIN_VIDEO_BITRATE, Turn,
     android::{new_extractor, number_of, release, sample_time, seek_to, text_of, track_format},
     android_logic::{self, FrameRate},
-    scale::{Scaler, Source as PlaneIn, Target as PlaneOut},
+    scale::{Orientation, Scaler, Source as PlaneIn, Target as PlaneOut},
     smaller_bitrate,
 };
-use crate::{android::with_env, jobs::Progress};
+use crate::{android::with_env, clip::crop::Crop, jobs::Progress};
 
 type Ref = Global<JObject<'static>>;
 
@@ -208,8 +208,7 @@ fn run(
         ],
     )?;
     let result = (|| {
-        // WebM has no way of saying these: its frames are turned instead.
-        if !job.settings.format.is_audio_only() && extension != "webm" {
+        if !job.settings.format.is_audio_only() && !bakes_rotation(job, extension) {
             env.call_method(
                 &muxer,
                 jni_str!("setOrientationHint"),
@@ -477,11 +476,10 @@ fn video_track(
             video_bps: rates.video_bps,
             source_bps: source_bps(job),
             size: (0, 0),
-            turn: if extension == "webm" {
-                job.source.rotation
-            } else {
-                0
-            },
+            rect: (0, 0, 0, 0),
+            crop: settings.crop,
+            rotation: job.source.rotation,
+            way: orientation(job, extension),
             scaler: [Scaler::default(), Scaler::default()],
         }))
     };
@@ -493,6 +491,32 @@ fn video_track(
         finished: false,
         how,
     })
+}
+
+/// Whether the frames themselves are turned upright, rather than a note left for
+/// the player. WebM can't hold such a note, and a picture that's being cropped,
+/// turned or mirrored may as well come out plain.
+fn bakes_rotation(job: &ClipJob, extension: &str) -> bool {
+    let settings = &job.settings;
+    !settings.copies(&job.source)
+        && (extension == "webm"
+            || settings.crop.is_some()
+            || settings.turn != Turn::None
+            || settings.flip_horizontal
+            || settings.flip_vertical)
+}
+
+/// Which way frames are drawn, given what's asked.
+fn orientation(job: &ClipJob, extension: &str) -> Orientation {
+    if !bakes_rotation(job, extension) {
+        return Orientation::default();
+    }
+    let settings = &job.settings;
+    Orientation {
+        turn: (job.source.rotation + settings.turn.degrees()) % 360,
+        flip_horizontal: settings.flip_horizontal,
+        flip_vertical: settings.flip_vertical,
+    }
 }
 
 fn source_bps(job: &ClipJob) -> f64 {
@@ -767,8 +791,13 @@ struct VideoCodec {
     video_bps: Option<f64>,
     source_bps: f64,
     size: (u32, u32),
-    /// How far to turn frames clockwise, for a container that can't say to.
-    turn: u32,
+    /// The part of each stored frame that's used: x, y, width and height.
+    rect: (u32, u32, u32, u32),
+    /// What's kept of the upright picture.
+    crop: Option<Crop>,
+    /// How far the frames are stored short of upright.
+    rotation: u32,
+    way: Orientation,
     /// For the brightness and for the colors, which are a different size.
     scaler: [Scaler; 2],
 }
@@ -817,8 +846,11 @@ impl VideoCodec {
                     &encoder.codec,
                     room,
                     time - start,
-                    self.size,
-                    self.turn,
+                    Frame {
+                        size: self.size,
+                        rect: self.rect,
+                        way: self.way,
+                    },
                     &mut self.scaler,
                 )?;
                 release_output(env, &self.reader.decoder, index)?;
@@ -844,13 +876,26 @@ impl VideoCodec {
         let image = output_image(env, &self.reader.decoder, index)?;
         let (_, _, width, height) = crop_of(env, &image)?;
         close_image(env, &image)?;
-        let (out_width, out_height) =
-            android_logic::output_size((width as u32, height as u32), self.side);
-        let (out_width, out_height) = if self.turn % 180 == 90 {
-            (out_height, out_width)
+        let stored = (width as u32, height as u32);
+        let upright = if self.rotation % 180 == 90 {
+            (stored.1, stored.0)
         } else {
-            (out_width, out_height)
+            stored
         };
+        self.rect = match self.crop {
+            Some(crop) => {
+                let (crop_width, crop_height, x, y) = crop.pixels(upright.0, upright.1);
+                android_logic::stored_rect((x, y, crop_width, crop_height), self.rotation, stored)
+            }
+            None => (0, 0, stored.0, stored.1),
+        };
+        let (_, _, used_width, used_height) = self.rect;
+        let drawn = if self.way.turn % 180 == 90 {
+            (used_height, used_width)
+        } else {
+            (used_width, used_height)
+        };
+        let (out_width, out_height) = android_logic::output_size(drawn, self.side);
         self.size = (out_width, out_height);
         let per_second = f64::from(out_width) * f64::from(out_height) * self.fps;
         let bitrate = self.video_bps.unwrap_or_else(|| {
@@ -1013,6 +1058,15 @@ fn crop_of(env: &mut Env, image: &JObject) -> jni::errors::Result<(usize, usize,
     ))
 }
 
+/// How a frame goes from the decoder to the encoder.
+struct Frame {
+    /// The encoder's width and height.
+    size: (u32, u32),
+    /// The part used of what's decoded: x, y, width and height.
+    rect: (u32, u32, u32, u32),
+    way: Orientation,
+}
+
 /// Moves a frame from the decoder to the encoder, at the encoder's size.
 #[allow(clippy::too_many_arguments)]
 fn copy_frame(
@@ -1022,15 +1076,17 @@ fn copy_frame(
     encoder: &JObject,
     room: i32,
     time: i64,
-    (width, height): (u32, u32),
-    turn: u32,
+    frame: Frame,
     scalers: &mut [Scaler; 2],
 ) -> jni::errors::Result<()> {
-    let (width, height) = (width as usize, height as usize);
+    let (width, height) = (frame.size.0 as usize, frame.size.1 as usize);
+    let (rect_x, rect_y) = (frame.rect.0 as usize, frame.rect.1 as usize);
+    let (rect_width, rect_height) = (frame.rect.2 as usize, frame.rect.3 as usize);
     let image = output_image(env, decoder, index)?;
     let target = input_image(env, encoder, room)?;
     let result = (|| -> jni::errors::Result<()> {
-        let (left, top, from_width, from_height) = crop_of(env, &image)?;
+        let (left, top, _, _) = crop_of(env, &image)?;
+        let (left, top) = (left + rect_x, top + rect_y);
         let mut from = planes_of(env, &image)?;
         // Ten-bit video comes as two bytes a sample, with the top eight bits in
         // the second, while the image claims to be 8-bit. Its colors give it
@@ -1058,8 +1114,8 @@ fn copy_frame(
                     + high_byte,
                 row_stride: from.row_stride,
                 pixel_stride: from.pixel_stride,
-                width: (from_width + chroma) >> chroma,
-                height: (from_height + chroma) >> chroma,
+                width: (rect_width + chroma) >> chroma,
+                height: (rect_height + chroma) >> chroma,
             };
             let mut target = PlaneOut {
                 data: out,
@@ -1068,7 +1124,7 @@ fn copy_frame(
                 width: width >> chroma,
                 height: height >> chroma,
             };
-            scalers[chroma].scale_turned(source, &mut target, turn);
+            scalers[chroma].scale_oriented(source, &mut target, frame.way);
         }
         Ok(())
     })();

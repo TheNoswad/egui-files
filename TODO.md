@@ -72,7 +72,8 @@ Trims and converts with the user's own ffmpeg, so the app ships no codecs (`src/
 - [ ] macOS: not planned for now, nothing here to build or run it on
 - [ ] Before shipping publicly, decide what the ffmpeg and libmpv downloads fetch. They take the newest third-party build, checked only against a hash from the same place; libmpv's build is GPL and its releases last about 6 weeks. The recommendation is our own LGPL builds on this project's releases, with hashes pinned in the app
 - [x] Android: re-encoding with MediaCodec: frame-exact, target size, quality, resolution, frame rate, H.264, H.265, AV1, VP9, AAC and Opus (`src/clip/ffmpeg/android_encode.rs`). Frames go through memory and are scaled in Rust, so there's no OpenGL or Java. Checked on a Pixel 7a
-- [ ] Android: crop, turn, mirror and speed in the editor. `scale.rs` can already turn frames
+- [x] Android: crop, turn and mirror (drawn in `scale.rs`, compared with ffmpeg's result at each stored rotation)
+- [ ] Android: speed. The picture only needs new times; the audio needs changing without changing its pitch
 - [ ] Android: GIF, animated WebP and the other audio formats
 - [ ] Android: a long export after leaving the app: there's no foreground service, as cargo-apk has no Java step, so Android may freeze it. Untested; at least keep the screen on while exporting
 - [ ] Try exporting from a phone's mount: the path is mapped, but no test or run has covered it

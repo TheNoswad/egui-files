@@ -57,6 +57,14 @@ impl Target<'_> {
     }
 }
 
+/// Which way a picture ends up: turned clockwise by `turn` degrees, then mirrored.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Orientation {
+    pub turn: u32,
+    pub flip_horizontal: bool,
+    pub flip_vertical: bool,
+}
+
 /// How much of which samples make up each sample of a line. Weights add up to
 /// [`ONE`].
 #[derive(Default)]
@@ -119,13 +127,13 @@ pub struct Scaler {
 }
 
 impl Scaler {
-    /// Scales `source` to fit `target` once turned clockwise by `turn` degrees.
-    pub fn scale_turned(&mut self, source: Source, target: &mut Target, turn: u32) {
-        if turn == 0 {
+    /// Scales `source` to fit `target` once turned, then mirrored.
+    pub fn scale_oriented(&mut self, source: Source, target: &mut Target, way: Orientation) {
+        if way == Orientation::default() {
             self.scale(source, target);
             return;
         }
-        let sideways = turn % 180 == 90;
+        let sideways = way.turn % 180 == 90;
         let (width, height) = if sideways {
             (target.height, target.width)
         } else {
@@ -143,19 +151,31 @@ impl Scaler {
                 height,
             },
         );
+        let (to_width, to_height) = (target.width, target.height);
         let mut row = std::mem::take(&mut self.row);
         row.clear();
-        row.resize(target.width, 0);
-        for y in 0..target.height {
-            for (x, sample) in row.iter_mut().enumerate() {
-                let (across, down) = match turn {
+        row.resize(to_width, 0);
+        for out_y in 0..to_height {
+            let y = if way.flip_vertical {
+                to_height - 1 - out_y
+            } else {
+                out_y
+            };
+            for (out_x, sample) in row.iter_mut().enumerate() {
+                let x = if way.flip_horizontal {
+                    to_width - 1 - out_x
+                } else {
+                    out_x
+                };
+                let (across, down) = match way.turn {
+                    0 => (x, y),
                     90 => (y, height - 1 - x),
                     180 => (width - 1 - x, height - 1 - y),
                     _ => (width - 1 - y, x),
                 };
                 *sample = unturned[down * width + across];
             }
-            target.write_row(y, &row);
+            target.write_row(out_y, &row);
         }
         self.row = row;
         self.unturned = unturned;
@@ -369,30 +389,65 @@ mod tests {
         assert_eq!(out, [1, 2, 3]);
     }
 
+    /// 1 2 3
+    /// 4 5 6, turned and mirrored.
+    fn oriented(way: Orientation) -> Vec<u8> {
+        let data = [1, 2, 3, 4, 5, 6];
+        let (width, height) = if way.turn % 180 == 90 { (2, 3) } else { (3, 2) };
+        let mut out = vec![0; width * height];
+        Scaler::default().scale_oriented(
+            tight(&data, 3, 2),
+            &mut Target {
+                data: &mut out,
+                row_stride: width,
+                pixel_stride: 1,
+                width,
+                height,
+            },
+            way,
+        );
+        out
+    }
+
     #[test]
     fn turns_the_picture_clockwise() {
-        // 1 2 3
-        // 4 5 6
-        let data = [1, 2, 3, 4, 5, 6];
-        let turned = |turn, width: usize, height: usize| {
-            let mut out = vec![0; width * height];
-            Scaler::default().scale_turned(
-                tight(&data, 3, 2),
-                &mut Target {
-                    data: &mut out,
-                    row_stride: width,
-                    pixel_stride: 1,
-                    width,
-                    height,
-                },
+        let turn = |turn| {
+            oriented(Orientation {
                 turn,
-            );
-            out
+                ..Orientation::default()
+            })
         };
-        assert_eq!(turned(0, 3, 2), [1, 2, 3, 4, 5, 6]);
-        assert_eq!(turned(90, 2, 3), [4, 1, 5, 2, 6, 3]);
-        assert_eq!(turned(180, 3, 2), [6, 5, 4, 3, 2, 1]);
-        assert_eq!(turned(270, 2, 3), [3, 6, 2, 5, 1, 4]);
+        assert_eq!(turn(0), [1, 2, 3, 4, 5, 6]);
+        assert_eq!(turn(90), [4, 1, 5, 2, 6, 3]);
+        assert_eq!(turn(180), [6, 5, 4, 3, 2, 1]);
+        assert_eq!(turn(270), [3, 6, 2, 5, 1, 4]);
+    }
+
+    #[test]
+    fn mirrors_after_turning() {
+        let way = Orientation {
+            flip_horizontal: true,
+            ..Orientation::default()
+        };
+        assert_eq!(oriented(way), [3, 2, 1, 6, 5, 4]);
+        let way = Orientation {
+            flip_vertical: true,
+            ..Orientation::default()
+        };
+        assert_eq!(oriented(way), [4, 5, 6, 1, 2, 3]);
+        // Turned is 4 1 / 5 2 / 6 3, and mirrored from there.
+        let way = Orientation {
+            turn: 90,
+            flip_horizontal: true,
+            flip_vertical: false,
+        };
+        assert_eq!(oriented(way), [1, 4, 2, 5, 3, 6]);
+        let way = Orientation {
+            turn: 90,
+            flip_horizontal: false,
+            flip_vertical: true,
+        };
+        assert_eq!(oriented(way), [6, 3, 5, 2, 4, 1]);
     }
 
     #[test]

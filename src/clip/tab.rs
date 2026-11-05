@@ -56,7 +56,18 @@ const SPEEDS: [f64; 8] = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 4.0];
 /// Shapes to keep a crop to, as width and height.
 const CROP_SHAPES: [(u32, u32); 5] = [(16, 9), (9, 16), (1, 1), (4, 3), (4, 5)];
 /// How far from the crop's edges, in points, a press still takes them.
-const CROP_REACH: f32 = 10.0;
+const CROP_REACH: f32 = if cfg!(target_os = "android") {
+    24.0
+} else {
+    10.0
+};
+/// How far in from its sides the picture is while cropping. As with the
+/// timeline, a phone's crop has to be clear of the screen's edges.
+const CROP_INSET: f32 = if cfg!(target_os = "android") {
+    36.0
+} else {
+    0.0
+};
 
 type Loaded = Result<(Source, Tools), String>;
 /// The start a keyframe was asked for, and when known, the answer.
@@ -327,8 +338,9 @@ impl ClipTab {
         } else {
             source_size
         };
-        let scale = (room.x / view_size.x).min(room.y / view_size.y);
         let cropping = self.settings.crop.is_some() && !self.settings.format.is_audio_only();
+        let inset = if cropping { CROP_INSET } else { 0.0 };
+        let scale = ((room.x - inset * 2.0).max(1.0) / view_size.x).min(room.y / view_size.y);
         let sense = if cropping {
             Sense::click_and_drag()
         } else {
@@ -855,9 +867,8 @@ impl ClipTab {
             });
         }
 
-        if !tools.phone() {
-            self.picture_ui(ui, source);
-        } else if source.is_hdr() && !self.settings.copies(source) {
+        self.picture_ui(ui, source);
+        if tools.phone() && source.is_hdr() && !self.settings.copies(source) {
             ui.weak("HDR comes out as standard colour when re-encoded.");
         }
 

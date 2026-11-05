@@ -154,7 +154,7 @@ pub struct Tools {
     /// Hardware encoders that made a video here just now. ffmpeg lists all it
     /// was built with, whatever the computer has.
     hardware: Vec<Hardware>,
-    /// It's a phone's own codecs, which can do less: no pictures changed yet,
+    /// It's a phone's own codecs, which can do less: no change of speed yet,
     /// and only MP4 and WebM to put things in.
     phone: bool,
 }
@@ -547,15 +547,10 @@ impl Settings {
         self
     }
 
-    /// What's left of these on a phone, which can't change the picture yet.
+    /// What's left of these on a phone, which can't change the speed yet.
     pub fn for_phone(self) -> Self {
         let fresh = Self::default();
         Self {
-            crop: fresh.crop,
-            crop_shape: fresh.crop_shape,
-            turn: fresh.turn,
-            flip_horizontal: fresh.flip_horizontal,
-            flip_vertical: fresh.flip_vertical,
             speed: fresh.speed,
             hardware: fresh.hardware,
             ..self
@@ -2618,9 +2613,9 @@ mod tests {
             ..Settings::default()
         };
         let limited = wanted.for_phone();
-        assert!(limited.crop.is_none());
-        assert_eq!(limited.turn, Turn::None);
         assert!(!limited.changes_speed());
+        assert!(limited.crop.is_some());
+        assert_eq!(limited.turn, Turn::Half);
         // What a phone can do stays.
         assert_eq!(limited.format, Format::WebmVp9);
         assert!(limited.exact && limited.use_target);
