@@ -117,10 +117,18 @@ pub struct FrameRate {
 }
 
 impl FrameRate {
-    pub fn new(start: i64, fps: Option<u32>) -> Self {
+    /// Frames to keep of those read from `start`, for `fps` frames a second of
+    /// what plays at `speed`. With no rate asked for, all of them, unless playing
+    /// faster, which would leave too many: those of the `original` frame rate.
+    pub fn new(start: i64, fps: Option<u32>, original: f64, speed: f64) -> Self {
+        let rate = match fps {
+            Some(fps) => Some(f64::from(fps.max(1))),
+            None if speed > 1.0 => Some(original.max(1.0)),
+            None => None,
+        };
         Self {
             next: start,
-            step: fps.map_or(0, |fps| 1_000_000 / i64::from(fps.max(1))),
+            step: rate.map_or(0, |rate| (1e6 / rate * speed) as i64),
         }
     }
 
@@ -228,19 +236,29 @@ mod tests {
     #[test]
     fn a_lower_frame_rate_keeps_the_frames_it_is_due() {
         // 60 fps to 30: every other frame.
-        let mut rate = FrameRate::new(1000, Some(30));
+        let mut rate = FrameRate::new(1000, Some(30), 60.0, 1.0);
         let kept = (0..60)
             .map(|frame| 1000 + frame * 16_683)
             .filter(|time| rate.keeps(*time))
             .count();
         assert_eq!(kept, 30);
-        let mut all = FrameRate::new(0, None);
+        let mut all = FrameRate::new(0, None, 30.0, 1.0);
         assert!(all.keeps(0) && all.keeps(1) && all.keeps(1));
         // Starts from the start, wherever frames fall.
-        let mut late = FrameRate::new(0, Some(10));
+        let mut late = FrameRate::new(0, Some(10), 30.0, 1.0);
         assert!(late.keeps(250_000));
         assert!(!late.keeps(290_000));
         assert!(late.keeps(300_000));
+        // Twice as fast at the same frame rate: every other frame.
+        let mut fast = FrameRate::new(0, None, 30.0, 2.0);
+        let kept = (0..60)
+            .map(|frame| frame * 33_333)
+            .filter(|time| fast.keeps(*time))
+            .count();
+        assert_eq!(kept, 30);
+        // Slower has fewer frames than it needs already, and keeps them all.
+        let mut slow = FrameRate::new(0, None, 30.0, 0.5);
+        assert!((0..60).all(|frame| slow.keeps(frame * 33_333)));
     }
 
     #[test]

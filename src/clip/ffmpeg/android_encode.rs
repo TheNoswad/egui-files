@@ -26,6 +26,7 @@ use super::{
     android_logic::{self, FrameRate},
     scale::{Orientation, Scaler, Source as PlaneIn, Target as PlaneOut},
     smaller_bitrate,
+    tempo::Tempo,
 };
 use crate::{android::with_env, clip::crop::Crop, jobs::Progress};
 
@@ -63,6 +64,8 @@ const SAMPLE_BUFFER: i32 = 8 << 20;
 const LOOK_PAST_END: i64 = 2_000_000;
 /// With nothing happening for this long, something's stuck.
 const STUCK: Duration = Duration::from_secs(30);
+/// A turn this long means the app itself was stopped for a while.
+const FROZEN: Duration = Duration::from_secs(2);
 
 /// Writes the output: at a target size, as many times as it takes to fit.
 pub fn make(
@@ -98,7 +101,8 @@ pub fn make(
             return Ok(());
         }
         let video = rates.video_bps.unwrap_or(0.0);
-        let next = smaller_bitrate(video, size, limit, length);
+        // What matters is how long it plays for.
+        let next = smaller_bitrate(video, size, limit, length / job.settings.speed);
         if next < MIN_VIDEO_BITRATE {
             break;
         }
@@ -248,10 +252,17 @@ fn drive(
 ) -> jni::errors::Result<Result<(), String>> {
     let mut started = false;
     let mut moved_at = Instant::now();
+    let mut last_turn = Instant::now();
     loop {
         if p.cancelled() {
             return Ok(Ok(()));
         }
+        // A long gap between turns is Android having stopped the app, not a
+        // stuck encoder, so the wait starts again.
+        if last_turn.elapsed() > FROZEN {
+            moved_at = Instant::now();
+        }
+        last_turn = Instant::now();
         let moved = if started {
             let Some(next) = tracks
                 .iter_mut()
@@ -461,7 +472,13 @@ fn video_track(
         How::Video(Box::new(VideoCodec {
             reader,
             encoder: None,
-            frames: FrameRate::new(micros(job.start), settings.fps_to(&job.source)),
+            frames: FrameRate::new(
+                micros(job.start),
+                settings.fps_to(&job.source),
+                job.source.fps(),
+                settings.speed,
+            ),
+            speed: settings.speed,
             range: (micros(job.start), micros(job.end)),
             waiting: None,
             sent_end: false,
@@ -469,9 +486,11 @@ fn video_track(
             mime: mime_of(codec),
             is_h264: codec == Codec::H264,
             side: settings.scale_to(&job.source),
+            // Slower has the same frames for longer, so there are fewer each second.
             fps: settings
                 .fps_to(&job.source)
-                .map_or(job.source.fps(), f64::from),
+                .map_or(job.source.fps(), f64::from)
+                * settings.speed.min(1.0),
             quality_bpp: settings.quality.pick(0.14, 0.08, 0.04),
             video_bps: rates.video_bps,
             source_bps: source_bps(job),
@@ -550,7 +569,11 @@ fn audio_track(
     codec: &str,
     rates: Rates,
 ) -> jni::errors::Result<Track> {
-    let how = if rates.audio_kbps.is_none() && android_logic::audio_copies(extension, codec) {
+    let speed = job.settings.speed;
+    let how = if rates.audio_kbps.is_none()
+        && !job.settings.changes_speed()
+        && android_logic::audio_copies(extension, codec)
+    {
         How::Copy(Copied::new(env, job, input, index)?)
     } else {
         let (mime, usual) = android_logic::audio_encoder(extension);
@@ -560,6 +583,10 @@ fn audio_track(
             mime,
             kbps: rates.audio_kbps.unwrap_or(usual),
             range: (micros(job.start), micros(job.end)),
+            speed,
+            tempo: None,
+            stretched: Vec::new(),
+            flushed: false,
             rate: 0,
             channels: 0,
             waiting: None,
@@ -778,6 +805,7 @@ struct VideoCodec {
     reader: Reader,
     encoder: Option<Encoder>,
     frames: FrameRate,
+    speed: f64,
     range: (i64, i64),
     /// A decoded frame waiting for room in the encoder, and its time.
     waiting: Option<(i32, i64)>,
@@ -845,7 +873,7 @@ impl VideoCodec {
                     index,
                     &encoder.codec,
                     room,
-                    time - start,
+                    ((time - start) as f64 / self.speed) as i64,
                     Frame {
                         size: self.size,
                         rect: self.rect,
@@ -1152,6 +1180,11 @@ struct AudioCodec {
     mime: &'static str,
     kbps: u32,
     range: (i64, i64),
+    speed: f64,
+    /// Changing the speed, and what's come of it waiting for the encoder.
+    tempo: Option<Tempo>,
+    stretched: Vec<u8>,
+    flushed: bool,
     rate: u32,
     channels: u32,
     waiting: Option<Sound>,
@@ -1179,7 +1212,100 @@ impl AudioCodec {
         Ok(())
     }
 
+    fn changes_speed(&self) -> bool {
+        (self.speed - 1.0).abs() > 0.001
+    }
+
+    /// Passes on what the speed change has made.
+    fn pass_stretched(&mut self, env: &mut Env) -> jni::errors::Result<bool> {
+        let mut moved = false;
+        if self.stretched.is_empty() && !self.decoded_all {
+            moved |= self.take_sound(env)?;
+        }
+        if self.decoded_all && !self.flushed {
+            self.flushed = true;
+            if let Some(tempo) = &mut self.tempo {
+                let mut samples = Vec::new();
+                tempo.finish(&mut samples);
+                self.stretched
+                    .extend(samples.iter().flat_map(|sample| sample.to_le_bytes()));
+            }
+        }
+        if !self.stretched.is_empty() && self.encoder.is_none() {
+            self.start_encoder(env)?;
+        }
+        let Some(encoder) = &self.encoder else {
+            return Ok(moved);
+        };
+        if !self.stretched.is_empty() {
+            let room = dequeue_input(env, &encoder.codec, WAIT)?;
+            if room < 0 {
+                return Ok(moved);
+            }
+            let bytes = self.frame_bytes();
+            let target = input_buffer(env, &encoder.codec, room)?;
+            let target = env.cast_local::<JByteBuffer>(target)?;
+            let capacity = env.get_direct_buffer_capacity(&target)?;
+            let to = env.get_direct_buffer_address(&target)?;
+            let size = self.stretched.len().min(capacity / bytes * bytes);
+            // SAFETY: Android's own direct buffer, with room for `size`.
+            unsafe {
+                std::ptr::copy_nonoverlapping(self.stretched.as_ptr(), to, size);
+            }
+            let time = self.first.unwrap_or(0)
+                + (self.sent_frames as f64 * 1e6 / f64::from(self.rate.max(1))) as i64;
+            queue_input(env, &encoder.codec, room, size as i32, time, 0)?;
+            self.sent_frames += (size / bytes) as u64;
+            self.stretched.drain(..size);
+            moved = true;
+        } else if self.flushed && !self.sent_end {
+            let room = dequeue_input(env, &encoder.codec, WAIT)?;
+            if room >= 0 {
+                queue_input(env, &encoder.codec, room, 0, 0, FLAG_END_OF_STREAM)?;
+                self.sent_end = true;
+                moved = true;
+            }
+        }
+        Ok(moved)
+    }
+
+    /// Puts sound the decoder has through the speed change, leaving none waiting.
+    fn stretch_sound(
+        &mut self,
+        env: &mut Env,
+        index: i32,
+        offset: usize,
+        frames: usize,
+    ) -> jni::errors::Result<()> {
+        let bytes = self.frame_bytes();
+        let source = output_buffer(env, &self.reader.decoder, index)?;
+        let source = env.cast_local::<JByteBuffer>(source)?;
+        let from = env.get_direct_buffer_address(&source)?;
+        // SAFETY: Android's own direct buffer, holding what the decoder said it
+        // does, until it's released, below.
+        let data =
+            unsafe { std::slice::from_raw_parts(from.add(offset).cast_const(), frames * bytes) };
+        let samples: Vec<i16> = data
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| i16::from_le_bytes(*pair))
+            .collect();
+        let (speed, rate, channels) = (self.speed, self.rate, self.channels as usize);
+        let tempo = self
+            .tempo
+            .get_or_insert_with(|| Tempo::new(speed, rate, channels));
+        let mut out = Vec::new();
+        tempo.push(&samples, &mut out);
+        self.stretched
+            .extend(out.iter().flat_map(|sample| sample.to_le_bytes()));
+        release_output(env, &self.reader.decoder, index)
+    }
+
     fn pass_sound(&mut self, env: &mut Env) -> jni::errors::Result<bool> {
+        if self.changes_speed() {
+            return self.pass_stretched(env);
+        }
         let mut moved = false;
         if self.waiting.is_none() && !self.decoded_all {
             moved |= self.take_sound(env)?;
@@ -1251,7 +1377,6 @@ impl AudioCodec {
         if self.rate == 0 {
             self.read_format(env)?;
         }
-        let decoder = &self.reader.decoder;
         let bytes = self.frame_bytes();
         let frames = size.max(0) as usize / bytes;
         let window = android_logic::audio_window(time, frames, self.rate.max(1), self.range);
@@ -1261,19 +1386,25 @@ impl AudioCodec {
             Some((skip, count)) if count > 0 => {
                 if self.first.is_none() {
                     let skipped = skip as f64 * 1e6 / f64::from(self.rate.max(1));
-                    self.first = Some((time + skipped as i64 - self.range.0).max(0));
+                    let first = (time + skipped as i64 - self.range.0).max(0);
+                    self.first = Some((first as f64 / self.speed) as i64);
                 }
-                self.waiting = Some(Sound {
-                    index,
-                    offset: offset.max(0) as usize + skip * bytes,
-                    remaining: count * bytes,
-                });
+                let start = offset.max(0) as usize + skip * bytes;
+                if self.changes_speed() {
+                    self.stretch_sound(env, index, start, count)?;
+                } else {
+                    self.waiting = Some(Sound {
+                        index,
+                        offset: start,
+                        remaining: count * bytes,
+                    });
+                }
                 kept = true;
             }
             Some(_) => {}
         }
         if !kept {
-            release_output(env, decoder, index)?;
+            release_output(env, &self.reader.decoder, index)?;
         }
         if flags & FLAG_END_OF_STREAM != 0 {
             self.decoded_all = true;

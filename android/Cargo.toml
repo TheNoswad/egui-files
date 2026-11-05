@@ -40,6 +40,10 @@ launch_mode = "singleTop"
 [[package.metadata.android.uses_permission]]
 name = "android.permission.MANAGE_EXTERNAL_STORAGE"
 
+# Keeps the screen on during a video export.
+[[package.metadata.android.uses_permission]]
+name = "android.permission.WAKE_LOCK"
+
 [[package.metadata.android.uses_permission]]
 name = "android.permission.READ_EXTERNAL_STORAGE"
 max_sdk_version = 32

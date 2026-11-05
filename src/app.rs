@@ -92,8 +92,6 @@ struct Persisted {
     #[serde(default)]
     archive_prefs: archive::Prefs,
     #[serde(default)]
-    clip_settings: crate::clip::Settings,
-    #[serde(default)]
     ffmpeg_path: Option<PathBuf>,
     #[serde(default)]
     open_with: open_with::Prefs,
@@ -166,7 +164,6 @@ struct PersistedRef<'a> {
     video_volume: f64,
     video_quality: Quality,
     archive_prefs: &'a archive::Prefs,
-    clip_settings: crate::clip::Settings,
     ffmpeg_path: Option<PathBuf>,
     open_with: &'a open_with::Prefs,
     editor: &'a editor::Prefs,
@@ -494,7 +491,6 @@ impl FilesApp {
                 video_volume: default_volume(),
                 video_quality: Quality::default(),
                 archive_prefs: archive::Prefs::default(),
-                clip_settings: Default::default(),
                 ffmpeg_path: None,
                 open_with: open_with::Prefs::default(),
                 editor: editor::Prefs::default(),
@@ -527,7 +523,6 @@ impl FilesApp {
             video_volume,
             video_quality,
             archive_prefs,
-            clip_settings,
             ffmpeg_path,
             open_with,
             editor,
@@ -585,7 +580,6 @@ impl FilesApp {
                 jobs: Jobs::new(&cc.egui_ctx),
                 archives: archive::Listings::new(&cc.egui_ctx),
                 archive_prefs,
-                clip_settings,
                 open_with: {
                     open_with::preload(&cc.egui_ctx);
                     OpenWith::new(open_with)
@@ -947,8 +941,7 @@ impl FilesApp {
         if let Some(id) = self.find_tab(|t| t.clip().is_some_and(|c| c.clip == path)) {
             self.focus_tab(id);
         } else {
-            let settings = self.shared.clip_settings.for_new_tab();
-            let tab = DockTab::Clip(crate::clip::ClipTab::new(self.next_id(), path, settings));
+            let tab = DockTab::Clip(crate::clip::ClipTab::new(self.next_id(), path));
             self.push_tab(window, tab);
         }
     }
@@ -3055,7 +3048,6 @@ impl FilesApp {
             video_volume: self.shared.videos.volume(),
             video_quality: self.shared.videos.quality(),
             archive_prefs: &self.shared.archive_prefs,
-            clip_settings: self.shared.clip_settings,
             ffmpeg_path: crate::tools::custom_ffmpeg(),
             open_with: &self.shared.open_with.prefs,
             editor: &self.shared.editor,

@@ -196,13 +196,14 @@ pub struct ClipTab {
 }
 
 impl ClipTab {
-    pub fn new(id: u64, clip: PathBuf, settings: Settings) -> Self {
+    /// A new editor starts from the defaults, whatever was done with the last.
+    pub fn new(id: u64, clip: PathBuf) -> Self {
         Self {
             id,
             clip,
             start: 0.0,
             end: None,
-            settings,
+            settings: Settings::default(),
             runtime: Runtime::default(),
         }
     }
@@ -272,9 +273,6 @@ impl ClipTab {
             }
             Some(Ok(loaded)) => loaded,
         };
-        if tools.phone() {
-            self.settings = self.settings.for_phone();
-        }
         // Remembered from another video, which may have had what this hasn't.
         if !tools.can_make(self.settings.format, &source) {
             self.settings.format = Format::Original;
@@ -296,16 +294,19 @@ impl ClipTab {
                 ui.separator();
                 ui.vertical(|ui| {
                     ScrollArea::vertical()
-                        .id_salt("clip-settings")
+                        .id_salt(("clip-settings", self.id))
                         .show(ui, |ui| self.settings(ui, shared, &source, &tools));
                 });
             });
         } else {
-            ScrollArea::vertical().id_salt("clip-all").show(ui, |ui| {
-                self.player(ui, shared, &source, (width * 0.8).max(240.0));
-                ui.separator();
-                self.settings(ui, shared, &source, &tools);
-            });
+            // Each tab's own, or a new one opens where the last was scrolled to.
+            ScrollArea::vertical()
+                .id_salt(("clip-all", self.id))
+                .show(ui, |ui| {
+                    self.player(ui, shared, &source, (width * 0.8).max(240.0));
+                    ui.separator();
+                    self.settings(ui, shared, &source, &tools);
+                });
         }
         self.choose_folder(ui.ctx(), shared.show_hidden);
     }
@@ -631,9 +632,7 @@ impl ClipTab {
         if !format.is_audio_only() {
             self.video_ui(ui, source, tools, end);
         }
-        if !tools.phone() {
-            self.speed_ui(ui);
-        }
+        self.speed_ui(ui);
         if !source.audio.is_empty() && !format.is_animated() {
             ui.add_space(6.0);
             self.audio_ui(ui, source);
@@ -1119,6 +1118,9 @@ impl ClipTab {
         }
 
         ui.add_space(6.0);
+        if tools.phone() {
+            ui.weak("Stay in the app while exporting: Android pauses it soon after you leave, until you're back.");
+        }
         let label = RichText::new(format!("{} Export", icon::EXPORT)).strong();
         let end = self.end.unwrap_or(source.duration);
         let fits = !self.settings.use_target
@@ -1132,7 +1134,6 @@ impl ClipTab {
             )
             .clicked()
         {
-            shared.clip_settings = self.settings;
             shared.jobs.start(JobKind::Clip(Box::new(ClipJob {
                 input: self.clip.clone(),
                 dir,
@@ -1217,6 +1218,14 @@ mod tests {
     }
 
     #[test]
+    fn a_new_editor_starts_from_the_defaults() {
+        assert_eq!(
+            ClipTab::new(1, "/v/a.mp4".into()).settings,
+            Settings::default()
+        );
+    }
+
+    #[test]
     fn a_drag_keeps_what_it_took() {
         let press = grabbed(None, true, 100.0, 100.0, 300.0);
         assert_eq!(press, Some(Handle::Start));
@@ -1253,7 +1262,7 @@ mod tests {
 
     #[test]
     fn saved_state_comes_back() {
-        let mut tab = ClipTab::new(3, "/v/a.mp4".into(), Settings::default());
+        let mut tab = ClipTab::new(3, "/v/a.mp4".into());
         tab.start = 2.5;
         tab.end = Some(9.0);
         tab.settings.exact = true;

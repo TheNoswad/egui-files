@@ -12,6 +12,8 @@ mod android_encode;
 mod android_logic;
 #[cfg(any(target_os = "android", test))]
 mod scale;
+#[cfg(any(target_os = "android", test))]
+mod tempo;
 
 use std::{
     collections::HashSet,
@@ -154,8 +156,8 @@ pub struct Tools {
     /// Hardware encoders that made a video here just now. ffmpeg lists all it
     /// was built with, whatever the computer has.
     hardware: Vec<Hardware>,
-    /// It's a phone's own codecs, which can do less: no change of speed yet,
-    /// and only MP4 and WebM to put things in.
+    /// It's a phone's own codecs, which can do less: only MP4 and WebM to put
+    /// things in, and details that can't be kept.
     phone: bool,
 }
 
@@ -530,33 +532,6 @@ impl Fit {
 }
 
 impl Settings {
-    /// What a new tab starts from, after an export with these. Choices that
-    /// leave something out of the file, or put it in, are made for each video.
-    pub fn for_new_tab(mut self) -> Self {
-        let fresh = Self::default();
-        self.keep = fresh.keep;
-        self.audio = fresh.audio;
-        self.exact = fresh.exact;
-        // These are about this video's picture.
-        self.crop = fresh.crop;
-        self.crop_shape = fresh.crop_shape;
-        self.turn = fresh.turn;
-        self.flip_horizontal = fresh.flip_horizontal;
-        self.flip_vertical = fresh.flip_vertical;
-        self.speed = fresh.speed;
-        self
-    }
-
-    /// What's left of these on a phone, which can't change the speed yet.
-    pub fn for_phone(self) -> Self {
-        let fresh = Self::default();
-        Self {
-            speed: fresh.speed,
-            hardware: fresh.hardware,
-            ..self
-        }
-    }
-
     /// Whether the video can be copied as it is.
     pub fn copies(&self, source: &Source) -> bool {
         self.format == Format::Original
@@ -1683,6 +1658,8 @@ pub fn export(job: ClipJob, p: &Progress) {
         return;
     };
     p.set_current(&job.input);
+    #[cfg(target_os = "android")]
+    let _awake = crate::android::ScreenAwake::new();
     if let Err((path, err)) = run(job, p) {
         p.error(&path, err);
     }
@@ -2587,43 +2564,6 @@ mod tests {
     }
 
     #[test]
-    fn new_tabs_leave_the_picture_alone() {
-        let used = Settings {
-            crop: Some(Crop::centered(1.0)),
-            crop_shape: Some((1, 1)),
-            turn: Turn::Half,
-            flip_vertical: true,
-            speed: 2.0,
-            ..Settings::default()
-        };
-        assert_eq!(used.for_new_tab(), Settings::default());
-    }
-
-    #[test]
-    fn copying_only_leaves_what_needs_no_encoding() {
-        let wanted = Settings {
-            format: Format::WebmVp9,
-            exact: true,
-            use_target: true,
-            resolution: Some(720),
-            speed: 2.0,
-            turn: Turn::Half,
-            crop: Some(Crop::FULL),
-            audio: AudioChoice::None,
-            ..Settings::default()
-        };
-        let limited = wanted.for_phone();
-        assert!(!limited.changes_speed());
-        assert!(limited.crop.is_some());
-        assert_eq!(limited.turn, Turn::Half);
-        // What a phone can do stays.
-        assert_eq!(limited.format, Format::WebmVp9);
-        assert!(limited.exact && limited.use_target);
-        assert_eq!(limited.resolution, Some(720));
-        assert_eq!(limited.audio, AudioChoice::None);
-    }
-
-    #[test]
     fn a_missing_chosen_ffmpeg_is_not_called_uninstalled() {
         assert_eq!(message_for_missing(None), NOT_INSTALLED);
         let message = message_for_missing(Some(Path::new("/gone/ffmpeg")));
@@ -2663,30 +2603,6 @@ mod tests {
         job.settings.hardware = false;
         job.settings.format = Format::Mp4H264;
         assert!(has(&planned(&job, "mp4"), "-c:v", "libx264"));
-    }
-
-    #[test]
-    fn new_tabs_remember_how_but_not_what_to_leave_out() {
-        let mut used = Settings {
-            format: Format::WebmVp9,
-            quality: Quality::Small,
-            use_target: true,
-            target_mb: 50.0,
-            resolution: Some(720),
-            fps: Some(30),
-            exact: true,
-            audio: AudioChoice::None,
-            hardware: true,
-            ..Settings::default()
-        };
-        used.keep.location = false;
-        let next = used.for_new_tab();
-        assert_eq!(next.format, Format::WebmVp9);
-        assert_eq!((next.target_mb, next.resolution), (50.0, Some(720)));
-        assert!(next.use_target && next.hardware);
-        assert_eq!(next.keep, Keep::default());
-        assert_eq!(next.audio, AudioChoice::All);
-        assert!(!next.exact);
     }
 
     #[test]

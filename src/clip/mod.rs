@@ -9,7 +9,7 @@ mod tab;
 
 use std::path::Path;
 
-pub use ffmpeg::{ClipJob, Settings, export};
+pub use ffmpeg::{ClipJob, export};
 pub use tab::ClipTab;
 
 /// Where the editor can show the video: where the player runs.

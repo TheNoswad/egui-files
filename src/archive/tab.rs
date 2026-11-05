@@ -1047,7 +1047,6 @@ mod tests {
             jobs: Jobs::new(ctx),
             archives: Listings::new(ctx),
             archive_prefs: Prefs::default(),
-            clip_settings: Default::default(),
             open_with: Default::default(),
             editor: Default::default(),
         }

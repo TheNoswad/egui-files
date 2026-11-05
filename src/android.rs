@@ -224,6 +224,73 @@ fn with_activity<T>(
     })
 }
 
+/// Keeps the screen on, if dimmed, while any of these exists: a phone that sleeps
+/// sends the app to the background, where Android soon stops it.
+///
+/// It's a wake lock because the usual way, the window's flag, hung the app on a
+/// Pixel 7a: changing the window from another thread ends in Android's main
+/// thread waiting on the app's while the app waits on it.
+pub struct ScreenAwake(());
+
+/// The lock, while there are [`ScreenAwake`]s, and how many.
+static SCREEN_AWAKE: std::sync::Mutex<(usize, Option<jni::refs::Global<JObject<'static>>>)> =
+    std::sync::Mutex::new((0, None));
+
+/// `PowerManager.SCREEN_DIM_WAKE_LOCK`.
+const SCREEN_DIM_WAKE_LOCK: i32 = 6;
+
+fn new_wake_lock() -> Result<jni::refs::Global<JObject<'static>>, String> {
+    with_activity("keep the screen on", |env, activity| {
+        let name = env.new_string("power")?;
+        let power = env
+            .call_method(
+                activity,
+                jni_str!("getSystemService"),
+                jni_sig!("(Ljava/lang/String;)Ljava/lang/Object;"),
+                &[JValue::Object(&name)],
+            )?
+            .l()?;
+        let tag = env.new_string("egui-files:export")?;
+        let lock = env
+            .call_method(
+                &power,
+                jni_str!("newWakeLock"),
+                jni_sig!("(ILjava/lang/String;)Landroid/os/PowerManager$WakeLock;"),
+                &[JValue::Int(SCREEN_DIM_WAKE_LOCK), JValue::Object(&tag)],
+            )?
+            .l()?;
+        env.call_method(&lock, jni_str!("acquire"), jni_sig!("()V"), &[])?;
+        env.new_global_ref(&lock)
+    })
+}
+
+impl ScreenAwake {
+    pub fn new() -> Self {
+        let mut held = SCREEN_AWAKE.lock().expect("screen lock poisoned");
+        if held.0 == 0 {
+            // An export is still worth doing with the screen going off.
+            held.1 = new_wake_lock().ok();
+        }
+        held.0 += 1;
+        Self(())
+    }
+}
+
+impl Drop for ScreenAwake {
+    fn drop(&mut self) {
+        let mut held = SCREEN_AWAKE.lock().expect("screen lock poisoned");
+        held.0 -= 1;
+        if held.0 == 0
+            && let Some(lock) = held.1.take()
+        {
+            let _ = with_env("let the screen go off", |env| {
+                env.call_method(&lock, jni_str!("release"), jni_sig!("()V"), &[])?;
+                Ok(())
+            });
+        }
+    }
+}
+
 /// Runs `f` with what it takes to call Java, on any thread. An exception is
 /// cleared, and comes back as the error.
 pub fn with_env<T>(

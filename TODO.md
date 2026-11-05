@@ -73,9 +73,14 @@ Trims and converts with the user's own ffmpeg, so the app ships no codecs (`src/
 - [ ] Before shipping publicly, decide what the ffmpeg and libmpv downloads fetch. They take the newest third-party build, checked only against a hash from the same place; libmpv's build is GPL and its releases last about 6 weeks. The recommendation is our own LGPL builds on this project's releases, with hashes pinned in the app
 - [x] Android: re-encoding with MediaCodec: frame-exact, target size, quality, resolution, frame rate, H.264, H.265, AV1, VP9, AAC and Opus (`src/clip/ffmpeg/android_encode.rs`). Frames go through memory and are scaled in Rust, so there's no OpenGL or Java. Checked on a Pixel 7a
 - [x] Android: crop, turn and mirror (drawn in `scale.rs`, compared with ffmpeg's result at each stored rotation)
-- [ ] Android: speed. The picture only needs new times; the audio needs changing without changing its pitch
-- [ ] Android: GIF, animated WebP and the other audio formats
-- [ ] Android: a long export after leaving the app: there's no foreground service, as cargo-apk has no Java step, so Android may freeze it. Untested; at least keep the screen on while exporting
+- [x] Android: speed. Frames get new times, and `tempo.rs` changes the audio without changing its pitch (WSOLA), as ffmpeg's atempo does on desktop
+- [ ] Android: GIF and animated WebP, written in Rust as Android has no encoder for them, with a target-size loop like desktop's
+- [ ] Android: other audio formats. WAV is simple and Opus files should be, as the phone can encode Opus; MP3 and FLAC take more
+- [ ] Android: keep the title, date and subtitles when exporting, which the muxer has nowhere for
+- [ ] Flaky test: `editor::tests::a_link_leaves_unsaved_changes_in_their_tab` failed once in the pre-commit hook on 2026-11-04, in a slow run with ffmpeg busy elsewhere. About 50 runs since passed, some pinned to one or two cores. The failing assertion wasn't captured, so the cause isn't known
+- [ ] Android: listen to speed changes on real sound (`/sdcard/bird (edited) (2).mp4` on the Pixel): so far only pitch on a pure tone and loudness are measured
+- [x] Android: long exports. A wake lock keeps the screen on (the window flag hung the app). Leaving the app, Android slows the export and freezes it after about 70 s on a Pixel 7a; it carries on, intact, on returning. The editor says so
+- [ ] Android: exports that keep going in the background: needs a foreground service, so a Java class, which cargo-apk can't build
 - [ ] Try exporting from a phone's mount: the path is mapped, but no test or run has covered it
 
 ## Markdown

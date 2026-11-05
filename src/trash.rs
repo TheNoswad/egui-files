@@ -907,7 +907,6 @@ mod tests {
             jobs: Jobs::new(&ctx),
             archives: crate::archive::Listings::new(&ctx),
             archive_prefs: Default::default(),
-            clip_settings: Default::default(),
             open_with: Default::default(),
             editor: Default::default(),
         };

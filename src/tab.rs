@@ -47,8 +47,6 @@ pub struct Shared {
     pub jobs: Jobs,
     pub archives: archive::Listings,
     pub archive_prefs: archive::Prefs,
-    /// How the last video export was made, for new video editors to start from.
-    pub clip_settings: crate::clip::Settings,
     pub open_with: OpenWith,
     pub editor: crate::editor::Prefs,
     /// Disk usage scans, for folder sizes in the Details view.
@@ -2037,7 +2035,6 @@ mod tests {
             jobs: Jobs::new(ctx),
             archives: archive::Listings::new(ctx),
             archive_prefs: archive::Prefs::default(),
-            clip_settings: Default::default(),
             open_with: Default::default(),
             editor: Default::default(),
         }
