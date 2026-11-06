@@ -11,6 +11,11 @@
 //!
 //! Where maximize is comes from [`update`], once a frame: the same in every
 //! window, at a fixed distance from one side, as the bar lays them out.
+//!
+//! [`update`] also gives the windows the theme's background as their own,
+//! with or without the in-app title bar. Windows fills what a window grows
+//! by with that until the next frame shows there, and winit leaves it
+//! unset: white strips along the edges as the window is resized.
 
 use std::{
     collections::HashSet,
@@ -18,13 +23,13 @@ use std::{
 };
 
 use windows::Win32::{
-    Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
+    Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
     Graphics::{
         Dwm::{
             DWM_WINDOW_CORNER_PREFERENCE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DEFAULT,
             DWMWCP_ROUND, DwmExtendFrameIntoClientArea, DwmSetWindowAttribute,
         },
-        Gdi::{ClientToScreen, ScreenToClient},
+        Gdi::{ClientToScreen, CreateSolidBrush, DeleteObject, HGDIOBJ, ScreenToClient},
     },
     System::Threading::GetCurrentThreadId,
     UI::{
@@ -33,11 +38,12 @@ use windows::Win32::{
         Input::KeyboardAndMouse::{TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT, TrackMouseEvent},
         Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass},
         WindowsAndMessaging::{
-            EnableMenuItem, EnumThreadWindows, GetClassNameW, GetClientRect, GetCursorPos,
-            GetForegroundWindow, GetSystemMenu, HTMAXBUTTON, IsZoomed, MF_BYCOMMAND, MF_ENABLED,
-            MF_GRAYED, PostMessageW, SC_CLOSE, SC_MAXIMIZE, SC_MINIMIZE, SC_MOVE, SC_RESTORE,
-            SC_SIZE, TPM_RETURNCMD, TrackPopupMenu, WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDBLCLK,
-            WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_SYSCOMMAND,
+            EnableMenuItem, EnumThreadWindows, GCLP_HBRBACKGROUND, GetClassNameW, GetClientRect,
+            GetCursorPos, GetForegroundWindow, GetSystemMenu, HTMAXBUTTON, IsZoomed, MF_BYCOMMAND,
+            MF_ENABLED, MF_GRAYED, PostMessageW, SC_CLOSE, SC_MAXIMIZE, SC_MINIMIZE, SC_MOVE,
+            SC_RESTORE, SC_SIZE, SetClassLongPtrW, TPM_RETURNCMD, TrackPopupMenu, WM_NCDESTROY,
+            WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE,
+            WM_NCMOUSEMOVE, WM_SYSCOMMAND,
         },
     },
 };
@@ -67,6 +73,8 @@ struct State {
     /// The window the pointer is over maximize in, and whether pressed.
     hovered: Option<isize>,
     pressed: bool,
+    /// The windows' background brush, as an `HBRUSH`, and its colour.
+    background: Option<(isize, egui::Color32)>,
 }
 
 fn state() -> &'static Mutex<State> {
@@ -85,6 +93,7 @@ fn context() -> &'static OnceLock<egui::Context> {
 pub fn update(ctx: &egui::Context, enabled: bool, maximize: Option<Maximize>) {
     let _ = context().set(ctx.clone());
     let windows = app_windows();
+    background(&windows, ctx.global_style().visuals.panel_fill);
     let changes: Vec<HWND> = {
         let mut state = state().lock().unwrap();
         state.maximize = maximize.filter(|_| enabled);
@@ -111,6 +120,32 @@ pub fn update(ctx: &egui::Context, enabled: bool, maximize: Option<Maximize>) {
     // subclass handles with it.
     for hwnd in changes {
         style(hwnd, enabled);
+    }
+}
+
+/// Gives the windows a background of `color`, made when it changes. winit's
+/// windows share one class, so setting it on any sets it for all of them,
+/// and for the ones opened later.
+fn background(windows: &[HWND], color: egui::Color32) {
+    let Some(&hwnd) = windows.first() else {
+        return;
+    };
+    let mut state = state().lock().unwrap();
+    if state.background.is_some_and(|(_, was)| was == color) {
+        return;
+    }
+    let [r, g, b, _] = color.to_array();
+    // SAFETY: a brush of our own, set on our own windows' class; the one
+    // it replaces is ours too, and no longer the class's once replaced.
+    unsafe {
+        let brush = CreateSolidBrush(COLORREF(u32::from_le_bytes([r, g, b, 0])));
+        if brush.is_invalid() {
+            return;
+        }
+        SetClassLongPtrW(hwnd, GCLP_HBRBACKGROUND, brush.0 as isize);
+        if let Some((old, _)) = state.background.replace((brush.0 as isize, color)) {
+            let _ = DeleteObject(HGDIOBJ(old as *mut _));
+        }
     }
 }
 
