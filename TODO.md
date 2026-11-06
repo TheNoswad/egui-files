@@ -96,7 +96,10 @@ Trims and converts with the user's own ffmpeg, so the app ships no codecs (`src/
 - [x] Stills along the timeline (`strip.rs`): the whole video thinly first, then finer where it's zoomed into, down to a frame, from a grid of halves of its length so panning finds the same ones. Two ffmpeg runs at a time on the desktop; one `MediaMetadataRetriever` on Android. What's trimmed off is dimmed
     - [x] Android: checked on the Pixel 7a: stills come within a few seconds, upright for videos stored turned 90° and 180° (the retriever turns them itself; `android_logic::upright` is only a fallback)
     - [ ] Android: the file views show no video thumbnails, as there's no ffmpeg; `ffmpeg::stills` could make them there
-- [ ] Volume: a gain for each audio track (the "All tracks" choice already keeps them all), so a quiet track, like a call recorded beside a loud mic, can be raised before they're mixed or kept apart. Maybe a "level out" choice too (`dynaudnorm`), for a recording whose inputs were mixed into one track already, which no gain can separate
+- [x] Volume: a slider for each track kept (0 to 400%), "Mix into one track", as most players and websites play only the first, and "Even out loudness" (`dynaudnorm`), for inputs already mixed into one track. Changing the sound re-encodes only the audio; the video can still be copied. Checked by measuring exports: 400% is +12 dB, mixing makes one track
+    - [x] Android: the volume, applied to the samples in Rust on their way to the encoder (checked on the Pixel 7a: 200% came out +6.0 dB)
+    - [ ] Android: mixing tracks (two decoders kept in step, their samples added) and evening out loudness (`dynaudnorm`'s idea in Rust); both are hidden there until then
+    - [ ] Raising a loud track can clip: a limiter after the volume, if it turns out to be a problem
 
 ## Markdown
 

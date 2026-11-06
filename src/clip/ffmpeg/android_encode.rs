@@ -165,13 +165,13 @@ fn encode(
                 tracks.push(video_track(env, job, input, extension, rates)?);
             }
             for stream in job.settings.audio_streams(&job.source) {
+                let gain = f32::from(job.settings.volume(&job.source, stream)) / 100.0;
                 tracks.push(audio_track(
                     env,
                     job,
                     input,
                     extension,
-                    stream.index as i32,
-                    &stream.codec,
+                    (stream.index as i32, &stream.codec, gain),
                     rates,
                 )?);
             }
@@ -558,13 +558,13 @@ fn audio_track(
     job: &ClipJob,
     input: &str,
     extension: &str,
-    index: i32,
-    codec: &str,
+    (index, codec, gain): (i32, &str, f32),
     rates: Rates,
 ) -> jni::errors::Result<Track> {
     let speed = job.settings.speed;
     let how = if rates.audio_kbps.is_none()
         && !job.settings.changes_speed()
+        && gain == 1.0
         && android_logic::audio_copies(extension, codec)
     {
         How::Copy(Copied::new(env, job, input, index)?)
@@ -577,6 +577,7 @@ fn audio_track(
             kbps: rates.audio_kbps.unwrap_or(usual),
             range: (micros(job.start), micros(job.end)),
             speed,
+            gain,
             tempo: None,
             stretched: Vec::new(),
             flushed: false,
@@ -1174,6 +1175,8 @@ struct AudioCodec {
     kbps: u32,
     range: (i64, i64),
     speed: f64,
+    /// What the sound's multiplied by.
+    gain: f32,
     /// Changing the speed, and what's come of it waiting for the encoder.
     tempo: Option<Tempo>,
     stretched: Vec<u8>,
@@ -1207,6 +1210,12 @@ impl AudioCodec {
 
     fn changes_speed(&self) -> bool {
         (self.speed - 1.0).abs() > 0.001
+    }
+
+    /// Whether the sound goes through Rust on its way, to change its speed
+    /// or volume, rather than straight from the decoder to the encoder.
+    fn processes(&self) -> bool {
+        self.changes_speed() || self.gain != 1.0
     }
 
     /// Passes on what the speed change has made.
@@ -1278,25 +1287,30 @@ impl AudioCodec {
         // does, until it's released, below.
         let data =
             unsafe { std::slice::from_raw_parts(from.add(offset).cast_const(), frames * bytes) };
+        let gain = self.gain;
         let samples: Vec<i16> = data
             .as_chunks::<2>()
             .0
             .iter()
-            .map(|pair| i16::from_le_bytes(*pair))
+            .map(|pair| android_logic::louder(i16::from_le_bytes(*pair), gain))
             .collect();
         let (speed, rate, channels) = (self.speed, self.rate, self.channels as usize);
-        let tempo = self
-            .tempo
-            .get_or_insert_with(|| Tempo::new(speed, rate, channels));
         let mut out = Vec::new();
-        tempo.push(&samples, &mut out);
+        if self.changes_speed() {
+            let tempo = self
+                .tempo
+                .get_or_insert_with(|| Tempo::new(speed, rate, channels));
+            tempo.push(&samples, &mut out);
+        } else {
+            out = samples;
+        }
         self.stretched
             .extend(out.iter().flat_map(|sample| sample.to_le_bytes()));
         release_output(env, &self.reader.decoder, index)
     }
 
     fn pass_sound(&mut self, env: &mut Env) -> jni::errors::Result<bool> {
-        if self.changes_speed() {
+        if self.processes() {
             return self.pass_stretched(env);
         }
         let mut moved = false;
@@ -1383,7 +1397,7 @@ impl AudioCodec {
                     self.first = Some((first as f64 / self.speed) as i64);
                 }
                 let start = offset.max(0) as usize + skip * bytes;
-                if self.changes_speed() {
+                if self.processes() {
                     self.stretch_sound(env, index, start, count)?;
                 } else {
                     self.waiting = Some(Sound {

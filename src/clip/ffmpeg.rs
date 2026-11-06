@@ -494,6 +494,9 @@ impl Turn {
     }
 }
 
+/// Audio tracks whose volume can be set; any past these stay as they are.
+pub const MAX_TRACKS: usize = 8;
+
 /// Which audio to keep.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AudioChoice {
@@ -525,6 +528,12 @@ pub struct Settings {
     pub audio: AudioChoice,
     /// `None` keeps it as it is where it can be, and picks otherwise.
     pub audio_kbps: Option<u32>,
+    /// Each audio track's volume in percent, by its place among the source's.
+    pub volumes: [u16; MAX_TRACKS],
+    /// The tracks kept mixed into one, as most players play only the first.
+    pub mix: bool,
+    /// Quiet stretches raised and loud ones lowered.
+    pub level: bool,
     /// Encode on the GPU, where there's an encoder for it.
     pub hardware: bool,
     pub effort: Effort,
@@ -552,6 +561,9 @@ impl Default for Settings {
             fps: None,
             audio: AudioChoice::default(),
             audio_kbps: None,
+            volumes: [100; MAX_TRACKS],
+            mix: false,
+            level: false,
             hardware: false,
             effort: Effort::Balanced,
             crop: None,
@@ -736,8 +748,49 @@ impl Settings {
         (f64::from(width) * f64::from(height) * scale * scale, fps)
     }
 
+    /// The volume of `stream`, in percent.
+    pub fn volume(&self, source: &Source, stream: &AudioStream) -> u16 {
+        source
+            .audio
+            .iter()
+            .position(|a| a.index == stream.index)
+            .and_then(|place| self.volumes.get(place))
+            .copied()
+            .unwrap_or(100)
+    }
+
+    /// Whether the tracks kept are mixed into one. Not on Android yet.
+    pub fn mixes(&self, source: &Source) -> bool {
+        self.mix && !cfg!(target_os = "android") && self.audio_streams(source).len() > 1
+    }
+
+    /// Whether loudness is evened out. Not on Android yet.
+    pub fn levels(&self) -> bool {
+        self.level && !cfg!(target_os = "android")
+    }
+
+    /// Whether the sound itself changes, so the audio can't be copied.
+    pub fn changes_audio(&self, source: &Source) -> bool {
+        self.changes_speed()
+            || self.mixes(source)
+            || self.levels()
+            || self
+                .audio_streams(source)
+                .iter()
+                .any(|stream| self.volume(source, stream) != 100)
+    }
+
+    /// How many audio tracks come out.
+    fn output_tracks(&self, source: &Source) -> usize {
+        if self.mixes(source) {
+            1
+        } else {
+            self.audio_streams(source).len()
+        }
+    }
+
     /// The audio streams that go in.
-    fn audio_streams<'a>(&self, source: &'a Source) -> Vec<&'a AudioStream> {
+    pub(crate) fn audio_streams<'a>(&self, source: &'a Source) -> Vec<&'a AudioStream> {
         let first = source.audio.iter().take(1);
         match self.audio {
             // A file of audio has room for one, and always has it.
@@ -753,7 +806,7 @@ impl Settings {
         let bytes = self.target_bytes().unwrap_or(0.0);
         // What matters is how long it plays for.
         let length = (length / self.speed).max(0.001);
-        let tracks = self.audio_streams(source).len() as f64;
+        let tracks = self.output_tracks(source) as f64;
         let (pixels, fps) = self.output_rate(source);
         let index = INDEX_BYTES_EACH * length * (fps + tracks * AUDIO_PACKETS_A_SECOND);
         let budget = (bytes * TARGET_MARGIN - index).max(0.0) * 8.0 / length;
@@ -1817,9 +1870,22 @@ fn plan(
     } else if streams.is_empty() {
         return Err("This video has no audio.".to_owned());
     }
+    let tempo = settings
+        .changes_speed()
+        .then(|| tempo_filters(settings.speed));
+    let audio_filters = (encode.pass != Pass::First && settings.changes_audio(source))
+        .then(|| audio_graph(settings, source, &streams, tempo.as_deref()))
+        .filter(|(graph, _)| !graph.is_empty());
     if encode.pass != Pass::First {
-        for stream in &streams {
-            add(&["-map", &format!("0:{}", stream.index)]);
+        if let Some((graph, outputs)) = &audio_filters {
+            add(&["-filter_complex", graph]);
+            for output in outputs {
+                add(&["-map", output]);
+            }
+        } else {
+            for stream in &streams {
+                add(&["-map", &format!("0:{}", stream.index)]);
+            }
         }
     }
     let mut subtitle_args = Vec::new();
@@ -1888,14 +1954,6 @@ fn plan(
         return Ok(args);
     }
 
-    let tempo = settings
-        .changes_speed()
-        .then(|| tempo_filters(settings.speed));
-    if let Some(tempo) = &tempo
-        && !streams.is_empty()
-    {
-        add(&["-af", tempo]);
-    }
     let kbps = encode.rate.map(|(_, audio)| audio).or(settings.audio_kbps);
     if let Some((_, encoder, usual)) = audio_only {
         add(&["-vn", "-c:a", encoder]);
@@ -1911,7 +1969,7 @@ fn plan(
             "aac"
         };
         add(&["-c:a", encoder, "-b:a", &format!("{kbps}k")]);
-    } else if tempo.is_none()
+    } else if audio_filters.is_none()
         && (copying_video || streams.iter().all(|a| audio_fits(extension, &a.codec)))
     {
         add(&["-c:a", "copy"]);
@@ -1937,6 +1995,63 @@ fn plan(
     }
     args.push(output.into());
     Ok(args)
+}
+
+/// What the sound goes through: a filter graph, and the labels of its outputs
+/// to map, one for each track out.
+fn audio_graph(
+    settings: &Settings,
+    source: &Source,
+    streams: &[&AudioStream],
+    tempo: Option<&str>,
+) -> (String, Vec<String>) {
+    // Speech-sized windows, so a quiet voice is raised soon after it starts.
+    const LEVEL: &str = "dynaudnorm=f=250:g=15";
+    let volume = |stream: &AudioStream| match settings.volume(source, stream) {
+        100 => None,
+        percent => Some(format!("volume={:.2}", f64::from(percent) / 100.0)),
+    };
+    let after: Vec<&str> = tempo
+        .into_iter()
+        .chain(settings.levels().then_some(LEVEL))
+        .collect();
+    let chain = |parts: Vec<String>| {
+        if parts.is_empty() {
+            "anull".to_owned()
+        } else {
+            parts.join(",")
+        }
+    };
+    let mut graph = Vec::new();
+    if settings.mixes(source) {
+        let mut inputs = String::new();
+        for (number, stream) in streams.iter().enumerate() {
+            let label = format!("[v{number}]");
+            graph.push(format!(
+                "[0:{}]{}{label}",
+                stream.index,
+                chain(volume(stream).into_iter().collect())
+            ));
+            inputs.push_str(&label);
+        }
+        // Added up rather than averaged, so each keeps its own volume.
+        let mut mix = vec![format!(
+            "amix=inputs={}:duration=longest:normalize=0",
+            streams.len()
+        )];
+        mix.extend(after.iter().map(|part| (*part).to_owned()));
+        graph.push(format!("{inputs}{}[mixed]", chain(mix)));
+        return (graph.join(";"), vec!["[mixed]".to_owned()]);
+    }
+    let mut outputs = Vec::new();
+    for (number, stream) in streams.iter().enumerate() {
+        let mut parts: Vec<String> = volume(stream).into_iter().collect();
+        parts.extend(after.iter().map(|part| (*part).to_owned()));
+        let label = format!("[a{number}]");
+        graph.push(format!("[0:{}]{}{label}", stream.index, chain(parts)));
+        outputs.push(label);
+    }
+    (graph.join(";"), outputs)
 }
 
 /// The value of ffmpeg's progress line saying how far it's got, in seconds.
@@ -2688,6 +2803,52 @@ mod tests {
     }
 
     #[test]
+    fn volume_mixing_and_levelling_go_through_a_filter() {
+        let louder = Settings {
+            volumes: [250, 100, 100, 100, 100, 100, 100, 100],
+            ..Settings::default()
+        };
+        let args = planned(&job(louder), "mkv");
+        assert!(has(&args, "-filter_complex", "[0:2]volume=2.50[a0]"));
+        assert!(has(&args, "-c:v", "copy"), "the video is still copied");
+        assert!(!has(&args, "-c:a", "copy"), "changed audio can't be copied");
+        assert!(!has(&args, "-map", "0:2"), "the filter's output instead");
+
+        // A second track, say a call recorded beside a microphone.
+        let mut two = job(Settings {
+            volumes: [100, 300, 100, 100, 100, 100, 100, 100],
+            mix: true,
+            level: true,
+            ..Settings::default()
+        });
+        two.source.audio.push(AudioStream {
+            index: 5,
+            codec: "aac".to_owned(),
+            label: "Track 2".to_owned(),
+        });
+        let source = two.source.clone();
+        assert!(two.settings.mixes(&source));
+        assert_eq!(two.settings.output_tracks(&source), 1);
+        let args = planned(&two, "mkv");
+        let graph = "[0:2]anull[v0];[0:5]volume=3.00[v1];\
+            [v0][v1]amix=inputs=2:duration=longest:normalize=0,dynaudnorm=f=250:g=15[mixed]";
+        assert!(has(&args, "-filter_complex", graph), "{args:?}");
+        assert!(has(&args, "-map", "[mixed]"));
+
+        // Kept apart, each is levelled on its own.
+        two.settings.mix = false;
+        let args = planned(&two, "mkv");
+        let graph = "[0:2]dynaudnorm=f=250:g=15[a0];[0:5]volume=3.00,dynaudnorm=f=250:g=15[a1]";
+        assert!(has(&args, "-filter_complex", graph), "{args:?}");
+        assert!(has(&args, "-map", "[a0]") && has(&args, "-map", "[a1]"));
+
+        // Unchanged, it's copied as before.
+        let args = planned(&job(Settings::default()), "mkv");
+        assert!(!args.iter().any(|arg| arg == "-filter_complex"));
+        assert!(has(&args, "-c:a", "copy"));
+    }
+
+    #[test]
     fn audio_alone_leaves_the_rest_out() {
         let settings = Settings {
             format: Format::Mp3,
@@ -3165,7 +3326,8 @@ mod tests {
             ..Settings::default()
         };
         let args = planned(&job(settings), "mkv");
-        assert!(has(&args, "-af", "atempo=2"));
+        assert!(has(&args, "-filter_complex", "[0:2]atempo=2[a0]"));
+        assert!(has(&args, "-map", "[a0]"));
         assert!(!has(&args, "-c:a", "copy"), "changed audio can't be copied");
         assert!(
             !has(&args, "-map", "0:4"),
@@ -3652,6 +3814,94 @@ mod tests {
         let out = run_job(&dir, &upright, settings, (0.0, 2.0));
         let shape = entries(&out, "stream=width,height");
         assert!(shape.contains("50,88"), "{shape}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The mean volume of `path`'s audio track `track`, in dB.
+    fn mean_volume(path: &Path, track: usize) -> f64 {
+        let output = command("ffmpeg")
+            .args(["-hide_banner", "-nostdin", "-i"])
+            .arg(path)
+            .args([
+                "-map",
+                &format!("0:a:{track}"),
+                "-af",
+                "volumedetect",
+                "-f",
+                "null",
+                "-",
+            ])
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&output.stderr);
+        let line = text
+            .lines()
+            .find(|line| line.contains("mean_volume:"))
+            .unwrap();
+        let value = line.split("mean_volume:").nth(1).unwrap();
+        value.trim().trim_end_matches("dB").trim().parse().unwrap()
+    }
+
+    #[test]
+    fn tracks_get_louder_and_mix_into_one() {
+        let dir = temp_dir("volume");
+        let input = dir.join("two.mp4");
+        // A loud voice and a quiet call, each on a track of its own.
+        let made = command("ffmpeg")
+            .args(["-v", "error", "-f", "lavfi", "-i"])
+            .arg("testsrc2=size=160x90:rate=10:duration=4")
+            .args([
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=4,volume=0.5",
+            ])
+            .args([
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=880:duration=4,volume=0.05",
+            ])
+            .args(["-map", "0", "-map", "1", "-map", "2"])
+            .args(["-c:v", h264(), "-c:a", "aac"])
+            .arg(&input)
+            .status();
+        if !made.is_ok_and(|status| status.success()) {
+            eprintln!("no ffmpeg: skipped");
+            return;
+        }
+        let quiet = mean_volume(&input, 1);
+
+        // Four times as loud is 12 dB more.
+        let mut volumes = [100; MAX_TRACKS];
+        volumes[1] = 400;
+        let louder = Settings {
+            volumes,
+            ..Settings::default()
+        };
+        let out = run_job(&dir, &input, louder, (0.0, 4.0));
+        assert_eq!(
+            entries(&out, "stream=codec_type").matches("audio").count(),
+            2
+        );
+        let raised = mean_volume(&out, 1) - quiet;
+        assert!((raised - 12.0).abs() < 1.0, "raised {raised} dB");
+        std::fs::remove_file(&out).unwrap();
+
+        // Mixed, and evened out: one track.
+        let mixed = Settings {
+            volumes,
+            mix: true,
+            level: true,
+            ..Settings::default()
+        };
+        let out = run_job(&dir, &input, mixed, (0.0, 3.0));
+        assert_eq!(
+            entries(&out, "stream=codec_type").matches("audio").count(),
+            1
+        );
+        // A copied video can run on to its next frame, as without the mix.
+        assert!((2.9..3.6).contains(&duration(&out)), "{}", duration(&out));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

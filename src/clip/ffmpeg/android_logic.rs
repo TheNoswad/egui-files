@@ -208,9 +208,25 @@ pub fn upright(still: super::Still, rotation: u32, wanted: [usize; 2]) -> super:
     }
 }
 
+/// `sample` made `gain` times as loud, held at the loudest there is rather
+/// than wrapping round.
+pub fn louder(sample: i16, gain: f32) -> i16 {
+    (f32::from(sample) * gain)
+        .round()
+        .clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i16
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn louder_sound_is_held_at_the_loudest() {
+        assert_eq!(louder(1000, 2.5), 2500);
+        assert_eq!(louder(-1000, 0.5), -500);
+        assert_eq!(louder(20_000, 4.0), i16::MAX);
+        assert_eq!(louder(-20_000, 4.0), i16::MIN);
+    }
 
     #[test]
     fn stills_on_their_side_are_turned_upright() {

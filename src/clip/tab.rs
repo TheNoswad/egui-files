@@ -444,6 +444,8 @@ struct Runtime {
     strip: Option<super::strip::Strip>,
     /// How wide the player's buttons were last frame, to centre them.
     transport_width: f32,
+    /// The same of the clip's ends.
+    trim_width: f32,
     name: Option<String>,
     picker: Option<FolderPicker>,
     choosing_folder: bool,
@@ -1121,6 +1123,8 @@ impl ClipTab {
         // Side by side where there's room, else one above the other, so each
         // button stays with its time.
         let stacked = ui.available_width() < 360.0;
+        // Centred by their width last frame.
+        let pad = ((ui.available_width() - self.runtime.trim_width) / 2.0).max(0.0);
         let body = |ui: &mut Ui| {
             let (set_start, typed_start) = ui
                 .horizontal(|ui| {
@@ -1163,10 +1167,20 @@ impl ClipTab {
                 }
             }
         };
-        if stacked {
-            ui.vertical(body);
-        } else {
-            ui.horizontal(body);
+        let width = ui
+            .horizontal(|ui| {
+                ui.add_space(pad);
+                let inner = if stacked {
+                    ui.vertical(body).response
+                } else {
+                    ui.horizontal(body).response
+                };
+                inner.rect.width()
+            })
+            .inner;
+        if (width - self.runtime.trim_width).abs() > 0.5 {
+            self.runtime.trim_width = width;
+            ui.ctx().request_discard("centring the clip's ends");
         }
         let end = self.end.unwrap_or(end);
         let mut length = format!("Keeps {}", precise_time(end - self.start));
@@ -1188,7 +1202,7 @@ impl ClipTab {
         } else {
             None
         };
-        ui.horizontal_wrapped(|ui| {
+        ui.vertical_centered(|ui| {
             ui.weak(length);
             if let Some(warning) = warning {
                 ui.colored_label(ui.visuals().warn_fg_color, warning);
@@ -1350,7 +1364,7 @@ impl ClipTab {
         }
         if !source.audio.is_empty() && !format.is_animated() {
             section(ui, "Audio");
-            self.audio_ui(ui, source);
+            self.audio_ui(ui, source, tools);
         }
         ui.add_space(16.0);
         self.more_ui(ui, source, tools);
@@ -1745,7 +1759,12 @@ impl ClipTab {
                 if self.settings.use_target {
                     self.target_ui(ui, source, tools, end);
                 } else if self.settings.copies(source) {
-                    weak_note(ui, "Copied as it is: quick, and it loses nothing.");
+                    let note = if self.settings.changes_audio(source) {
+                        "The video is copied as it is: quick, and it loses nothing. The sound is made again."
+                    } else {
+                        "Copied as it is: quick, and it loses nothing."
+                    };
+                    weak_note(ui, note);
                 } else {
                     row(ui, "Quality", |ui| {
                         for quality in Quality::ALL {
@@ -1972,7 +1991,7 @@ impl ClipTab {
     }
 
     /// Which audio goes in, and how much of the file it gets.
-    fn audio_ui(&mut self, ui: &mut Ui, source: &Source) {
+    fn audio_ui(&mut self, ui: &mut Ui, source: &Source, tools: &Tools) {
         let audio_only = self.settings.format.is_audio_only();
         let track_label = |choice: AudioChoice| match choice {
             AudioChoice::All if !audio_only => "All tracks".to_owned(),
@@ -2022,6 +2041,7 @@ impl ClipTab {
                     });
             });
         }
+        self.volume_ui(ui, source, tools);
         let has_rate = !self.settings.format.is_lossless()
             && (audio_only || self.settings.audio != AudioChoice::None);
         if has_rate {
@@ -2044,6 +2064,62 @@ impl ClipTab {
                 );
             });
         }
+    }
+
+    /// How loud each track kept is, and what's done with them together.
+    fn volume_ui(&mut self, ui: &mut Ui, source: &Source, tools: &Tools) {
+        let kept = self.settings.audio_streams(source);
+        for stream in &kept {
+            let Some(place) = source.audio.iter().position(|a| a.index == stream.index) else {
+                continue;
+            };
+            let Some(volume) = self.settings.volumes.get_mut(place) else {
+                continue;
+            };
+            let name = if kept.len() == 1 {
+                "Volume".to_owned()
+            } else {
+                format!("Track {}", place + 1)
+            };
+            row(ui, &name, |ui| {
+                ui.spacing_mut().slider_width = (ui.available_width() - 90.0).clamp(60.0, 150.0);
+                let slider = ui
+                    .add(
+                        egui::Slider::new(volume, 0..=400)
+                            .step_by(5.0)
+                            .show_value(false),
+                    )
+                    .on_hover_text(&stream.label);
+                if slider.double_clicked() {
+                    *volume = 100;
+                }
+                ui.label(format!("{volume}%"));
+                if *volume != 100
+                    && ui
+                        .small_button(icon::ARROW_COUNTER_CLOCKWISE)
+                        .on_hover_text("Back to as it was")
+                        .clicked()
+                {
+                    *volume = 100;
+                }
+            });
+        }
+        // Android can't mix or even out yet.
+        if tools.phone() || self.settings.format.is_animated() || kept.is_empty() {
+            return;
+        }
+        indented(ui, |ui| {
+            if kept.len() > 1 {
+                ui.checkbox(&mut self.settings.mix, "Mix into one track")
+                    .on_hover_text(
+                        "Most players and websites play only the first track. Mixed, everyone hears them all.",
+                    );
+            }
+            ui.checkbox(&mut self.settings.level, "Even out loudness")
+                .on_hover_text(
+                    "Raises quiet stretches and lowers loud ones, like a call recorded beside a loud microphone.",
+                );
+        });
     }
 
     fn original_extension(&self) -> &str {
