@@ -314,13 +314,12 @@ fn picture_mesh(texture: egui::TextureId, rect: Rect, view: View) -> egui::Shape
 
 /// A heading over a group of settings.
 fn section(ui: &mut Ui, title: &str) {
-    ui.add_space(10.0);
+    ui.add_space(16.0);
     ui.horizontal(|ui| {
-        let color = ui.visuals().weak_text_color();
-        ui.label(RichText::new(title).small().strong().color(color));
+        ui.label(RichText::new(title).heading().strong());
         ui.add(egui::Separator::default().horizontal());
     });
-    ui.add_space(2.0);
+    ui.add_space(4.0);
 }
 
 /// Whether there's too little room for settings' names in front of them, so
@@ -1298,19 +1297,19 @@ impl ClipTab {
     /// The settings, in groups.
     fn settings(&mut self, ui: &mut Ui, source: &Source, tools: &Tools) {
         let end = self.end.unwrap_or(source.duration);
-        section(ui, "OUTPUT");
+        section(ui, "Output");
         self.format_ui(ui, source, tools);
         let format = self.settings.format;
         if !format.is_audio_only() {
             self.size_ui(ui, source, tools, end);
-            section(ui, "PICTURE");
+            section(ui, "Picture");
             self.picture_ui(ui, source);
         }
         if !source.audio.is_empty() && !format.is_animated() {
-            section(ui, "AUDIO");
+            section(ui, "Audio");
             self.audio_ui(ui, source);
         }
-        ui.add_space(8.0);
+        ui.add_space(16.0);
         self.more_ui(ui, source, tools);
         ui.add_space(8.0);
     }
@@ -1333,11 +1332,25 @@ impl ClipTab {
         if self.settings.keep != Keep::default() && !format.is_animated() {
             changed.push("some metadata left out".to_owned());
         }
-        let title = if changed.is_empty() {
-            "More".to_owned()
-        } else {
-            format!("More · {}", changed.join(", "))
-        };
+        // As big as the sections' headings, with what's changed small after.
+        let mut title = egui::text::LayoutJob::default();
+        let style = ui.style();
+        RichText::new("More").heading().strong().append_to(
+            &mut title,
+            style,
+            egui::FontSelection::Default,
+            egui::Align::Center,
+        );
+        if !changed.is_empty() {
+            RichText::new(format!("  {}", changed.join(", ")))
+                .color(ui.visuals().weak_text_color())
+                .append_to(
+                    &mut title,
+                    style,
+                    egui::FontSelection::Default,
+                    egui::Align::Center,
+                );
+        }
         egui::CollapsingHeader::new(title)
             .id_salt(("clip-more", self.id))
             .show(ui, |ui| {
