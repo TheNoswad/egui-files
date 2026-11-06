@@ -92,9 +92,11 @@ Trims and converts with the user's own ffmpeg, so the app ships no codecs (`src/
 - [ ] Try exporting from a phone's mount: the path is mapped, but no test or run has covered it
 - [x] Editor layout: sections with a footer that keeps Export in view, a video box shaped like the picture, a ruler, typed start and end times, frame steps and jumps, zooming, and a narrow layout down to about 260 pt. A blocked Export says why on a click and points at the setting; a target size too small (or too small to look good) offers one-click fixes
 - [x] Scrubbing: no playhead jump (mpv's old position is ignored until the seek is done), a fine drag at a tenth of the speed (Shift, or the pointer away from the bar), and Settings → Video → "Exact frames while scrubbing" for keyframe seeks while dragging
-    - [ ] Android: try the fine drag (60 pt away from the bar) and exact seeks while scrubbing on the Pixel
+    - [x] Android: the fine drag checked on the Pixel 7a: 300 px away from the bar moved 0.28 s, along it 2.8 s
 - [x] Stills along the timeline (`strip.rs`): the whole video thinly first, then finer where it's zoomed into, down to a frame, from a grid of halves of its length so panning finds the same ones. Two ffmpeg runs at a time on the desktop; one `MediaMetadataRetriever` on Android. What's trimmed off is dimmed
-    - [ ] Android: only built. Check on the Pixel that stills come, how fast, and that a portrait phone video's stills are upright (`android_logic::upright` turns them if the retriever didn't, which can't tell 180°)
+    - [x] Android: checked on the Pixel 7a: stills come within a few seconds, upright for videos stored turned 90° and 180° (the retriever turns them itself; `android_logic::upright` is only a fallback)
+    - [ ] Android: the file views show no video thumbnails, as there's no ffmpeg; `ffmpeg::stills` could make them there
+- [ ] Volume: a gain for each audio track (the "All tracks" choice already keeps them all), so a quiet track, like a call recorded beside a loud mic, can be raised before they're mixed or kept apart. Maybe a "level out" choice too (`dynaudnorm`), for a recording whose inputs were mixed into one track already, which no gain can separate
 
 ## Markdown
 

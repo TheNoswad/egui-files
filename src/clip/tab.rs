@@ -940,6 +940,9 @@ impl ClipTab {
         if self.runtime.drag.is_some() {
             let hint = if self.runtime.fine {
                 "Fine: a tenth of the speed"
+            } else if cfg!(target_os = "android") {
+                // No Shift on a phone.
+                "Drag away from the bar to go finer"
             } else {
                 "Hold Shift, or drag away from the bar, to go finer"
             };
