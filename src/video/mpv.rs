@@ -61,6 +61,7 @@ const EVENT_SHUTDOWN: c_int = 1;
 const EVENT_END_FILE: c_int = 7;
 const EVENT_FILE_LOADED: c_int = 8;
 const EVENT_VIDEO_RECONFIG: c_int = 17;
+const EVENT_PLAYBACK_RESTART: c_int = 21;
 const EVENT_PROPERTY_CHANGE: c_int = 22;
 const END_FILE_REASON_ERROR: c_int = 4;
 
@@ -239,6 +240,8 @@ pub enum Event {
     FileLoaded,
     /// The video output was (re)configured, e.g. for a new file.
     VideoReconfig,
+    /// Playing (or showing a frame, if paused) again after a seek.
+    PlaybackRestart,
     EndFile {
         error: Option<String>,
     },
@@ -379,6 +382,7 @@ impl Mpv {
                 EVENT_SHUTDOWN => Event::Shutdown,
                 EVENT_FILE_LOADED => Event::FileLoaded,
                 EVENT_VIDEO_RECONFIG => Event::VideoReconfig,
+                EVENT_PLAYBACK_RESTART => Event::PlaybackRestart,
                 EVENT_END_FILE => {
                     // SAFETY: END_FILE events carry an mpv_event_end_file.
                     let end = unsafe { &*(event.data as *const RawEventEndFile) };

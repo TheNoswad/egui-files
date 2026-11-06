@@ -31,6 +31,8 @@ use crate::android::with_env;
 const YUV_420_888: i32 = 0x23;
 /// `MediaPlayer.SEEK_CLOSEST`: the very frame, not the keyframe before it.
 const SEEK_CLOSEST: i32 = 3;
+/// `MediaPlayer.SEEK_PREVIOUS_SYNC`: the keyframe before, which is quicker.
+const SEEK_PREVIOUS_SYNC: i32 = 0;
 /// `MediaMetadataRetriever`'s keys.
 const KEY_WIDTH: i32 = 18;
 const KEY_HEIGHT: i32 = 19;
@@ -202,10 +204,10 @@ impl AndroidPlayer {
                 self.state.paused = paused;
                 self.set_playing(!paused)
             }
-            Command::Seek(seconds) => {
+            Command::Seek { seconds, exact } => {
                 self.state.position = seconds;
                 self.state.eof = false;
-                self.seek(seconds)
+                self.seek(seconds, exact)
             }
             Command::Mute(muted) => {
                 self.state.muted = muted;
@@ -304,7 +306,7 @@ impl AndroidPlayer {
             self.set_playing(true)
         } else {
             // Shows the first frame, which it otherwise wouldn't until playing.
-            self.seek(0.0)
+            self.seek(0.0, true)
         }
     }
 
@@ -366,7 +368,7 @@ impl AndroidPlayer {
         })
     }
 
-    fn seek(&self, seconds: f64) -> Result<(), String> {
+    fn seek(&self, seconds: f64, exact: bool) -> Result<(), String> {
         let Some(loaded) = &self.loaded else {
             return Ok(());
         };
@@ -377,7 +379,11 @@ impl AndroidPlayer {
                 jni_sig!("(JI)V"),
                 &[
                     JValue::Long((seconds.max(0.0) * 1000.0) as i64),
-                    JValue::Int(SEEK_CLOSEST),
+                    JValue::Int(if exact {
+                        SEEK_CLOSEST
+                    } else {
+                        SEEK_PREVIOUS_SYNC
+                    }),
                 ],
             )?;
             Ok(())

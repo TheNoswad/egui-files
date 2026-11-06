@@ -245,7 +245,12 @@ enum Command {
     /// Render target size in pixels.
     Resize([u32; 2]),
     Pause(bool),
-    Seek(f64),
+    /// Where to, and whether to the very frame rather than the keyframe
+    /// before it, which is quicker to show.
+    Seek {
+        seconds: f64,
+        exact: bool,
+    },
     Mute(bool),
     Volume(f64),
     Speed(f64),
@@ -342,17 +347,27 @@ impl Player {
         let mut status = self.status_mut();
         if !paused && status.eof {
             status.eof = false;
-            self.send(Command::Seek(0.0));
+            self.send(Command::Seek {
+                seconds: 0.0,
+                exact: true,
+            });
         }
         status.paused = paused;
         self.send(Command::Pause(paused));
     }
 
+    /// Shows the very frame at `seconds`.
     pub fn seek(&self, seconds: f64) {
+        self.seek_to(seconds, true);
+    }
+
+    /// Goes to `seconds`, showing the keyframe before it unless `exact`: quick
+    /// enough to keep up with a drag through a long recording.
+    pub fn seek_to(&self, seconds: f64, exact: bool) {
         let mut status = self.status_mut();
         status.position = seconds;
         status.eof = false;
-        self.send(Command::Seek(seconds));
+        self.send(Command::Seek { seconds, exact });
     }
 
     pub fn set_muted(&self, muted: bool) {
@@ -429,6 +444,9 @@ pub struct Videos {
     /// Volume in percent, as `f64` bits.
     volume: Arc<AtomicU64>,
     quality: Quality,
+    /// Show the very frame while dragging through a video, not the keyframe
+    /// before it.
+    exact_scrubbing: bool,
     /// [`crate::tools::generation`] when the backend was started.
     tools_generation: u64,
 }
@@ -444,11 +462,20 @@ impl Videos {
             frame: 0,
             volume: Arc::new(AtomicU64::new(DEFAULT_VOLUME.to_bits())),
             quality: Quality::default(),
+            exact_scrubbing: true,
         }
     }
 
     pub fn quality(&self) -> Quality {
         self.quality
+    }
+
+    pub fn exact_scrubbing(&self) -> bool {
+        self.exact_scrubbing
+    }
+
+    pub fn set_exact_scrubbing(&mut self, exact: bool) {
+        self.exact_scrubbing = exact;
     }
 
     /// Restarts open players, since mpv's scalers are set when it starts.

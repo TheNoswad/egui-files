@@ -141,6 +141,8 @@ struct VideoPlayer {
     height: u32,
     /// The current file has loaded.
     file_loaded: bool,
+    /// A seek was asked for and mpv hasn't said it's done.
+    seeking: bool,
     /// The current file's video is set up: frames and sizes are no longer the previous file's.
     loaded: bool,
     status: Arc<Mutex<Status>>,
@@ -271,6 +273,7 @@ impl VideoPlayer {
             width: 0,
             height: 0,
             file_loaded: false,
+            seeking: false,
             loaded: false,
             status,
         })
@@ -337,11 +340,18 @@ impl VideoPlayer {
                 self.mpv
                     .set_property("pause", if paused { "yes" } else { "no" })
             }
-            Command::Seek(seconds) => {
+            Command::Seek { seconds, exact } => {
                 self.state.position = seconds;
                 self.state.eof = false;
-                self.mpv
-                    .command(&["seek", &seconds.to_string(), "absolute"])
+                // Until it's there, mpv still reports where it was, which
+                // would make the playhead jump back for a frame.
+                self.seeking = true;
+                let how = if exact {
+                    "absolute+exact"
+                } else {
+                    "absolute+keyframes"
+                };
+                self.mpv.command(&["seek", &seconds.to_string(), how])
             }
             Command::Mute(muted) => {
                 self.state.muted = muted;
@@ -381,6 +391,7 @@ impl VideoPlayer {
                     };
                     let flag = matches!(value, PropertyValue::Flag(true));
                     match id {
+                        PROPERTY_POSITION if self.seeking => {}
                         PROPERTY_POSITION => status.position = double.unwrap_or(0.0),
                         PROPERTY_DURATION => status.duration = double.unwrap_or(0.0),
                         PROPERTY_PAUSE => status.paused = flag,
@@ -390,7 +401,9 @@ impl VideoPlayer {
                         _ => {}
                     }
                 }
+                Event::PlaybackRestart => self.seeking = false,
                 Event::FileLoaded => {
+                    self.seeking = false;
                     self.file_loaded = true;
                     status.error = None;
                 }
@@ -411,6 +424,7 @@ impl VideoPlayer {
                 }
                 Event::VideoReconfig => {}
                 Event::EndFile { error } => {
+                    self.seeking = false;
                     if error.is_some() {
                         status.error = error;
                     }

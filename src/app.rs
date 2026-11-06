@@ -89,6 +89,8 @@ struct Persisted {
     video_volume: f64,
     #[serde(default)]
     video_quality: Quality,
+    #[serde(default = "default_true")]
+    video_exact_scrubbing: bool,
     #[serde(default)]
     archive_prefs: archive::Prefs,
     #[serde(default)]
@@ -163,6 +165,7 @@ struct PersistedRef<'a> {
     terminal: &'a TerminalPanel,
     video_volume: f64,
     video_quality: Quality,
+    video_exact_scrubbing: bool,
     archive_prefs: &'a archive::Prefs,
     ffmpeg_path: Option<PathBuf>,
     open_with: &'a open_with::Prefs,
@@ -490,6 +493,7 @@ impl FilesApp {
                 terminal: TerminalPanel::default(),
                 video_volume: default_volume(),
                 video_quality: Quality::default(),
+                video_exact_scrubbing: true,
                 archive_prefs: archive::Prefs::default(),
                 ffmpeg_path: None,
                 open_with: open_with::Prefs::default(),
@@ -522,6 +526,7 @@ impl FilesApp {
             mut terminal,
             video_volume,
             video_quality,
+            video_exact_scrubbing,
             archive_prefs,
             ffmpeg_path,
             open_with,
@@ -573,6 +578,7 @@ impl FilesApp {
                     let mut videos = Videos::new(&cc.egui_ctx);
                     videos.set_volume(video_volume);
                     videos.set_quality(video_quality);
+                    videos.set_exact_scrubbing(video_exact_scrubbing);
                     videos
                 },
                 texts: TextCache::default(),
@@ -3047,6 +3053,7 @@ impl FilesApp {
             terminal: &self.terminal,
             video_volume: self.shared.videos.volume(),
             video_quality: self.shared.videos.quality(),
+            video_exact_scrubbing: self.shared.videos.exact_scrubbing(),
             archive_prefs: &self.shared.archive_prefs,
             ffmpeg_path: crate::tools::custom_ffmpeg(),
             open_with: &self.shared.open_with.prefs,

@@ -615,6 +615,16 @@ fn files(ui: &mut Ui, app: &mut Access) {
             }
         }
     });
+    let mut exact = shared.videos.exact_scrubbing();
+    if ui
+        .checkbox(&mut exact, "Exact frames while scrubbing")
+        .on_hover_text(
+            "Dragging through a video in the editor shows the very frame under the pointer. Off, it shows the keyframe before until you let go, which keeps up better with long recordings.",
+        )
+        .changed()
+    {
+        shared.videos.set_exact_scrubbing(exact);
+    }
     if cfg!(not(target_arch = "wasm32")) {
         ui.add_space(6.0);
         crate::tools::settings_ui(ui, &mut shared.jobs);
