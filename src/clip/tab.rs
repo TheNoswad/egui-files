@@ -442,6 +442,8 @@ struct Runtime {
     footer_height: f32,
     /// Stills along the timeline.
     strip: Option<super::strip::Strip>,
+    /// How wide the player's buttons were last frame, to centre them.
+    transport_width: f32,
     name: Option<String>,
     picker: Option<FolderPicker>,
     choosing_folder: bool,
@@ -979,9 +981,53 @@ impl ClipTab {
             precise_time(status.position),
             video::format_time(source.duration)
         );
-        // Too narrow for the time beside the buttons, it goes under them.
-        let compact = ui.available_width() < 340.0;
-        ui.horizontal(|ui| {
+        // Too narrow for the time beside the centred buttons, it goes under.
+        let font = egui::TextStyle::Monospace.resolve(ui.style());
+        let time_width = ui
+            .painter()
+            .layout_no_wrap(time.clone(), font, Color32::WHITE)
+            .size()
+            .x;
+        let compact = ui.available_width()
+            < 2.0 * (time_width + 12.0) + self.runtime.transport_width.max(150.0);
+        let height = ui.spacing().interact_size.y;
+        let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
+        let child = |ui: &mut Ui, rect: Rect, layout: Layout| {
+            ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(layout))
+        };
+        // The time on the left, the buttons in the middle, zooming on the right.
+        if !compact {
+            child(ui, row, Layout::left_to_right(Align::Center)).monospace(&time);
+        }
+        let mut zoom_ui = child(ui, row, Layout::right_to_left(Align::Center));
+        let zoomed = self.runtime.zoom.is_some();
+        let (zoom_icon, zoom_hover) = if zoomed {
+            (icon::MAGNIFYING_GLASS_MINUS, "Show the whole video")
+        } else {
+            (
+                icon::MAGNIFYING_GLASS_PLUS,
+                "Zoom in on the clip (or Ctrl and the wheel over the timeline)",
+            )
+        };
+        if zoom_ui
+            .selectable_label(zoomed, zoom_icon)
+            .on_hover_text(zoom_hover)
+            .clicked()
+        {
+            self.runtime.zoom = if zoomed {
+                None
+            } else {
+                Some(around(self.start, end, source.duration.max(MIN_LENGTH)))
+            };
+        }
+        // Centred by their width last frame.
+        let middle = Rect::from_center_size(
+            row.center(),
+            vec2(self.runtime.transport_width.max(1.0), height),
+        );
+        let mut buttons = child(ui, middle, Layout::left_to_right(Align::Center));
+        {
+            let ui = &mut buttons;
             let to_start = ui
                 .button(icon::SKIP_BACK)
                 .on_hover_text("Go to the clip's start (Home)")
@@ -1015,33 +1061,6 @@ impl ClipTab {
                 .on_hover_text("Go to the clip's end (End)")
                 .clicked()
                 || keys.to_end;
-            ui.add_space(6.0);
-            let zoomed = self.runtime.zoom.is_some();
-            let (zoom_icon, zoom_hover) = if zoomed {
-                (icon::MAGNIFYING_GLASS_MINUS, "Show the whole video")
-            } else {
-                (
-                    icon::MAGNIFYING_GLASS_PLUS,
-                    "Zoom in on the clip (or Ctrl and the wheel over the timeline)",
-                )
-            };
-            if ui
-                .selectable_label(zoomed, zoom_icon)
-                .on_hover_text(zoom_hover)
-                .clicked()
-            {
-                self.runtime.zoom = if zoomed {
-                    None
-                } else {
-                    Some(around(self.start, end, source.duration.max(MIN_LENGTH)))
-                };
-            }
-            if !compact {
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.monospace(&time);
-                });
-            }
-
             if toggle {
                 // At the end of the clip, playing means seeing it again.
                 if status.paused && replays(status.position, self.start, end) {
@@ -1075,9 +1094,14 @@ impl ClipTab {
                 player.seek(target);
                 self.runtime.last_position = target;
             }
-        });
+        }
+        let used = buttons.min_rect().width();
+        if (used - self.runtime.transport_width).abs() > 0.5 {
+            self.runtime.transport_width = used;
+            ui.ctx().request_discard("centring the player's buttons");
+        }
         if compact {
-            ui.monospace(time);
+            ui.vertical_centered(|ui| ui.monospace(time));
         }
     }
 
