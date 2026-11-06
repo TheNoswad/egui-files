@@ -43,10 +43,10 @@ const TIMELINE_INSET: f32 = if cfg!(target_os = "android") {
     GRAB
 };
 /// The height of the timeline's bar, and of the ruler under it.
-const TRACK_HEIGHT: f32 = 30.0;
+const TRACK_HEIGHT: f32 = 42.0;
 const RULER_HEIGHT: f32 = 16.0;
 /// Room under the picture for the timeline and the rows under it.
-const CONTROLS_HEIGHT: f32 = 130.0;
+const CONTROLS_HEIGHT: f32 = 142.0;
 /// How far from the timeline, in points, a drag goes finely.
 const FINE_DISTANCE: f32 = if cfg!(target_os = "android") {
     60.0
@@ -440,6 +440,8 @@ struct Runtime {
     typing: Option<(Handle, String)>,
     /// How tall the bar with the Export button was last frame.
     footer_height: f32,
+    /// Stills along the timeline.
+    strip: Option<super::strip::Strip>,
     name: Option<String>,
     picker: Option<FolderPicker>,
     choosing_folder: bool,
@@ -824,13 +826,27 @@ impl ClipTab {
         let painter = ui.painter_at(rect);
         let bar = Rect::from_x_y_ranges(inner, track.y_range().shrink(3.0));
         painter.rect_filled(bar, 4.0, visuals.extreme_bg_color);
+        let (id, clip) = (self.id, &self.clip);
+        self.runtime
+            .strip
+            .get_or_insert_with(|| super::strip::Strip::new(id, clip.clone(), source.clone()))
+            .show(ui.ctx(), &painter, bar, view);
         let accent = visuals.selection.bg_fill;
         let chosen = Rect::from_x_y_ranges(
             start_x.max(bar.left())..=end_x.min(bar.right()),
             bar.y_range(),
         );
+        // What's left out is dimmed.
+        let shade = Color32::from_black_alpha(170);
+        let before = Rect::from_x_y_ranges(bar.left()..=start_x.min(bar.right()), bar.y_range());
+        let after = Rect::from_x_y_ranges(end_x.max(bar.left())..=bar.right(), bar.y_range());
+        for outside in [before, after] {
+            if outside.width() > 0.0 {
+                painter.rect_filled(outside, 0.0, shade);
+            }
+        }
         if chosen.width() > 0.0 {
-            painter.rect_filled(chosen, 0.0, accent.gamma_multiply(0.45));
+            painter.rect_filled(chosen, 0.0, accent.gamma_multiply(0.12));
             let edge = Stroke::new(2.0, accent);
             painter.line_segment([chosen.left_top(), chosen.right_top()], edge);
             painter.line_segment([chosen.left_bottom(), chosen.right_bottom()], edge);

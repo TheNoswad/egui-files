@@ -5,6 +5,7 @@
 
 pub(crate) mod crop;
 mod ffmpeg;
+mod strip;
 mod tab;
 
 use std::path::Path;

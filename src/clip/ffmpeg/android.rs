@@ -8,11 +8,13 @@ use jni::{
     objects::{JObject, JObjectArray, JString},
 };
 
-use super::{AudioStream, Source, Subtitle, Tools, android_logic};
+use super::{AudioStream, Source, Still, Subtitle, Tools, android_logic};
 use crate::android::with_env;
 
 /// `MediaMetadataRetriever.METADATA_KEY_LOCATION`.
 const KEY_LOCATION: i32 = 23;
+/// `MediaMetadataRetriever.OPTION_CLOSEST`: the very frame, not a keyframe.
+const OPTION_CLOSEST: i32 = 3;
 /// `MediaExtractor.SEEK_TO_PREVIOUS_SYNC`.
 const SEEK_TO_PREVIOUS_SYNC: i32 = 0;
 /// `MediaCodecList.REGULAR_CODECS`: those that run in real time.
@@ -309,6 +311,127 @@ pub(super) fn seek_to(env: &mut Env, extractor: &JObject, seconds: f64) -> jni::
 pub(super) fn sample_time(env: &mut Env, extractor: &JObject) -> jni::errors::Result<i64> {
     env.call_method(extractor, jni_str!("getSampleTime"), jni_sig!("()J"), &[])?
         .j()
+}
+
+/// Grabs stills of `size` at the times `next` gives, with one retriever.
+pub fn stills<T>(
+    path: &Path,
+    source: &Source,
+    size: [usize; 2],
+    mut next: impl FnMut() -> Option<(T, f64)>,
+    mut done: impl FnMut(T, Result<Still, String>),
+) {
+    let Some(path) = path.to_str() else {
+        while let Some((asked, _)) = next() {
+            done(asked, Err("the file's name isn't valid Unicode".to_owned()));
+        }
+        return;
+    };
+    let opened = with_env("grab a video's frames", |env| {
+        let retriever = env.new_object(
+            jni_str!("android/media/MediaMetadataRetriever"),
+            jni_sig!("()V"),
+            &[],
+        )?;
+        let file = env.new_string(path)?;
+        let result = env
+            .call_method(
+                &retriever,
+                jni_str!("setDataSource"),
+                jni_sig!("(Ljava/lang/String;)V"),
+                &[JValue::Object(&file)],
+            )
+            .map(|_| ());
+        if result.is_ok() {
+            while let Some((asked, at)) = next() {
+                let still = env.with_local_frame(8, |env| still(env, &retriever, source, at, size));
+                if env.exception_check() {
+                    env.exception_clear();
+                }
+                done(
+                    asked,
+                    match still {
+                        Ok(Some(still)) => Ok(still),
+                        Ok(None) => Err("no frame there".to_owned()),
+                        Err(err) => Err(err.to_string()),
+                    },
+                );
+            }
+        }
+        release(env, &retriever, result)
+    });
+    if let Err(err) = opened {
+        while let Some((asked, _)) = next() {
+            done(asked, Err(err.clone()));
+        }
+    }
+}
+
+/// The frame at `at`, fitting in `size`, upright.
+fn still(
+    env: &mut Env,
+    retriever: &JObject,
+    source: &Source,
+    at: f64,
+    size: [usize; 2],
+) -> jni::errors::Result<Option<Still>> {
+    let bitmap = env
+        .call_method(
+            retriever,
+            jni_str!("getScaledFrameAtTime"),
+            jni_sig!("(JIII)Landroid/graphics/Bitmap;"),
+            &[
+                JValue::Long((at.max(0.0) * 1_000_000.0) as i64),
+                JValue::Int(OPTION_CLOSEST),
+                JValue::Int(size[0] as i32),
+                JValue::Int(size[1] as i32),
+            ],
+        )?
+        .l()?;
+    if bitmap.is_null() {
+        return Ok(None);
+    }
+    let width = env
+        .call_method(&bitmap, jni_str!("getWidth"), jni_sig!("()I"), &[])?
+        .i()?
+        .max(0) as usize;
+    let height = env
+        .call_method(&bitmap, jni_str!("getHeight"), jni_sig!("()I"), &[])?
+        .i()?
+        .max(0) as usize;
+    let pixels = env.new_int_array(width * height)?;
+    env.call_method(
+        &bitmap,
+        jni_str!("getPixels"),
+        jni_sig!("([IIIIIII)V"),
+        &[
+            JValue::Object(&pixels),
+            JValue::Int(0),
+            JValue::Int(width as i32),
+            JValue::Int(0),
+            JValue::Int(0),
+            JValue::Int(width as i32),
+            JValue::Int(height as i32),
+        ],
+    )?;
+    let mut argb = vec![0; width * height];
+    pixels.get_region(env, 0, &mut argb)?;
+    env.call_method(&bitmap, jni_str!("recycle"), jni_sig!("()V"), &[])?;
+    let rgba = argb
+        .iter()
+        .flat_map(|&pixel| {
+            let [a, r, g, b] = (pixel as u32).to_be_bytes();
+            [r, g, b, a]
+        })
+        .collect();
+    Ok(Some(android_logic::upright(
+        Still {
+            size: [width, height],
+            rgba,
+        },
+        source.rotation,
+        size,
+    )))
 }
 
 /// Where a copy asked to start at `at` really starts: the keyframe before it.

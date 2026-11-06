@@ -1329,6 +1329,80 @@ fn keyframe_with_ffprobe(path: &Path, source: &Source, at: f64) -> Result<f64, S
     Ok(0.0)
 }
 
+/// A small picture of one moment of a video, in rows of RGBA.
+pub struct Still {
+    pub size: [usize; 2],
+    pub rgba: Vec<u8>,
+}
+
+/// The size of stills `height` pixels tall, the video's shape as shown.
+fn still_size(source: &Source, height: u32) -> [usize; 2] {
+    let height = height.max(2);
+    let width = (height as f32 * source.aspect()).round() as u32;
+    [width.clamp(2, height * 8) as usize, height as usize]
+}
+
+/// Grabs stills `height` pixels tall at the times `next` gives, handing each
+/// to `done` with what came with its time, until `next` has no more. Blocks.
+pub fn stills<T>(
+    path: &Path,
+    source: &Source,
+    height: u32,
+    next: impl FnMut() -> Option<(T, f64)>,
+    done: impl FnMut(T, Result<Still, String>),
+) {
+    let size = still_size(source, height);
+    #[cfg(target_os = "android")]
+    android::stills(path, source, size, next, done);
+    #[cfg(not(target_os = "android"))]
+    {
+        let (mut next, mut done) = (next, done);
+        let path = reachable(path);
+        while let Some((asked, at)) = next() {
+            done(asked, still_with_ffmpeg(&path, source, at, size));
+        }
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn still_with_ffmpeg(
+    path: &Path,
+    source: &Source,
+    at: f64,
+    size: [usize; 2],
+) -> Result<Still, String> {
+    let [width, height] = size;
+    let output = command("ffmpeg")
+        .args([
+            "-v",
+            "error",
+            "-nostdin",
+            "-ss",
+            &format!("{:.6}", at.max(0.0)),
+        ])
+        .arg("-i")
+        .arg(path)
+        .args(["-map", &format!("0:{}", source.video_index)])
+        .args(["-an", "-sn", "-frames:v", "1", "-vf"])
+        .arg(format!("scale={width}:{height}"))
+        .args(["-f", "rawvideo", "-pix_fmt", "rgba", "-"])
+        .output()
+        .map_err(|err| match err.kind() {
+            std::io::ErrorKind::NotFound => not_found_message(),
+            _ => err.to_string(),
+        })?;
+    if output.stdout.len() == width * height * 4 {
+        Ok(Still {
+            size,
+            rgba: output.stdout,
+        })
+    } else if output.status.success() {
+        Err("no frame there".to_owned())
+    } else {
+        Err(first_error(&String::from_utf8_lossy(&output.stderr)))
+    }
+}
+
 /// The last keyframe at or before `at`, in lines of `pts_time,flags`.
 fn parse_keyframe(text: &str, at: f64) -> Option<f64> {
     text.lines()

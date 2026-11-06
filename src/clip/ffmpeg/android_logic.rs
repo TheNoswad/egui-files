@@ -180,9 +180,55 @@ pub fn parse_location(text: &str) -> Option<(f32, f32)> {
         .then_some((latitude, longitude))
 }
 
+/// `still` turned upright, if it's still the stored way round: lying on its
+/// side where the video is turned a quarter, so its shape is not `wanted`'s.
+pub fn upright(still: super::Still, rotation: u32, wanted: [usize; 2]) -> super::Still {
+    let [width, height] = still.size;
+    let lying = (width > height) != (wanted[0] > wanted[1]) && width != height;
+    if !lying || !matches!(rotation % 360, 90 | 270) {
+        return still;
+    }
+    let mut rgba = vec![0; still.rgba.len()];
+    // Shown `height` wide and `width` tall.
+    for y in 0..width {
+        for x in 0..height {
+            let (from_x, from_y) = if rotation % 360 == 90 {
+                (y, height - 1 - x)
+            } else {
+                (width - 1 - y, x)
+            };
+            let from = (from_y * width + from_x) * 4;
+            let to = (y * height + x) * 4;
+            rgba[to..to + 4].copy_from_slice(&still.rgba[from..from + 4]);
+        }
+    }
+    super::Still {
+        size: [height, width],
+        rgba,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stills_on_their_side_are_turned_upright() {
+        // Two pixels wide, one tall: red then green.
+        let stored = || super::super::Still {
+            size: [2, 1],
+            rgba: vec![255, 0, 0, 255, 0, 255, 0, 255],
+        };
+        // A quarter clockwise puts the left on top.
+        let turned = upright(stored(), 90, [1, 2]);
+        assert_eq!(turned.size, [1, 2]);
+        assert_eq!(turned.rgba, [255, 0, 0, 255, 0, 255, 0, 255]);
+        let turned = upright(stored(), 270, [1, 2]);
+        assert_eq!(turned.rgba, [0, 255, 0, 255, 255, 0, 0, 255]);
+        // Already upright, or not turned a quarter: left alone.
+        assert_eq!(upright(stored(), 90, [2, 1]).size, [2, 1]);
+        assert_eq!(upright(stored(), 0, [1, 2]).size, [2, 1]);
+    }
 
     #[test]
     fn audio_goes_where_it_fits() {

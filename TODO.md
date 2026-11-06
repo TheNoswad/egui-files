@@ -93,7 +93,8 @@ Trims and converts with the user's own ffmpeg, so the app ships no codecs (`src/
 - [x] Editor layout: sections with a footer that keeps Export in view, a video box shaped like the picture, a ruler, typed start and end times, frame steps and jumps, zooming, and a narrow layout down to about 260 pt. A blocked Export says why on a click and points at the setting; a target size too small (or too small to look good) offers one-click fixes
 - [x] Scrubbing: no playhead jump (mpv's old position is ignored until the seek is done), a fine drag at a tenth of the speed (Shift, or the pointer away from the bar), and Settings → Video → "Exact frames while scrubbing" for keyframe seeks while dragging
     - [ ] Android: try the fine drag (60 pt away from the bar) and exact seeks while scrubbing on the Pixel
-- [ ] Editor: a strip of thumbnails along the timeline (desktop from ffmpeg; Android needs its own frame grab)
+- [x] Stills along the timeline (`strip.rs`): the whole video thinly first, then finer where it's zoomed into, down to a frame, from a grid of halves of its length so panning finds the same ones. Two ffmpeg runs at a time on the desktop; one `MediaMetadataRetriever` on Android. What's trimmed off is dimmed
+    - [ ] Android: only built. Check on the Pixel that stills come, how fast, and that a portrait phone video's stills are upright (`android_logic::upright` turns them if the retriever didn't, which can't tell 180°)
 
 ## Markdown
 
