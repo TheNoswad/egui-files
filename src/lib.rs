@@ -214,15 +214,22 @@ fn wgpu_options(opengl: bool) -> eframe::egui_wgpu::WgpuConfiguration {
             setup.instance_descriptor.backends = wgpu::Backends::GL;
             return config;
         }
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::PRIMARY,
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
-        });
         // Native adapter enumeration completes immediately.
-        let adapters = std::pin::pin!(instance.enumerate_adapters(wgpu::Backends::PRIMARY))
-            .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()));
-        let has_primary = matches!(adapters, std::task::Poll::Ready(a) if !a.is_empty());
-        setup.instance_descriptor.backends = if has_primary {
+        let has_adapter = |backends| {
+            let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+                backends,
+                ..wgpu::InstanceDescriptor::new_without_display_handle()
+            });
+            let adapters = std::pin::pin!(instance.enumerate_adapters(backends))
+                .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()));
+            matches!(adapters, std::task::Poll::Ready(a) if !a.is_empty())
+        };
+        // wgpu picks Vulkan over DX12 when it has both, and on Windows a
+        // Vulkan window stretches and flickers as it's resized: DX12 goes
+        // through the compositor the way Windows' own windows do.
+        setup.instance_descriptor.backends = if cfg!(windows) && has_adapter(wgpu::Backends::DX12) {
+            wgpu::Backends::DX12
+        } else if has_adapter(wgpu::Backends::PRIMARY) {
             wgpu::Backends::PRIMARY
         } else {
             wgpu::Backends::GL
