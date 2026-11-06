@@ -96,17 +96,25 @@ pub fn run() -> eframe::Result {
     }
     // The mobile layout keeps the system's frame and goes narrower.
     let mobile = app::saved_mobile("egui-files");
+    let min_size = if mobile {
+        app::MOBILE_MIN_SIZE
+    } else {
+        app::DESKTOP_MIN_SIZE
+    };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("egui-files")
             .with_app_id("egui-files")
             .with_inner_size([1100.0, 700.0])
-            .with_min_inner_size(if mobile {
-                app::MOBILE_MIN_SIZE
-            } else {
-                app::DESKTOP_MIN_SIZE
-            })
+            .with_min_inner_size(min_size)
             .with_decorations(mobile || !titlebar::saved_enabled("egui-files")),
+        // eframe opens the window at its saved size, kept above only 64
+        // points: Windows reports a minimized window's size as nothing, so
+        // closing it minimized left the next start a speck of a window.
+        window_builder: Some(Box::new(move |builder| match builder.inner_size {
+            Some(size) => builder.with_inner_size(size.max(min_size)),
+            None => builder,
+        })),
         wgpu_options: wgpu_options(false),
         ..Default::default()
     };

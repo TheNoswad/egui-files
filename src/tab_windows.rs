@@ -18,6 +18,9 @@ const EDGE: f32 = 4.0;
 /// Size of a window a tab is dragged into.
 pub const NEW_SIZE: Vec2 = Vec2::new(900.0, 620.0);
 
+/// The smallest a tab window goes, as it opens too.
+const MIN_SIZE: Vec2 = Vec2::new(320.0, 240.0);
+
 #[derive(Serialize, Deserialize)]
 pub struct TabWindow {
     pub id: u64,
@@ -60,9 +63,10 @@ impl TabWindow {
         let mut builder = ViewportBuilder::default()
             .with_title(self.title())
             .with_app_id("egui-files")
-            .with_min_inner_size([320.0, 240.0]);
+            .with_min_inner_size(MIN_SIZE);
         if !std::mem::replace(&mut self.opened, true) {
-            builder = builder.with_inner_size(self.size);
+            // A window closed while minimized saved a size of nothing.
+            builder = builder.with_inner_size(self.size.max(MIN_SIZE));
             if let Some(position) = self.position {
                 builder = builder.with_position(position);
             }
@@ -316,6 +320,14 @@ mod tests {
         // After that, only the title.
         let builder = back.builder();
         assert_eq!((builder.position, builder.inner_size), (None, None));
+    }
+
+    /// Windows reports a minimized window's size as nothing, so one closed
+    /// like that opens again at the smallest size rather than as a speck.
+    #[test]
+    fn minimized_window_opens_at_least_minimum_size() {
+        let mut window = TabWindow::new(1, DockState::new(vec![browser(1)]), None, Vec2::ZERO);
+        assert_eq!(window.builder().inner_size, Some(MIN_SIZE));
     }
 
     /// Drives egui_dock with real input: a dock showing `dock`, which each
