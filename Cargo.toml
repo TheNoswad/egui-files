@@ -196,14 +196,32 @@ windows = { version = "0.62", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
-# Made from patches/<crate>.diff by `patches/patches.sh ensure`: run it once
-# after cloning, or these paths don't exist (see patches/README.md).
+# Crates with a fix of ours: each is one commit on top of its release, on a
+# branch of a fork under github.com/TheNoswad; the commit's message says what
+# and why. To move one to a new release, rebase its branch onto the new tag
+# and update the rev here. Commits there name no upstream issues or people,
+# as GitHub would link them back. scripts/upstream.sh watches for fixes
+# upstream that would let one go.
 [patch.crates-io]
-# unrar_sys 0.5.8's build script checks the host OS instead of the target, which
-# breaks cross-compiling to Windows and Android.
-unrar_sys = { path = "patches/build/unrar_sys" }
-# Shares one Wayland clipboard between windows: upstream drops a window's
-# with it, which kills the Wayland connection (see patches/README.md).
-egui-winit = { path = "patches/build/egui-winit" }
-# Works in the browser, and leaves the user's cache alone (see patches/README.md).
-mermaid-rs-renderer = { path = "patches/build/mermaid-rs-renderer" }
+# Branch egui-files/0.36.2: egui-winit shares one Wayland clipboard between
+# windows (upstream drops a window's with it, which kills the Wayland
+# connection), and passes Ctrl+V through when there's no text to paste.
+# egui-winit depends on the rest of egui by path in its repository, so all
+# of egui comes from the same commit.
+ecolor = { git = "https://github.com/TheNoswad/egui", rev = "77c73f70b616f451af6f29ad38d852e3dacfbb04" }
+eframe = { git = "https://github.com/TheNoswad/egui", rev = "77c73f70b616f451af6f29ad38d852e3dacfbb04" }
+egui = { git = "https://github.com/TheNoswad/egui", rev = "77c73f70b616f451af6f29ad38d852e3dacfbb04" }
+egui-wgpu = { git = "https://github.com/TheNoswad/egui", rev = "77c73f70b616f451af6f29ad38d852e3dacfbb04" }
+egui-winit = { git = "https://github.com/TheNoswad/egui", rev = "77c73f70b616f451af6f29ad38d852e3dacfbb04" }
+egui_extras = { git = "https://github.com/TheNoswad/egui", rev = "77c73f70b616f451af6f29ad38d852e3dacfbb04" }
+egui_glow = { git = "https://github.com/TheNoswad/egui", rev = "77c73f70b616f451af6f29ad38d852e3dacfbb04" }
+emath = { git = "https://github.com/TheNoswad/egui", rev = "77c73f70b616f451af6f29ad38d852e3dacfbb04" }
+epaint = { git = "https://github.com/TheNoswad/egui", rev = "77c73f70b616f451af6f29ad38d852e3dacfbb04" }
+epaint_default_fonts = { git = "https://github.com/TheNoswad/egui", rev = "77c73f70b616f451af6f29ad38d852e3dacfbb04" }
+# Branch egui-files/0.5.8: builds for the target rather than the host (cross
+# compiling to Windows and Android), and doesn't link GCC's CPU detection,
+# which crashed the app on older x86 CPUs.
+unrar_sys = { git = "https://github.com/TheNoswad/unrar.rs", rev = "49f724a7773aeef2b340e36c79b59c75d6ffa0bd" }
+# Branch egui-files/0.3.1: works in the browser, leaves the user's cache
+# alone, and measures text with the font diagrams are drawn with.
+mermaid-rs-renderer = { git = "https://github.com/TheNoswad/mermaid-rs-renderer", rev = "c638a04b3d62966cab3fe6f5e20fd916ba6c166e" }

@@ -52,7 +52,7 @@ thread_local! {
 }
 
 /// Whether paste was pressed. egui-winit sends text as an event, and otherwise
-/// the key press (see patches/README.md). On Windows, `file_clipboard::PasteKey`
+/// the key press (see egui-winit in `[patch.crates-io]`, Cargo.toml). On Windows, `file_clipboard::PasteKey`
 /// reports that key as an event too, so it would count twice.
 pub fn paste_pressed(input: &egui::InputState) -> bool {
     input.events.iter().any(|event| match event {

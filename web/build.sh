@@ -8,7 +8,6 @@ set -e
 cd "$(dirname "$0")/.."
 out=${1:-target/site}
 mkdir -p "$out"
-patches/patches.sh ensure
 # Trunk empties demo/ itself. Its own target folder, so native builds don't
 # rebuild after it.
 CARGO_TARGET_DIR=target/wasm trunk build --release=true --cargo-profile web --public-url ./ \

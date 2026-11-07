@@ -910,8 +910,7 @@ dependencies = [
 [[package]]
 name = "ecolor"
 version = "0.36.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0656a7530b9e2841ee7a5f983965bdd9840c32f4012f759cfd44b912cced6b34"
+source = "git+https://github.com/TheNoswad/egui?rev=77c73f70b616f451af6f29ad38d852e3dacfbb04#77c73f70b616f451af6f29ad38d852e3dacfbb04"
 dependencies = [
  "bytemuck",
  "emath",
@@ -921,8 +920,7 @@ dependencies = [
 [[package]]
 name = "eframe"
 version = "0.36.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "55ad41fac6e3149abb4866e93df37dbd33baa95db525c3368c944584e95a5dc2"
+source = "git+https://github.com/TheNoswad/egui?rev=77c73f70b616f451af6f29ad38d852e3dacfbb04#77c73f70b616f451af6f29ad38d852e3dacfbb04"
 dependencies = [
  "ahash",
  "bytemuck",
@@ -959,8 +957,7 @@ dependencies = [
 [[package]]
 name = "egui"
 version = "0.36.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc938cc27cd911415e1e4d151bc56ff9df063d8db081374e87aeb805ea74b2ba"
+source = "git+https://github.com/TheNoswad/egui?rev=77c73f70b616f451af6f29ad38d852e3dacfbb04#77c73f70b616f451af6f29ad38d852e3dacfbb04"
 dependencies = [
  "accesskit",
  "ahash",
@@ -1080,8 +1077,7 @@ dependencies = [
 [[package]]
 name = "egui-wgpu"
 version = "0.36.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5cef1f6d1bba40b09a4d0d62cb822b81030922cfbf65c5373398c3a3caafc5bd"
+source = "git+https://github.com/TheNoswad/egui?rev=77c73f70b616f451af6f29ad38d852e3dacfbb04#77c73f70b616f451af6f29ad38d852e3dacfbb04"
 dependencies = [
  "ahash",
  "bytemuck",
@@ -1100,6 +1096,7 @@ dependencies = [
 [[package]]
 name = "egui-winit"
 version = "0.36.2"
+source = "git+https://github.com/TheNoswad/egui?rev=77c73f70b616f451af6f29ad38d852e3dacfbb04#77c73f70b616f451af6f29ad38d852e3dacfbb04"
 dependencies = [
  "arboard",
  "bytemuck",
@@ -1132,8 +1129,7 @@ dependencies = [
 [[package]]
 name = "egui_extras"
 version = "0.36.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "05cbdc785020861553f230f23d330ba1fb72613b9d8e0e457f3bdc8ba6db6dcf"
+source = "git+https://github.com/TheNoswad/egui?rev=77c73f70b616f451af6f29ad38d852e3dacfbb04#77c73f70b616f451af6f29ad38d852e3dacfbb04"
 dependencies = [
  "ahash",
  "egui",
@@ -1146,8 +1142,7 @@ dependencies = [
 [[package]]
 name = "egui_glow"
 version = "0.36.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "606ed4167daf341e5753d703285c4c1d562324b2c07aa8f405cd7d066fe58f3b"
+source = "git+https://github.com/TheNoswad/egui?rev=77c73f70b616f451af6f29ad38d852e3dacfbb04#77c73f70b616f451af6f29ad38d852e3dacfbb04"
 dependencies = [
  "bytemuck",
  "egui",
@@ -1182,8 +1177,7 @@ checksum = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be"
 [[package]]
 name = "emath"
 version = "0.36.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52c8d4141cf0f60fb2f7aefaf352d3ffa5171ef0ab09731c64391801e95e48f1"
+source = "git+https://github.com/TheNoswad/egui?rev=77c73f70b616f451af6f29ad38d852e3dacfbb04#77c73f70b616f451af6f29ad38d852e3dacfbb04"
 dependencies = [
  "bytemuck",
  "serde",
@@ -1248,8 +1242,7 @@ dependencies = [
 [[package]]
 name = "epaint"
 version = "0.36.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a0ec0308dc23130fc1a7d4623a8534c2ed069c6dc84e258ee4f3de99615aa1a3"
+source = "git+https://github.com/TheNoswad/egui?rev=77c73f70b616f451af6f29ad38d852e3dacfbb04#77c73f70b616f451af6f29ad38d852e3dacfbb04"
 dependencies = [
  "ahash",
  "bytemuck",
@@ -1274,8 +1267,7 @@ dependencies = [
 [[package]]
 name = "epaint_default_fonts"
 version = "0.36.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "773fa9c96dd0dbef887e39d0ed6177f141cce4d68e6041df77570aa3702dfa13"
+source = "git+https://github.com/TheNoswad/egui?rev=77c73f70b616f451af6f29ad38d852e3dacfbb04#77c73f70b616f451af6f29ad38d852e3dacfbb04"
 
 [[package]]
 name = "equivalent"
@@ -2302,6 +2294,7 @@ dependencies = [
 [[package]]
 name = "mermaid-rs-renderer"
 version = "0.3.1"
+source = "git+https://github.com/TheNoswad/mermaid-rs-renderer?rev=c638a04b3d62966cab3fe6f5e20fd916ba6c166e#c638a04b3d62966cab3fe6f5e20fd916ba6c166e"
 dependencies = [
  "anyhow",
  "fontdb 0.23.0",
@@ -4477,6 +4470,7 @@ dependencies = [
 [[package]]
 name = "unrar_sys"
 version = "0.5.8"
+source = "git+https://github.com/TheNoswad/unrar.rs?rev=49f724a7773aeef2b340e36c79b59c75d6ffa0bd#49f724a7773aeef2b340e36c79b59c75d6ffa0bd"
 dependencies = [
  "cc",
  "libc",

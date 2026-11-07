@@ -7,19 +7,19 @@
 #
 # Read-only: nothing here is filed or commented on upstream.
 
-# patches/unrar_sys
-pr     muja/unrar.rs#81                     | builds for the target, not the host, and for Android: most of patches/unrar_sys
-search muja/unrar.rs SIGILL                 | cpu_supports.hpp in patches/unrar_sys.diff: __builtin_cpu_supports and an x86-64-v3 libgcc
+# unrar_sys (our fork, see Cargo.toml)
+pr     muja/unrar.rs#81                     | builds for the target, not the host, and for Android: most of our unrar_sys commit
+search muja/unrar.rs SIGILL                 | cpu_supports.hpp in our unrar_sys: __builtin_cpu_supports and an x86-64-v3 libgcc
 search muja/unrar.rs cpu_supports           | the same
 
-# patches/egui-winit
+# egui-winit (our egui fork)
 pr     emilk/egui#8657                      | winit's Wayland clipboard instead of smithay's: may make the shared-clipboard patch moot
-search emilk/egui data_offer                | the Wayland connection dying when a viewport's clipboard is dropped (patches/egui-winit)
-search emilk/egui paste key clipboard empty | Ctrl+V dropped when the clipboard has no text (patches/egui-winit, file_clipboard::PasteKey)
+search emilk/egui data_offer                | the Wayland connection dying when a viewport's clipboard is dropped (our egui-winit)
+search emilk/egui paste key clipboard empty | Ctrl+V dropped when the clipboard has no text (our egui-winit, file_clipboard::PasteKey)
 issue  emilk/egui#2108                      | image paste events: would replace passing Ctrl+V through for markdown::assets
 
-# patches/mermaid-rs-renderer
-pr     1jehuang/mermaid-rs-renderer#159     | web_time's Instant, as patches/mermaid-rs-renderer does: the browser panic
+# mermaid-rs-renderer (our fork)
+pr     1jehuang/mermaid-rs-renderer#159     | web_time's Instant, as our fork does: the browser panic
 pr     1jehuang/mermaid-rs-renderer#155     | the same, another way
 pr     1jehuang/mermaid-rs-renderer#125     | the same, another way
 issue  1jehuang/mermaid-rs-renderer#120     | the same, asked for
@@ -34,6 +34,6 @@ issue  emilk/egui#8805                      | Wayland drag and drop in winit: co
 
 crate  egui                                 | held at 0.36 by egui_dock
 crate  egui_dock                            | holds egui back
-crate  egui-winit                           | patched (patches/egui-winit)
-crate  unrar_sys                            | patched (patches/unrar_sys)
-crate  mermaid-rs-renderer                  | patched (patches/mermaid-rs-renderer)
+crate  egui-winit                           | patched (our egui fork)
+crate  unrar_sys                            | patched (our unrar.rs fork)
+crate  mermaid-rs-renderer                  | patched (our fork)
