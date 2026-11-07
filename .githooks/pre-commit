@@ -3,6 +3,9 @@
 # Windows and the web demo's wasm32), or failing tests. Turn on once per
 # clone with:
 #   git config core.hooksPath .githooks
+#
+# One check alone, as CI runs them side by side:
+#   .githooks/pre-commit deny|fmt|clippy-linux|clippy-windows|clippy-web|test
 set -e
 cd "$(git rev-parse --show-toplevel)"
 
@@ -17,39 +20,71 @@ fi
 # builds only for Android).
 PACKAGES="-p egui-files -p egui-files-disk -p trash-android"
 
-echo "pre-commit: dependencies (deny.toml)" >&2
-if cargo deny --version >/dev/null 2>&1; then
-    cargo deny --offline -L error check licenses bans sources
-else
-    echo "pre-commit: cargo-deny isn't installed; can't check dependencies" >&2
-    echo "            (cargo install cargo-deny --locked)" >&2
-    exit 1
-fi
+needs_target() {
+    rustup target list --installed 2>/dev/null | grep -qx "$1" || {
+        echo "pre-commit: $1 isn't installed; can't check $2" >&2
+        echo "            (rustup target add $1)" >&2
+        exit 1
+    }
+}
 
-echo "pre-commit: rustfmt" >&2
-cargo fmt --check
+deny() {
+    echo "pre-commit: dependencies (deny.toml)" >&2
+    if cargo deny --version >/dev/null 2>&1; then
+        cargo deny --offline -L error check licenses bans sources
+    else
+        echo "pre-commit: cargo-deny isn't installed; can't check dependencies" >&2
+        echo "            (cargo install cargo-deny --locked)" >&2
+        exit 1
+    fi
+}
 
-echo "pre-commit: clippy (host)" >&2
-cargo clippy --quiet --all-targets $PACKAGES -- -D warnings
+fmt() {
+    echo "pre-commit: rustfmt" >&2
+    cargo fmt --check
+}
 
-if rustup target list --installed 2>/dev/null | grep -qx x86_64-pc-windows-gnu; then
+clippy_linux() {
+    echo "pre-commit: clippy (host)" >&2
+    cargo clippy --quiet --all-targets $PACKAGES -- -D warnings
+}
+
+clippy_windows() {
+    needs_target x86_64-pc-windows-gnu Windows
     echo "pre-commit: clippy (Windows)" >&2
     cargo clippy --quiet --all-targets --target x86_64-pc-windows-gnu $PACKAGES -- -D warnings
-else
-    echo "pre-commit: x86_64-pc-windows-gnu isn't installed; can't check Windows" >&2
-    echo "            (rustup target add x86_64-pc-windows-gnu)" >&2
-    exit 1
-fi
+}
 
 # Where clippy.toml's lints apply: what fails or panics in the browser.
-if rustup target list --installed 2>/dev/null | grep -qx wasm32-unknown-unknown; then
+clippy_web() {
+    needs_target wasm32-unknown-unknown "the web demo"
     echo "pre-commit: clippy (web)" >&2
     cargo clippy --quiet --lib --bins --target wasm32-unknown-unknown $PACKAGES -- -D warnings
-else
-    echo "pre-commit: wasm32-unknown-unknown isn't installed; can't check the web demo" >&2
-    echo "            (rustup target add wasm32-unknown-unknown)" >&2
-    exit 1
-fi
+}
 
-echo "pre-commit: tests" >&2
-cargo test --quiet $PACKAGES
+tests() {
+    echo "pre-commit: tests" >&2
+    cargo test --quiet $PACKAGES
+}
+
+case ${1:-all} in
+    # One after another, not with &&, which would turn off set -e in each.
+    all)
+        deny
+        fmt
+        clippy_linux
+        clippy_windows
+        clippy_web
+        tests
+        ;;
+    deny) deny ;;
+    fmt) fmt ;;
+    clippy-linux) clippy_linux ;;
+    clippy-windows) clippy_windows ;;
+    clippy-web) clippy_web ;;
+    test) tests ;;
+    *)
+        echo "pre-commit: no check $1" >&2
+        exit 2
+        ;;
+esac
