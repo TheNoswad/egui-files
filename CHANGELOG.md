@@ -28,6 +28,8 @@ releases yet, so it's all unreleased.
     - Haptic feedback (`src/haptics.rs`): a long press, each item a drag selection takes in, a pinch reaching its smallest or largest size, and a drop onto a folder. Checked on the Pixel (`dumpsys vibrator_manager`): the long press and the selection ticks; not yet the pinch or the drop
 
 - Screenshots taken by the app itself (`scripts/screenshots.sh`, `src/scene.rs`): set scenes shot on a virtual X server with the demo's files as a home at `/home/demo`, in light and dark, for the README; the landing page's from the web demo in headless Firefox
+- Downloads, built by CI on Linux for every platform: AppImage and tar.gz for Linux (x86-64, arm64), zips for Windows (x86-64, arm64, through llvm-mingw), APKs for Android (arm64, x86-64), signed. Version tags make releases (`scripts/release.sh`), and main a nightly; the web demo goes to GitHub Pages
+- An icon: Phosphor's "folders" glyph on a blue square (`assets/icon/`, rendered by `scripts/icons.sh`), in the window, the .exe, the Linux .desktop file and the Android launcher. The Android app id is now `org.noswad.egui_files`
 - `scripts/upstream.sh`: what we wait on upstream, read-only, and whether our forks' branches need rebasing onto a newer release
 
 ### Video editor

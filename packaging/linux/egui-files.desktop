@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=egui-files
+GenericName=File Browser
+Comment=A tabbed file browser
+Exec=egui-files
+Icon=egui-files
+Terminal=false
+Categories=System;FileTools;FileManager;
+Keywords=files;folders;browser;archives;
+StartupWMClass=egui-files

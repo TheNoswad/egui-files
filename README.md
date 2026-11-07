@@ -10,8 +10,8 @@ themes. It also runs in the browser, as a demo.
   <img src="docs/screenshots/markdown-light.png" alt="The home folder, with its README previewed beside it: a diagram, a formula and a checklist">
 </picture>
 
-**Web demo:** coming once it's hosted. To run it yourself, see [Building](#building).
-<!-- Link the hosted demo here. -->
+**[Try it in your browser](https://thenoswad.github.io/egui-files/)**, or
+[download it](#downloads).
 
 ## Features
 
@@ -64,6 +64,18 @@ themes. It also runs in the browser, as a demo.
   The mobile layout, as on Android.
 </p>
 
+## Downloads
+
+From [Releases](https://github.com/TheNoswad/egui-files/releases): the
+latest version, or **nightly**, built from `main` on every change (newer,
+and less tried).
+
+| | |
+|---|---|
+| Linux | `.AppImage`: make it executable (`chmod +x`) and run it. Or the `.tar.gz`, with the bare program. x86-64 and arm64. |
+| Windows | `.zip`: unzip and run `egui-files.exe`. Windows warns about an unknown publisher the first time: **More info** → **Run anyway**. x86-64 and arm64. |
+| Android | `.apk`: `arm64` for phones, `x86_64` for emulators and Chromebooks. Allow installing from your browser or file manager when asked, then "All files access" for the app. |
+
 ## Platforms
 
 | | |
@@ -107,6 +119,10 @@ The rest:
   [cargo-deny](https://github.com/EmbarkStudios/cargo-deny).
 - `scripts/screenshots.sh` takes the screenshots above, and the landing
   page's, from the app itself.
+- CI (`.github/workflows/ci.yml`) runs the same checks on every push, and
+  on `main` and version tags builds every platform, cross-compiled on
+  Linux, with `scripts/package.sh`. `scripts/release.sh 0.2.0` makes a
+  release's commit and tag; pushing the tag publishes it.
 - `scripts/upstream.sh` reports on what we're waiting for upstream: issues,
   new releases, and our forks.
 - [TODO.md](TODO.md) has what's planned, and [CHANGELOG.md](CHANGELOG.md)
