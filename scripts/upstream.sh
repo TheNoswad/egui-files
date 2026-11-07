@@ -1,7 +1,8 @@
 #!/bin/sh
 # Shows how what we wait on upstream is doing (scripts/upstream.watch): the
-# issues and pull requests, newer versions of the crates, and new reports
-# of problems we have that nobody had reported. Marks with * what changed
+# issues and pull requests, newer versions of the crates, new reports of
+# problems we have that nobody had reported, and security advisories for
+# what's in Cargo.lock. Marks with * what changed
 # since the last run (remembered in target/upstream-seen).
 #
 #   scripts/upstream.sh
@@ -116,5 +117,17 @@ watched search | while IFS= read -r line; do
     fi
     printf '         %s\n' "$(why_of "$line")"
 done
+
+echo
+echo "Security advisories (RustSec, deny.toml)"
+if cargo deny --version >/dev/null 2>&1; then
+    if report=$(cargo deny -L error check advisories --hide-inclusion-graph 2>&1); then
+        echo "   none"
+    else
+        printf '%s\n' "$report" | sed 's/^/ * /'
+    fi
+else
+    echo "   cargo-deny isn't installed (cargo install cargo-deny --locked)"
+fi
 
 mv "$next" "$seen"

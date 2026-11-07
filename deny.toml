@@ -1,0 +1,66 @@
+# cargo-deny (https://github.com/EmbarkStudios/cargo-deny): what may be in
+# the dependency tree.
+#
+#   cargo deny check licenses bans sources   offline; the pre-commit hook runs it
+#   cargo deny check advisories              RustSec's database, fetched; run by
+#                                            scripts/upstream.sh
+
+[graph]
+# What the app is built for: desktop Linux and Windows, the web demo, Android.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-gnu",
+    "wasm32-unknown-unknown",
+    "aarch64-linux-android",
+]
+
+[advisories]
+# Unmaintained crates deep in the tree aren't ours to replace; ones we
+# depend on directly are.
+unmaintained = "workspace"
+yanked = "deny"
+ignore = []
+
+[licenses]
+# The app is MIT OR Apache-2.0, so what it's built from must allow that.
+# These are all permissive, apart from:
+# - MPL-2.0 (option-ext, under directories): copyleft per file, so only
+#   for changes to its own files.
+# - OFL-1.1 and Ubuntu-font-1.0: fonts bundled by egui and katex-native.
+#
+# Not seen here: unrar's C++ source (patches/unrar_sys/vendor/unrar) is under
+# the UnRAR license, which allows extracting but forbids using it to make a
+# RAR compressor; its crate says only "MIT OR Apache-2.0".
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "bzip2-1.0.6",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.93
+
+[bans]
+# Two versions of a crate cost build time and size, but most come from
+# dependencies' own choices, so they're only shown.
+multiple-versions = "warn"
+wildcards = "deny"
+# Our own crates depend on each other by path.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

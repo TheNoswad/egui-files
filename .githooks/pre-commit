@@ -20,6 +20,15 @@ PACKAGES="-p egui-files -p egui-files-disk -p trash-android"
 echo "pre-commit: patched crates" >&2
 patches/patches.sh check
 
+echo "pre-commit: dependencies (deny.toml)" >&2
+if cargo deny --version >/dev/null 2>&1; then
+    cargo deny --offline -L error check licenses bans sources
+else
+    echo "pre-commit: cargo-deny isn't installed; can't check dependencies" >&2
+    echo "            (cargo install cargo-deny --locked)" >&2
+    exit 1
+fi
+
 echo "pre-commit: rustfmt" >&2
 cargo fmt --check
 

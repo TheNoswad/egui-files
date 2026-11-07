@@ -8,6 +8,8 @@ version = "0.1.0"
 edition = "2024"
 description = "A tabbed file browser"
 license = "MIT OR Apache-2.0"
+# An app, and it builds with patched crates (see [patch.crates-io]).
+publish = false
 
 [dependencies]
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
