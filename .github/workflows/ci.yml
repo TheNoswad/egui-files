@@ -285,10 +285,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           ls -l dist
+          # Only the packages: not the web demo's Pages artifact.
+          set -- dist/*.AppImage dist/*.tar.gz dist/*.zip dist/*.apk
           if [ "$GITHUB_REF_TYPE" = tag ]; then
             version=${GITHUB_REF_NAME#v}
             scripts/release-notes.sh "$version" > notes.md
-            gh release create "$GITHUB_REF_NAME" dist/* --verify-tag \
+            gh release create "$GITHUB_REF_NAME" "$@" --verify-tag \
               --title "egui-files $version" --notes-file notes.md
           else
             {
@@ -298,6 +300,6 @@ jobs:
               scripts/release-notes.sh Unreleased
             } > notes.md
             gh release delete nightly --cleanup-tag --yes || true
-            gh release create nightly dist/* --prerelease --target "$GITHUB_SHA" \
+            gh release create nightly "$@" --prerelease --target "$GITHUB_SHA" \
               --title "Nightly" --notes-file notes.md
           fi
