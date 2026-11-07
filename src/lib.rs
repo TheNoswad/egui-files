@@ -107,6 +107,12 @@ pub fn run() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_title("egui-files")
             .with_app_id("egui-files")
+            // Wayland takes the icon from the .desktop file of the app id
+            // instead; X11 and Windows' title bars from here.
+            .with_icon(
+                eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon/egui-files.png"))
+                    .unwrap_or_default(),
+            )
             .with_inner_size(staged.map_or(egui::vec2(1100.0, 700.0), |s| s.scene.size()))
             .with_min_inner_size(min_size)
             .with_decorations(mobile || !titlebar::saved_enabled("egui-files")),

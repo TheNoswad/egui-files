@@ -1,5 +1,6 @@
 //! Collects what the About window shows: the git commit and toolchain the app
 //! was built from, and every crate compiled into it with its license texts.
+//! On Windows, also puts the icon in the .exe.
 
 // clippy.toml's disallowed items are for the browser; this runs on the build
 // machine.
@@ -31,6 +32,14 @@ fn main() {
         "pub static CRATES: &[Crate] = &[];\npub static TEXTS: &[&str] = &[];\n".into()
     });
     write_if_changed(&out_dir.join("credits.rs"), &credits);
+
+    // The target's, not the build machine's: Windows is cross-compiled.
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        println!("cargo:rerun-if-changed=assets/icon/egui-files.ico");
+        embed_resource::compile("build-support/egui-files.rc", embed_resource::NONE)
+            .manifest_optional()
+            .unwrap();
+    }
 }
 
 /// Leaves the file alone when nothing changed, so it doesn't look modified.
