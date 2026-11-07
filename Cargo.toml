@@ -196,12 +196,14 @@ windows = { version = "0.62", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
-# unrar_sys 0.5.8's build script checks the host OS instead of the target, which
-# breaks cross-compiling to Windows and Android (see patches/README.md).
+# Made from patches/<crate>.diff by `patches/patches.sh ensure`: run it once
+# after cloning, or these paths don't exist (see patches/README.md).
 [patch.crates-io]
-unrar_sys = { path = "patches/unrar_sys" }
+# unrar_sys 0.5.8's build script checks the host OS instead of the target, which
+# breaks cross-compiling to Windows and Android.
+unrar_sys = { path = "patches/build/unrar_sys" }
 # Shares one Wayland clipboard between windows: upstream drops a window's
 # with it, which kills the Wayland connection (see patches/README.md).
-egui-winit = { path = "patches/egui-winit" }
+egui-winit = { path = "patches/build/egui-winit" }
 # Works in the browser, and leaves the user's cache alone (see patches/README.md).
-mermaid-rs-renderer = { path = "patches/mermaid-rs-renderer" }
+mermaid-rs-renderer = { path = "patches/build/mermaid-rs-renderer" }

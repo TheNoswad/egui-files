@@ -394,7 +394,7 @@ mod tests {
     /// unrar asks GCC which SIMD the CPU has, which links GCC's CPU detection
     /// from the static libgcc.a. On distros that build GCC for newer CPUs
     /// (CachyOS: x86-64-v3) that code itself uses BMI2 and crashed the app at
-    /// startup on older CPUs; patches/unrar_sys/cpu_supports.hpp avoids it.
+    /// startup on older CPUs; cpu_supports.hpp in patches/unrar_sys.diff avoids it.
     /// This binary links unrar too, so it must not contain it either.
     #[test]
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -406,7 +406,7 @@ mod tests {
         assert!(
             memchr::memmem::find(&exe, &needle).is_none(),
             "GCC's CPU detection is linked in; it may need a newer CPU than the \
-             binary targets (see patches/unrar_sys/cpu_supports.hpp)"
+             binary targets (see cpu_supports.hpp in patches/unrar_sys.diff)"
         );
     }
 

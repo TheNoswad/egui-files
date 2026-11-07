@@ -1,23 +1,28 @@
 # Patched crates
 
-Copies of crates.io crates with a small fix each, wired in through
-`[patch.crates-io]` in `Cargo.toml`. Each copy is the published crate
-(`crates` says which version, and what the copy leaves out) plus
-`<crate>.diff`, which is the whole of the change. A patch can be dropped
+crates.io crates with a small fix each, wired in through
+`[patch.crates-io]` in `Cargo.toml`. Each is the published crate (`crates`
+says which version, and what it leaves out) plus `<crate>.diff`, which is
+the whole of the change; only those are in git. A patch can be dropped
 once upstream fixes it.
 
-`patches.sh check` (run by the pre-commit hook) downloads the published
-crates, checks them against crates.io's checksums, and fails if a copy is
-anything other than its crate plus its diff, so the diffs always say what
-was changed.
+`patches.sh ensure` makes the crates in `patches/build/` (not in git),
+downloading the published ones from crates.io and checking them against
+crates.io's checksums. **Run it once after cloning**: Cargo can't build
+without them, and has no way to make them itself. The pre-commit hook and
+`web/build.sh` run it too, and it does nothing when they're up to date.
+`patches.sh check` (also in the hook) fails if a copy has been changed
+without its diff being recorded.
 
-- To change a patch: edit the copy, then `patches/patches.sh record <crate>`.
+- To change a patch: edit `patches/build/<crate>`, then
+  `patches/patches.sh record <crate>`.
+- To move one to a new version: change its version in `crates`, then
+  `patches/patches.sh ensure`. If the diff doesn't all apply, fix
+  `patches/build/<crate>` (the `.rej` files say what's left), then `record`
+  it.
 - To see whether upstream has fixed one yet: `scripts/upstream.sh` shows
   the issues and pull requests in `scripts/upstream.watch`, newer releases,
   and new reports of what isn't reported there.
-- To move one to a new version: `git rm -r patches/<crate>`, change its
-  version in `crates`, `patches/patches.sh apply <crate>`, fix whatever
-  didn't apply (the `.rej` files say what), then `record` it.
 
 ## unrar_sys (0.5.8)
 
@@ -28,7 +33,7 @@ cross-compiling to Windows. It also links `pthread`, which Android doesn't
 have as a library of its own (it's in libc), and links no C++ library, which
 Android needs named (`c++_static`).
 
-`cpu_supports.hpp` (ours, force-included on Linux x86): unrar's
+`cpu_supports.hpp` (ours, all of it in the diff, force-included on Linux x86): unrar's
 `__builtin_cpu_supports` links GCC's `__cpu_indicator_init` from the static
 libgcc.a, which CachyOS builds for x86-64-v3 (BMI2), so the app died with
 SIGILL before `main` on older CPUs (an Ivy Bridge i5-3230M). The header swaps in

@@ -18,6 +18,7 @@ fi
 PACKAGES="-p egui-files -p egui-files-disk -p trash-android"
 
 echo "pre-commit: patched crates" >&2
+patches/patches.sh ensure
 patches/patches.sh check
 
 echo "pre-commit: dependencies (deny.toml)" >&2

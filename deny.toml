@@ -28,7 +28,7 @@ ignore = []
 #   for changes to its own files.
 # - OFL-1.1 and Ubuntu-font-1.0: fonts bundled by egui and katex-native.
 #
-# Not seen here: unrar's C++ source (patches/unrar_sys/vendor/unrar) is under
+# Not seen here: unrar's C++ source (unrar_sys's vendor/unrar) is under
 # the UnRAR license, which allows extracting but forbids using it to make a
 # RAR compressor; its crate says only "MIT OR Apache-2.0".
 allow = [

@@ -9,7 +9,7 @@
 
 # patches/unrar_sys
 pr     muja/unrar.rs#81                     | builds for the target, not the host, and for Android: most of patches/unrar_sys
-search muja/unrar.rs SIGILL                 | patches/unrar_sys/cpu_supports.hpp: __builtin_cpu_supports and an x86-64-v3 libgcc
+search muja/unrar.rs SIGILL                 | cpu_supports.hpp in patches/unrar_sys.diff: __builtin_cpu_supports and an x86-64-v3 libgcc
 search muja/unrar.rs cpu_supports           | the same
 
 # patches/egui-winit
