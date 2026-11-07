@@ -29,10 +29,6 @@ repository = "https://github.com/muja/unrar.rs"
 name = "unrar_sys"
 path = "src/lib.rs"
 
-[[example]]
-name = "lister"
-path = "examples/lister.rs"
-
 [dependencies.libc]
 version = "0.2"
 default-features = false

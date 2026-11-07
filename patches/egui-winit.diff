@@ -1,0 +1,97 @@
+--- a/src/clipboard.rs
++++ b/src/clipboard.rs
+@@ -21,7 +21,7 @@
+         ),
+         feature = "smithay-clipboard"
+     ))]
+-    smithay: Option<smithay_clipboard::Clipboard>,
++    smithay: Option<SharedSmithay>,
+ 
+     /// Fallback manual clipboard.
+     clipboard: String,
+@@ -64,8 +64,8 @@
+             ),
+             feature = "smithay-clipboard"
+         ))]
+-        if let Some(clipboard) = &mut self.smithay {
+-            match clipboard.load() {
++        if let Some(clipboard) = &self.smithay {
++            match clipboard.lock().expect("clipboard poisoned").load() {
+                 Ok(text) => return Some(text),
+                 Err(err) => {
+                     log::error!("smithay paste error: {err}");
+@@ -101,8 +101,8 @@
+             ),
+             feature = "smithay-clipboard"
+         ))]
+-        if let Some(clipboard) = &mut self.smithay {
+-            clipboard.store(text);
++        if let Some(clipboard) = &self.smithay {
++            clipboard.lock().expect("clipboard poisoned").store(text);
+             return;
+         }
+ 
+@@ -171,17 +171,44 @@
+     ),
+     feature = "smithay-clipboard"
+ ))]
+-fn init_smithay_clipboard(
+-    raw_display_handle: Option<RawDisplayHandle>,
+-) -> Option<smithay_clipboard::Clipboard> {
++/// One smithay clipboard per Wayland connection, shared by every viewport.
++///
++/// PATCHED (egui-files, see patches/README.md): upstream makes one per
++/// viewport and drops it with the viewport. Dropping one destroys its event
++/// queue while the compositor may still be sending it new `wl_data_offer`s,
++/// and the connection then dies with "not a valid new object id … message
++/// data_offer(n)". Kept for the life of the process instead.
++type SharedSmithay = std::sync::Arc<std::sync::Mutex<smithay_clipboard::Clipboard>>;
++
++#[cfg(all(
++    any(
++        target_os = "linux",
++        target_os = "dragonfly",
++        target_os = "freebsd",
++        target_os = "netbsd",
++        target_os = "openbsd"
++    ),
++    feature = "smithay-clipboard"
++))]
++fn init_smithay_clipboard(raw_display_handle: Option<RawDisplayHandle>) -> Option<SharedSmithay> {
+     #![expect(clippy::undocumented_unsafe_blocks)]
+ 
+     profiling::function_scope!();
+ 
+     if let Some(RawDisplayHandle::Wayland(display)) = raw_display_handle {
++        static SHARED: std::sync::Mutex<Vec<(usize, SharedSmithay)>> =
++            std::sync::Mutex::new(Vec::new());
++        let key = display.display.as_ptr() as usize;
++        let mut shared = SHARED.lock().expect("clipboards poisoned");
++        if let Some((_, clipboard)) = shared.iter().find(|(k, _)| *k == key) {
++            return Some(clipboard.clone());
++        }
+         log::trace!("Initializing smithay clipboard…");
+         #[expect(unsafe_code)]
+-        Some(unsafe { smithay_clipboard::Clipboard::new(display.display.as_ptr()) })
++        let clipboard = unsafe { smithay_clipboard::Clipboard::new(display.display.as_ptr()) };
++        let clipboard = std::sync::Arc::new(std::sync::Mutex::new(clipboard));
++        shared.push((key, clipboard.clone()));
++        Some(clipboard)
+     } else {
+         #[cfg(feature = "wayland")]
+         log::debug!("Cannot init smithay clipboard without a Wayland display handle");
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1029,9 +1029,11 @@
+                         let contents = contents.replace("\r\n", "\n");
+                         if !contents.is_empty() {
+                             self.egui_input.events.push(egui::Event::Paste(contents));
++                            return;
+                         }
+                     }
+-                    return;
++                    // No text: the key press goes through below, so the app
++                    // can look for a picture or files on the clipboard.
+                 }
+             }
+ 

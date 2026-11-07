@@ -1,10 +1,24 @@
 # Patched crates
 
 Copies of crates.io crates with a small fix each, wired in through
-`[patch.crates-io]` in `Cargo.toml`. Everything else in them is the
-published crate as-is, so a patch can be dropped once upstream fixes it.
+`[patch.crates-io]` in `Cargo.toml`. Each copy is the published crate
+(`crates` says which version, and what the copy leaves out) plus
+`<crate>.diff`, which is the whole of the change. A patch can be dropped
+once upstream fixes it.
+
+`patches.sh check` (run by the pre-commit hook) downloads the published
+crates, checks them against crates.io's checksums, and fails if a copy is
+anything other than its crate plus its diff, so the diffs always say what
+was changed.
+
+- To change a patch: edit the copy, then `patches/patches.sh record <crate>`.
+- To move one to a new version: `git rm -r patches/<crate>`, change its
+  version in `crates`, `patches/patches.sh apply <crate>`, fix whatever
+  didn't apply (the `.rej` files say what), then `record` it.
 
 ## unrar_sys (0.5.8)
+
+Without its example (and its entry in `Cargo.toml`).
 
 `build.rs`: it checks the host OS instead of the target, which breaks
 cross-compiling to Windows. It also links `pthread`, which Android doesn't
@@ -36,10 +50,6 @@ another in the same frame, every second, while something changes the
 clipboard (`wl-copy` in a loop). It crashes within seconds; with this patch
 it doesn't. Tab windows hit it when a window's last tab is dragged out.
 
-To update egui-winit: copy the new version from `~/.cargo/registry/src` over
-this folder and redo the change in `init_smithay_clipboard` (and the two
-places that lock it).
-
 Also passes the key press through when Ctrl+V finds no text on the clipboard,
 instead of dropping it, so a picture can be pasted (`markdown::assets`).
 
@@ -56,6 +66,3 @@ Without its tests, benches and examples (2 MB), and their entries in
 - `text_metrics.rs`: `register_font`, to measure with the font diagrams are
   drawn with (`markdown::diagram`), on every platform, without scanning the
   installed fonts.
-
-To update it: copy the new version from `~/.cargo/registry/src` over this
-folder and redo these.
