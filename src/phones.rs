@@ -134,8 +134,65 @@ struct State {
     /// Phones lost while mounted, by id, to mount again once they're back.
     /// One the user ejected isn't among them.
     dropped: Vec<String>,
+    /// How mounting each dropped phone again has gone so far.
     #[cfg(target_os = "linux")]
-    next_remount: Option<std::time::Instant>,
+    remounts: std::collections::HashMap<String, Remount>,
+}
+
+/// Tries at mounting a dropped phone again. Each one that fails is a
+/// notification from KDE Connect, so they're spaced out, then given up on:
+/// the phone shows why, and a click tries again.
+#[cfg(target_os = "linux")]
+#[derive(Debug, PartialEq)]
+struct Remount {
+    failed: usize,
+    /// When to try next; `None` once given up on.
+    next: Option<std::time::Instant>,
+}
+
+/// How long after each failed try to mount a dropped phone again the next
+/// is; after the last, it's given up on.
+#[cfg(target_os = "linux")]
+const REMOUNT_AFTER: [std::time::Duration; 3] = [
+    std::time::Duration::from_secs(5),
+    std::time::Duration::from_secs(30),
+    std::time::Duration::from_secs(120),
+];
+
+/// Whether it's time to try mounting the dropped phone `id` again.
+#[cfg(target_os = "linux")]
+fn remount_due(state: &State, id: &str, now: std::time::Instant) -> bool {
+    state
+        .remounts
+        .get(id)
+        .is_none_or(|r| r.next.is_some_and(|next| now >= next))
+}
+
+/// Notes how mounting `id` went, if it's one that dropped.
+#[cfg(target_os = "linux")]
+fn note_remount(state: &mut State, id: &str, mounted: bool, now: std::time::Instant) {
+    if mounted {
+        state.remounts.remove(id);
+        return;
+    }
+    if !state.dropped.iter().any(|d| d == id) {
+        return;
+    }
+    let remount = state.remounts.entry(id.to_owned()).or_insert(Remount {
+        failed: 0,
+        next: None,
+    });
+    remount.next = REMOUNT_AFTER.get(remount.failed).map(|after| now + *after);
+    remount.failed += 1;
+}
+
+/// A phone that left and is back has reconnected, so gets its tries afresh.
+#[cfg(target_os = "linux")]
+fn forget_remounts_of_unlisted(state: &mut State) {
+    let phones = &state.phones;
+    state
+        .remounts
+        .retain(|id, _| phones.iter().any(|p| p.id == *id));
 }
 
 pub struct Phones {
@@ -254,6 +311,8 @@ fn start_mount(shared: &Arc<Mutex<State>>, ctx: &Context, id: &str, open: Option
             .find(|p| p.id == id)
             .and_then(|p| p.folders.first())
             .map(|(path, _)| path.clone());
+        let mounted = result.is_ok() && first.is_some();
+        note_remount(&mut state, &id, mounted, std::time::Instant::now());
         match (result, first) {
             (Ok(()), Some(folder)) => {
                 state.dropped.retain(|dropped| *dropped != id);
@@ -392,7 +451,10 @@ mod kde {
         proxy::{Builder, CacheProperties},
     };
 
-    use super::{AUTHORITY_PREFIX, Phone, State, lock, note_dropped, start_mount, store};
+    use super::{
+        AUTHORITY_PREFIX, Phone, State, forget_remounts_of_unlisted, lock, note_dropped,
+        remount_due, start_mount, store,
+    };
 
     const SERVICE: &str = "org.kde.kdeconnect";
     const POLL: Duration = Duration::from_secs(1);
@@ -404,8 +466,6 @@ mod kde {
     /// shows as gone and is mounted again once it's back. Nothing on the UI's
     /// thread is waiting on this, so a phone that's asleep gets its time.
     const ANSWER_WITHIN: Duration = Duration::from_secs(10);
-    /// How often mounting a phone that dropped is tried again.
-    const REMOUNT_EVERY: Duration = Duration::from_secs(5);
     /// How long KDE Connect gets to mount a phone. Its own limit is shorter.
     const MOUNT_WITHIN: Duration = Duration::from_secs(30);
     /// How long KDE Connect gets to notice a mount that was cut is over.
@@ -565,17 +625,16 @@ mod kde {
         shared
             .dropped
             .retain(|id| !phones.iter().any(|p| p.id == *id && !p.folders.is_empty()));
-        let due: Vec<String> = phones
+        forget_remounts_of_unlisted(shared);
+        let now = Instant::now();
+        let due: Vec<String> = shared
+            .phones
             .iter()
             .filter(|p| shared.dropped.contains(&p.id) && p.folders.is_empty())
             .filter(|p| !shared.mounting.contains(&p.id))
+            .filter(|p| remount_due(shared, &p.id, now))
             .map(|p| p.id.clone())
             .collect();
-        let now = Instant::now();
-        if due.is_empty() || shared.next_remount.is_some_and(|next| now < next) {
-            return;
-        }
-        shared.next_remount = Some(now + REMOUNT_EVERY);
         drop(locked);
         for id in due {
             start_mount(state, ctx, &id, None);
@@ -748,9 +807,11 @@ mod kde {
 
     /// KDE Connect's own `unmount`, which is also how it lets go of a phone,
     /// kills sshfs and leaves the mount behind, dead; it can't mount over
-    /// that until the mount is gone.
+    /// that until the mount is gone. A dead mount answers `ENOTCONN`, or
+    /// `ECONNREFUSED` once its connection was aborted.
     fn clear_dead_mount(root: &Path) {
-        let dead = std::fs::metadata(root).is_err_and(|err| err.kind() == ErrorKind::NotConnected);
+        let dead =
+            std::fs::metadata(root).is_err_and(|err| err.raw_os_error().is_some_and(means_cut_off));
         if dead {
             let _ = fusermount("-uz", root);
         }
@@ -909,6 +970,52 @@ mod tests {
         assert_eq!(vanished(&mounted, &[]), ["id"]);
         assert!(vanished(&mounted, &ejected).is_empty());
         assert!(vanished(&ejected, &[]).is_empty());
+    }
+
+    /// Each try that fails is a notification from KDE Connect, so they're
+    /// spaced out further each time, then stop.
+    #[test]
+    fn mounting_a_dropped_phone_again_is_tried_a_few_times() {
+        let t0 = std::time::Instant::now();
+        let s = std::time::Duration::from_secs;
+        let mut state = State {
+            phones: vec![phone(&[])],
+            dropped: vec!["id".to_owned()],
+            ..State::default()
+        };
+        assert!(remount_due(&state, "id", t0));
+
+        note_remount(&mut state, "id", false, t0);
+        assert!(!remount_due(&state, "id", t0 + s(4)));
+        assert!(remount_due(&state, "id", t0 + s(5)));
+        note_remount(&mut state, "id", false, t0 + s(5));
+        assert!(!remount_due(&state, "id", t0 + s(34)));
+        assert!(remount_due(&state, "id", t0 + s(35)));
+        note_remount(&mut state, "id", false, t0 + s(35));
+        assert!(remount_due(&state, "id", t0 + s(155)));
+        note_remount(&mut state, "id", false, t0 + s(155));
+        assert!(!remount_due(&state, "id", t0 + s(100_000)), "given up on");
+
+        // It left and came back: reconnected, so it's tried again.
+        state.phones.clear();
+        forget_remounts_of_unlisted(&mut state);
+        state.phones.push(phone(&[]));
+        assert!(remount_due(&state, "id", t0 + s(100_000)));
+
+        note_remount(&mut state, "id", false, t0);
+        note_remount(&mut state, "id", true, t0);
+        assert!(state.remounts.is_empty(), "mounted: starts afresh");
+    }
+
+    /// Mounting one by hand that isn't dropped counts for nothing.
+    #[test]
+    fn only_dropped_phones_count_their_tries() {
+        let mut state = State {
+            phones: vec![phone(&[])],
+            ..State::default()
+        };
+        note_remount(&mut state, "id", false, std::time::Instant::now());
+        assert!(state.remounts.is_empty());
     }
 
     #[test]
