@@ -78,6 +78,7 @@ Trims and converts with the user's own ffmpeg, so the app ships no codecs (`src/
 
 - [ ] Pasting files and pictures (`system_clipboard.rs`), in the file browser and documents: the whole path only tried on X11, and reading the clipboard on KWin Wayland; check Ctrl+V on Wayland and Windows. Android and the browser can't read it: there, pictures come by dropping or the toolbar's template
 - [ ] Pinch-to-zoom in a picture's lightbox on a touchscreen is untested
+- [ ] Raw HTML shows as written (`BlockKind::Html`), so READMEs' screenshots and badges come out as source, ours included. Draw what they commonly use: hide comments; `<img>`, and `<picture>` with the `<source>` for the app's theme; `<br>`, `<p align>`, simple `<table>`s. The rest stays as written
 - [ ] Formulas that define macros aren't drawn: an argument doubling itself reaches gigabytes in a second, past KaTeX's limit on expansions, and macros can hide nesting that overflows the stack, which can't be caught. To allow them, KaTeX needs limits on what expansions produce and on depth (`math::refusal`)
 - [ ] Automatic equation numbers (`align`, `equation`) start over in each formula; `layout_numbered` can continue them, once a formula's key can depend on those before it
 - [ ] Formulas and diagrams aren't found by find, and copy as spaces when selected: copy their source
