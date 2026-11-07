@@ -2,6 +2,7 @@
 //! mobile layout.
 
 mod mobile;
+mod stage;
 
 // For opening the native window.
 #[cfg(not(target_arch = "wasm32"))]
@@ -454,6 +455,9 @@ pub struct FilesApp {
     #[cfg(target_os = "android")]
     insets: crate::android::Insets,
     ctx: egui::Context,
+    /// Taking a staged scene's screenshot (see crate::scene).
+    #[cfg(not(target_arch = "wasm32"))]
+    shooting: Option<crate::scene::Shooting>,
 }
 
 impl FilesApp {
@@ -466,9 +470,12 @@ impl FilesApp {
         ));
         crate::remote::init(&cc.egui_ctx);
 
+        // A staged scene starts afresh, whatever was saved.
+        let staged = crate::scene::staged();
         #[cfg(not(target_arch = "wasm32"))]
         let persisted: Option<Persisted> = cc
             .storage
+            .filter(|_| staged.is_none())
             .and_then(|s| eframe::get_value(s, eframe::APP_KEY));
         // The web demo's files are made up afresh on each load, so it starts
         // afresh too, in the home folder.
@@ -510,7 +517,7 @@ impl FilesApp {
                 keymap: Default::default(),
                 titlebar: Default::default(),
                 pane_sizes: PaneSizes::default(),
-                mobile: mobile::starts_enabled(),
+                mobile: staged.map_or_else(mobile::starts_enabled, |s| s.scene.mobile()),
             });
         let Persisted {
             dock,
@@ -566,7 +573,10 @@ impl FilesApp {
             + 1;
         let next_window_id = windows.iter().map(|w| w.id).max().unwrap_or(0) + 1;
 
-        Self {
+        if let Some(theme) = staged.and_then(|s| s.theme) {
+            cc.egui_ctx.set_theme(theme);
+        }
+        let mut app = Self {
             dock,
             shared: Shared {
                 show_hidden,
@@ -654,7 +664,18 @@ impl FilesApp {
             #[cfg(target_os = "android")]
             insets: Default::default(),
             ctx: cc.egui_ctx.clone(),
+            #[cfg(not(target_arch = "wasm32"))]
+            shooting: staged
+                .filter(|s| s.shot.is_some())
+                .map(|_| crate::scene::Shooting::new()),
+        };
+        if let Some(staged) = staged {
+            app.set_scene(staged.scene);
         }
+        // The demo opens on its README, previewed.
+        #[cfg(target_arch = "wasm32")]
+        app.set_scene(crate::scene::Scene::Markdown);
+        app
     }
 
     fn next_id(&mut self) -> u64 {
@@ -2627,6 +2648,8 @@ impl FilesApp {
         {
             self.shared.clipboard = Some(tab::FileClipboard { paths, cut });
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        self.shoot(&ctx);
         self.quit_guard(&ctx);
         self.update_active_browser();
         let mut mobile_tab = self.mobile.enabled.then(|| self.mobile_current()).flatten();
@@ -2952,6 +2975,8 @@ impl FilesApp {
     }
 
     fn input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.stage_input(raw_input);
         if self.mobile.enabled {
             self.long_press.hook(ctx, raw_input);
         }

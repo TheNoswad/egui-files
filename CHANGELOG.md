@@ -27,6 +27,9 @@ releases yet, so it's all unreleased.
     - Dialogs, the theme editor and the About window sized for a phone
     - Haptic feedback (`src/haptics.rs`): a long press, each item a drag selection takes in, a pinch reaching its smallest or largest size, and a drop onto a folder. Checked on the Pixel (`dumpsys vibrator_manager`): the long press and the selection ticks; not yet the pinch or the drop
 
+- Screenshots taken by the app itself (`scripts/screenshots.sh`, `src/scene.rs`): set scenes shot on a virtual X server with the demo's files as a home at `/home/demo`, in light and dark, for the README; the landing page's from the web demo in headless Firefox
+- `scripts/upstream.sh`: what we wait on upstream, read-only, and whether our forks' branches need rebasing onto a newer release
+
 ### Video editor
 
 - Editor tab: timeline with start and end handles, I and O, fast cut from a keyframe or frame-exact, formats, quality, what to keep, exports queued in the jobs bar
@@ -77,7 +80,7 @@ releases yet, so it's all unreleased.
 - Files in memory, with a demo home: browsing, thumbnails, previews with highlighting, archives, copy/move/trash/restore, extracting
 - "Open" shows pictures, text, PDFs, audio and video in a browser tab, and saves anything else
 - A landing page with the demo embedded: it loads with the page behind a light or dark screenshot, with its progress, then fades in and grows to most of the window
-- Starts fresh in the home folder on every load, settings included; the mobile layout on a phone-sized page
+- Starts fresh in the home folder on every load, settings included, with its README selected and previewed; the mobile layout on a phone-sized page
 - Jobs share the page's thread: progress, cancelling, and conflict and password prompts work, and the page keeps drawing
 - Bring in files and folders, dropped on the page or through File → Add files/folder (1 GiB per job)
 - Fetch files from the server when they're first opened (`web/demo-files/`, listed in a manifest by `web/demo-files.sh`)

@@ -342,8 +342,9 @@ fn label(phone: &Phone, folder: &str) -> String {
 impl Phones {
     pub fn new(ctx: &Context) -> Self {
         let state = Arc::new(Mutex::new(State::default()));
+        // A staged scene shows the same wherever it's shot.
         #[cfg(target_os = "linux")]
-        {
+        if crate::scene::staged().is_none() {
             kde::set_up();
             let (shared, repaint) = (state.clone(), ctx.clone());
             let _ = std::thread::Builder::new()

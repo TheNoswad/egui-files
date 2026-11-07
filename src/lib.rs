@@ -46,6 +46,7 @@ mod properties;
 mod remote;
 #[cfg(target_os = "android")]
 mod renderer;
+mod scene;
 mod settings;
 mod sidebar;
 mod system_clipboard;
@@ -95,7 +96,8 @@ pub fn run() -> eframe::Result {
         std::process::exit(code);
     }
     // The mobile layout keeps the system's frame and goes narrower.
-    let mobile = app::saved_mobile("egui-files");
+    let staged = scene::staged();
+    let mobile = staged.map_or_else(|| app::saved_mobile("egui-files"), |s| s.scene.mobile());
     let min_size = if mobile {
         app::MOBILE_MIN_SIZE
     } else {
@@ -105,12 +107,14 @@ pub fn run() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_title("egui-files")
             .with_app_id("egui-files")
-            .with_inner_size([1100.0, 700.0])
+            .with_inner_size(staged.map_or(egui::vec2(1100.0, 700.0), |s| s.scene.size()))
             .with_min_inner_size(min_size)
             .with_decorations(mobile || !titlebar::saved_enabled("egui-files")),
         // eframe opens the window at its saved size, kept above only 64
         // points: Windows reports a minimized window's size as nothing, so
         // closing it minimized left the next start a speck of a window.
+        // A staged scene's window is the scene's size, not the one saved.
+        persist_window: staged.is_none(),
         window_builder: Some(Box::new(move |builder| match builder.inner_size {
             Some(size) => builder.with_inner_size(size.max(min_size)),
             None => builder,

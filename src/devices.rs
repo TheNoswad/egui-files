@@ -27,6 +27,13 @@ pub struct Drives {
 impl Drives {
     pub fn new(ctx: &Context) -> Self {
         let phones = Phones::new(ctx);
+        // A staged scene shows the same wherever it's shot.
+        if crate::scene::staged().is_some() {
+            return Self {
+                list: Arc::default(),
+                phones,
+            };
+        }
         let list = Arc::new(Mutex::new(places::drives()));
         let shared = list.clone();
         let ctx = ctx.clone();
