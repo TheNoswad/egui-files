@@ -12,6 +12,9 @@ anything other than its crate plus its diff, so the diffs always say what
 was changed.
 
 - To change a patch: edit the copy, then `patches/patches.sh record <crate>`.
+- To see whether upstream has fixed one yet: `scripts/upstream.sh` shows
+  the issues and pull requests in `scripts/upstream.watch`, newer releases,
+  and new reports of what isn't reported there.
 - To move one to a new version: `git rm -r patches/<crate>`, change its
   version in `crates`, `patches/patches.sh apply <crate>`, fix whatever
   didn't apply (the `.rej` files say what), then `record` it.

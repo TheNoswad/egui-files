@@ -1,0 +1,39 @@
+# What this project waits on upstream, read by scripts/upstream.sh.
+#
+#   issue|pr <owner/repo>#<n>      | why it matters
+#   crate <name>                   | why it matters (compares Cargo.lock to crates.io)
+#   search <owner/repo> <terms...> | a problem we have that isn't reported there;
+#                                    new matches are shown, in case someone has
+#
+# Read-only: nothing here is filed or commented on upstream.
+
+# patches/unrar_sys
+pr     muja/unrar.rs#81                     | builds for the target, not the host, and for Android: most of patches/unrar_sys
+search muja/unrar.rs SIGILL                 | patches/unrar_sys/cpu_supports.hpp: __builtin_cpu_supports and an x86-64-v3 libgcc
+search muja/unrar.rs cpu_supports           | the same
+
+# patches/egui-winit
+pr     emilk/egui#8657                      | winit's Wayland clipboard instead of smithay's: may make the shared-clipboard patch moot
+search emilk/egui data_offer                | the Wayland connection dying when a viewport's clipboard is dropped (patches/egui-winit)
+search emilk/egui paste key clipboard empty | Ctrl+V dropped when the clipboard has no text (patches/egui-winit, file_clipboard::PasteKey)
+issue  emilk/egui#2108                      | image paste events: would replace passing Ctrl+V through for markdown::assets
+
+# patches/mermaid-rs-renderer
+pr     1jehuang/mermaid-rs-renderer#159     | web_time's Instant, as patches/mermaid-rs-renderer does: the browser panic
+pr     1jehuang/mermaid-rs-renderer#155     | the same, another way
+pr     1jehuang/mermaid-rs-renderer#125     | the same, another way
+issue  1jehuang/mermaid-rs-renderer#120     | the same, asked for
+pr     1jehuang/mermaid-rs-renderer#108     | an embedded font instead of the ~/.cache/mmdr copy; we'd still want register_font
+search 1jehuang/mermaid-rs-renderer Instant | the browser panic, in case of another fix
+search 1jehuang/mermaid-rs-renderer cache   | the font copy it writes to ~/.cache/mmdr
+
+# Held back
+issue  anhosh/egui_dock#352                 | egui 0.37: the app stays on egui 0.36 until egui_dock moves
+pr     anhosh/egui_dock#354                 | the same
+issue  emilk/egui#8805                      | Wayland drag and drop in winit: could replace src/wayland_dnd.rs
+
+crate  egui                                 | held at 0.36 by egui_dock
+crate  egui_dock                            | holds egui back
+crate  egui-winit                           | patched (patches/egui-winit)
+crate  unrar_sys                            | patched (patches/unrar_sys)
+crate  mermaid-rs-renderer                  | patched (patches/mermaid-rs-renderer)
