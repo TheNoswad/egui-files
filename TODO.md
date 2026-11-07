@@ -1,27 +1,28 @@
 # TODO
 
+What's left, by area. What's done is in CHANGELOG.md; what we wait on
+upstream is watched by `scripts/upstream.sh` (see `scripts/upstream.watch`).
+
 ## General
 
 - [ ] Video backend for macOS; Linux and Windows have one
 - [ ] Zero-copy dmabuf → wgpu import for video, if readback ever matters
 - [ ] Drag-out on X11: check by hand on a real X11 desktop with a window manager, into a file manager and a browser (tested on Xvfb against a minimal XDND target, including Escape and dragging back in). No drag cursor outside the window, since the pointer stays grabbed by winit
-- [ ] Upstream: egui-winit (0.36 and 0.37) drops Ctrl+V entirely, without even the key press, when the clipboard has no text (or image), e.g. files copied in Explorer. We work around it with `file_clipboard::PasteKey` (Windows: `GetKeyState`) so copied files don't need a text fallback, which Discord would paste instead of the files. Report it, or send a PR that always passes the key press through (or adds an empty-paste event), then drop `PasteKey`.
+- [ ] Upstream: egui-winit (0.36 and 0.37) drops Ctrl+V entirely, without even the key press, when the clipboard has no text (or image), e.g. files copied in Explorer. We work around it with `file_clipboard::PasteKey` (Windows: `GetKeyState`) so copied files don't need a text fallback, which Discord would paste instead of the files. Not reported upstream; `scripts/upstream.sh` looks for a report or fix (an empty-paste event, or the key press always passed through), then drop `PasteKey`
 - [ ] In-app title bar on Windows: check by hand that the DWM shadow shows, the snap layouts flyout opens over maximize (and maximize still works and highlights), and right-click opens the system menu (rounded corners confirmed on Windows 11, square when maximized or snapped, as native)
 - [ ] In-app title bar on Wayland: right-click shows our own window menu, since eframe gives no way to reach winit's `show_window_menu` (the compositor's). Expose it (a viewport command upstream, or via our egui-winit patch) and use it there
-- [ ] Upstream: egui-winit makes a smithay clipboard per viewport and drops it with the viewport, which kills the Wayland connection ("not a valid new object id … data_offer"); we patch it to share one (patches/README.md has a repro). Report it or send the PR, then drop the patch.
+- [ ] Upstream: egui-winit makes a smithay clipboard per viewport and drops it with the viewport, which kills the Wayland connection ("not a valid new object id … data_offer"); we patch it to share one (patches/README.md has a repro). Not reported upstream; `scripts/upstream.sh` watches emilk/egui#8657, which may make it moot, then drop the patch
+- [ ] egui 0.37: waits on egui_dock (anhosh/egui_dock#352, #354; watched by `scripts/upstream.sh`); then move `patches/egui-winit` to 0.37 (`patches/patches.sh apply`)
 - [ ] Tab windows: check they keep updating while the main window is hidden (another workspace, minimized). Their UI runs in the main window's frame, and on Wayland winit may hold that frame until the compositor sends the main window a frame callback
 - [ ] Tab windows: try dropping a tab outside the window, and into another of the app's windows, by hand on Wayland, X11 and Windows (only unit-tested so far; the drop is told from the pointer, which egui may lose as it leaves)
-- [x] KDE Connect phones (Linux): paired, reachable phones are listed with the drives and mounted on a click through KDE Connect's D-Bus API. The app reaches the mount as a server's folder (`sftp://kdeconnect-<id>/…`) through a local `sftp-server`, and the UI's thread never waits on it (`disk::sftp::set_local_servers`, `src/phones.rs`). A phone that stops answering is cut off and mounted again once back; tabs on it stay and pick up again. Ejected with fusermount: KDE Connect's `unmount` leaves a dead mount that blocks the next one
+- KDE Connect phones (Linux):
     - [ ] Servers proper can still stall the UI's thread if it asks after something uncached while the connection hangs: `set_local_servers`'s rule isn't applied to them, as renames and new items there still run on that thread
     - [ ] Opening a bookmark or restored tab on a phone that isn't mounted doesn't mount it: it says it isn't connected until its row is clicked
-- [x] SFTP: `sftp://user@host:port/path` in tabs, jobs, preview, editor and properties, through `disk` (`disk/src/sftp/`), with ssh doing the connecting; servers from `~/.ssh/config` and `known_hosts` in Places, the path bar and "Connect to server". Tried against OpenSSH 9.7 in a container, in the app under Xvfb, also with 150 ms each way
+- SFTP:
     - [ ] Android: there's no `ssh` there. russh (or similar) behind the same `Session`, with our own config parsing and auth
     - [ ] Windows: not built here (the C dependencies need MinGW). Check Windows' OpenSSH runs the app as `SSH_ASKPASS` (it's a GUI-subsystem program printing to the pipe ssh gives it), that no console flashes up, and that `File::set_permissions`/read-only map sensibly
     - [ ] Drag out of a server (copies, up to 16 MB) into another app, by hand: only built
-    - [x] Others' changes on a server: the folders on screen are listed again every 10 s while connected
-    - [x] Terminal: follows onto a server with ssh, and about it while the shell there says when it's at a prompt (OSC 133) and where (OSC 7). bash and fish get hooks with the ssh command; nothing's written on the server
     - [ ] zsh on a server is followed only if it marks its prompts itself (no way to hand it hooks without files there); tried with bash only by hand, fish in tests
-    - [x] Copies within one server are done there (`copy-data`, OpenSSH 9.0+), 64 MB at a time for progress and cancelling
     - [ ] FTP, WebDAV, SMB ("etc")
 - [ ] google drive
 - [ ] proton drive
@@ -33,25 +34,12 @@
 - [ ] Project focus or view mode, for IDE features
 - [ ] IDE features
 - [ ] mobile support (the layout runs on the desktop: View → Mobile layout; `src/app/mobile.rs`)
-    - [x] tabs like a mobile browser
-    - [x] Build for Android, with a phone's file access ("All files access"): `cargo apk build --release` in `android/` (Pixel 7a, Android 16)
     - [ ] iOS
-    - [x] Touch: drag scrolls, a tap opens, a long press opens the context menu, and a long press then a drag selects (`src/touch.rs`)
-    - [x] Touch in the trash and archive tabs: a tap opens (archive) or adds to the selection (trash, or the archive while selecting); back clears it
-    - [x] Touch drag selection in the icon grid selects in reading order between the two items
-    - [x] Moving files by touch: while selecting, a long press on a selected item drags the selection onto a folder
-    - [x] Pinch to zoom: item size in the file views (also Ctrl+scroll on the desktop), text size in the terminal (Ctrl+scroll in the mobile layout on the desktop)
-    - [x] Open files in other apps: `ACTION_VIEW` with the file's media store `content://` URI (no FileProvider: the APK has no Java code); "Open with" shows Android's chooser. Files from archives extract to `Android/media/<package>` so they can be shared. Checked on the Pixel: a PDF in Firefox, text through the chooser, an image from a zip in Files by Google
-    - [x] Trash tab's toolbar overflows at phone width
-    - [x] Hide the bottom bar while the on-screen keyboard is up
     - [ ] Terminal good enough to develop on (on hold: researching first). Today it runs Android's own `sh` with toybox, so no git, compilers or package manager. Needs a Linux userland, and since Android 10 apps can't execute files they download into their own storage. Options:
         - proot + a downloaded distro rootfs (Debian, Alpine) in app storage, exec routed through proot's loader shipped as a native library (how UserLAnd and AnLinux do it). Real `apt`/`apk`; ptrace overhead on syscalls; a few hundred MB and a first-run setup
         - Termux's packages: fastest, but built for Termux's prefix (`/data/data/com.termux/files/usr`), so they'd need rebuilding and hosting ourselves
         - Hand off to an installed Termux (`RUN_COMMAND` intent): little work, but needs Termux and integrates shallowly
     - [ ] Predictive back: opt in (`enableOnBackInvokedCallback`) once the manifest can say so, then target API 36; targets 35 until then. cargo-apk 0.10 still can't write it, and opting in needs an `OnBackInvokedCallback`, which needs Java code in the APK
-    - [x] Check on a real touchscreen that egui's own long touch and ours don't both fire
-    - [x] Dialogs, the theme editor and the About window sized for a phone
-    - [x] Haptic feedback (`src/haptics.rs`): a long press, each item a drag selection takes in, a pinch reaching its smallest or largest size, and a drop onto a folder. Checked on the Pixel (`dumpsys vibrator_manager`): the long press and the selection ticks; not yet the pinch or the drop
     - [ ] Moto G20 (Unisoc T700, Mali-G52, Android 11): noise at the bottom while scrolling with Vulkan, gone with "Disable HW overlays", so its display hardware mishandles the Vulkan driver's buffers. Settings → Appearance → Renderer → OpenGL is the workaround (checked on the Pixel that OpenGL runs); confirm it fixes the G20, and if so consider OpenGL by default on such phones
     - [ ] Haptics on Windows: `InputHapticsManager` (`Windows.Devices.Haptics`, SDK 10.0.28000, for haptic touchpads, mice and pens) once the `windows` crate has it (0.62.2 doesn't). Linux has no API for it
 
@@ -59,45 +47,28 @@
 
 Trims and converts with the user's own ffmpeg, so the app ships no codecs (`src/clip/`). Android uses its own MediaCodec and MediaMuxer classes instead: no pure Rust stack covers H.264 and H.265 yet, which is most of what phones film.
 
-- [x] Editor tab: timeline with start and end handles, I and O, fast cut from a keyframe or frame-exact, formats, quality, what to keep, exports queued in the jobs bar
-- [x] Target size: under the limit (two passes where the encoder has them, check, retry lower), refused if it's impossibly small
-- [x] Target size limits: refused below 0.005 bits a pixel (frames past 60 fps not counted) and below hardware encoders' least bits a frame, with a button for the largest picture and frame rate that fits (or the software encoder); the container's index is in the budget; a try stops as soon as its file is over, and tries stop when the encoder goes no lower. Checked on a 10 minute 1440p 165 fps game recording
+- Target size limits:
     - [ ] The 0.005 limit was judged from one frame of one recording, and the hardware floors (6.5 kbit a frame for H.264, 4.5 for others) were measured on one AMD card with game footage. Busier video needs more, which the early stop catches only after a try
-- [x] Speed: VAAPI decodes and resizes on the GPU when nothing needs the processor (falls back on its own if decoding fails), frames are dropped before anything else, and an "Encoding speed" choice for software encoders. On that recording: a hardware resize to 720p went from 31 s to 12 s a minute, a software 480p at 30 fps from 29 s to 16 s
+- Speed:
     - [ ] NVENC and QuickSync have no such GPU path (`-hwaccel cuda`/`qsv`), nor Windows
     - [ ] "Fast" is only measured for x264; check x265, SVT-AV1, VP9 and AOM on real footage (VP9's faster setting was slower on noise)
-- [x] Resize and frame rate; audio: remove, choose a track, bitrate, audio only
-- [x] Hardware encoders, as a toggle when one is found (run here: VAAPI; NVENC and QuickSync only have their arguments tested)
 - [ ] Target size for audio on its own (only the bitrate can be chosen there)
-- [x] Crop (free or to a shape), turn and mirror, speed; GIF and animated WebP, also to a target size
-- [x] Turning, mirroring and speed show in the editor's video, with the crop's rectangle turning along
-- [x] Settings field for ffmpeg's path, and offering to download an LGPL build (no x264 or x265 in those) and, on Windows, libmpv
-- [x] Windows: the player and editor, run under Wine with the downloaded tools and the export tests
 - [ ] Windows on real hardware: only run under Wine so far, with no GPU. Check hardware decoding (`auto-copy-safe`), hardware encoders, high DPI and a 4K video
 - [ ] macOS: not planned for now, nothing here to build or run it on
 - [ ] Before shipping publicly, decide what the ffmpeg and libmpv downloads fetch. They take the newest third-party build, checked only against a hash from the same place; libmpv's build is GPL and its releases last about 6 weeks. The recommendation is our own LGPL builds on this project's releases, with hashes pinned in the app
-- [x] Android: re-encoding with MediaCodec: frame-exact, target size, quality, resolution, frame rate, H.264, H.265, AV1, VP9, AAC and Opus (`src/clip/ffmpeg/android_encode.rs`). Frames go through memory and are scaled in Rust, so there's no OpenGL or Java. Checked on a Pixel 7a
-- [x] Android: crop, turn and mirror (drawn in `scale.rs`, compared with ffmpeg's result at each stored rotation)
 - [ ] Android: faster re-encoding. On the Pixel 7a most of the time is copying frames out of the decoder (about 12 ms a 4K frame at the same size, 26 ms resizing), not the codecs. Tried, no help: codec `operating-rate`/`priority`, the scaler on 4 threads (slower), reading rows in bulk
     - [ ] Same-size exports: the decoder renders straight into the encoder's input Surface (`createInputSurface`, `releaseOutputBuffer(index, time)`), no frame touching the processor and no Java needed. HDR to SDR needs checking there
     - [ ] Resizing (and crop, turn, mirror): draw between the two Surfaces with OpenGL ES (EGL from the NDK, a SurfaceTexture polled with `updateTexImage`)
-- [x] Android: speed. Frames get new times, and `tempo.rs` changes the audio without changing its pitch (WSOLA), as ffmpeg's atempo does on desktop
 - [ ] Android: GIF and animated WebP, written in Rust as Android has no encoder for them, with a target-size loop like desktop's
 - [ ] Android: other audio formats. WAV is simple and Opus files should be, as the phone can encode Opus; MP3 and FLAC take more
 - [ ] Android: keep the title, date and subtitles when exporting, which the muxer has nowhere for
 - [ ] Flaky test: `editor::tests::a_link_leaves_unsaved_changes_in_their_tab` failed once in the pre-commit hook on 2026-11-04, in a slow run with ffmpeg busy elsewhere. About 50 runs since passed, some pinned to one or two cores. The failing assertion wasn't captured, so the cause isn't known
 - [ ] Android: listen to speed changes on real sound (`/sdcard/bird (edited) (2).mp4` on the Pixel): so far only pitch on a pure tone and loudness are measured
-- [x] Android: long exports. A wake lock keeps the screen on (the window flag hung the app). Leaving the app, Android slows the export and freezes it after about 70 s on a Pixel 7a; it carries on, intact, on returning. The editor says so
 - [ ] Android: exports that keep going in the background: needs a foreground service, so a Java class, which cargo-apk can't build
 - [ ] Try exporting from a phone's mount: the path is mapped, but no test or run has covered it
-- [x] Editor layout: sections with a footer that keeps Export in view, a video box shaped like the picture, a ruler, typed start and end times, frame steps and jumps, zooming, and a narrow layout down to about 260 pt. A blocked Export says why on a click and points at the setting; a target size too small (or too small to look good) offers one-click fixes
-- [x] Scrubbing: no playhead jump (mpv's old position is ignored until the seek is done), a fine drag at a tenth of the speed (Shift, or the pointer away from the bar), and Settings → Video → "Exact frames while scrubbing" for keyframe seeks while dragging
-    - [x] Android: the fine drag checked on the Pixel 7a: 300 px away from the bar moved 0.28 s, along it 2.8 s
-- [x] Stills along the timeline (`strip.rs`): the whole video thinly first, then finer where it's zoomed into, down to a frame, from a grid of halves of its length so panning finds the same ones. Two ffmpeg runs at a time on the desktop; one `MediaMetadataRetriever` on Android. What's trimmed off is dimmed
-    - [x] Android: checked on the Pixel 7a: stills come within a few seconds, upright for videos stored turned 90° and 180° (the retriever turns them itself; `android_logic::upright` is only a fallback)
+- Stills along the timeline (`strip.rs`):
     - [ ] Android: the file views show no video thumbnails, as there's no ffmpeg; `ffmpeg::stills` could make them there
-- [x] Volume: a slider for each track kept (0 to 400%), "Mix into one track", as most players and websites play only the first, and "Even out loudness" (`dynaudnorm`), for inputs already mixed into one track. Changing the sound re-encodes only the audio; the video can still be copied. Checked by measuring exports: 400% is +12 dB, mixing makes one track
-    - [x] Android: the volume, applied to the samples in Rust on their way to the encoder (checked on the Pixel 7a: 200% came out +6.0 dB)
+- Volume:
     - [ ] Android: mixing tracks (two decoders kept in step, their samples added) and evening out loudness (`dynaudnorm`'s idea in Rust); both are hidden there until then
     - [ ] Raising a loud track can clip: a limiter after the volume, if it turns out to be a problem
 
@@ -105,34 +76,20 @@ Trims and converts with the user's own ffmpeg, so the app ships no codecs (`src/
 
 `src/markdown/`: `parse` (pulldown-cmark to blocks with source offsets), `layout` (blocks at a width, to a flat list of items), `view` (draws what's on screen, clicks), `images`, `links`, `drawing` (formulas and diagrams). The editor tab shows it in Source, Split and Preview. The source is the only document: anything that changes it is a splice of its bytes.
 
-- [x] Renderer: CommonMark, GFM, footnotes, alerts and callouts, frontmatter, definition lists, sub/superscript, heading ids, wikilinks, highlights, tags, emoji shortcodes
-- [x] Preview and Split, with scrolling kept together; Open shows WYSIWYG; the preview pane renders
-- [x] Links followed in place with Back and Forward; programs are revealed rather than run
-- [x] Local and remote pictures, SVG included; remote ones behind a setting, by default asked for each document
-- [x] Phase 2, editing aids: formatting commands and shortcuts, lists that continue on Enter and nest on Tab, addresses pasted over text become links, table editing (`table.rs`), outline, word count and reading time, find in the rendered view, pasted and dropped pictures (`assets.rs`), a picture's lightbox
 - [ ] Pasting files and pictures (`system_clipboard.rs`), in the file browser and documents: the whole path only tried on X11, and reading the clipboard on KWin Wayland; check Ctrl+V on Wayland and Windows. Android and the browser can't read it: there, pictures come by dropping or the toolbar's template
 - [ ] Pinch-to-zoom in a picture's lightbox on a touchscreen is untested
-- [x] Phase 3: math (`math.rs`, katex-native) and Mermaid (`diagram.rs`, mermaid-rs-renderer, patched: see `patches/README.md`), drawn as SVGs through the images store (`drawing.rs`)
 - [ ] Formulas that define macros aren't drawn: an argument doubling itself reaches gigabytes in a second, past KaTeX's limit on expansions, and macros can hide nesting that overflows the stack, which can't be caught. To allow them, KaTeX needs limits on what expansions produce and on depth (`math::refusal`)
 - [ ] Automatic equation numbers (`align`, `equation`) start over in each formula; `layout_numbered` can continue them, once a formula's key can depend on those before it
 - [ ] Formulas and diagrams aren't found by find, and copy as spaces when selected: copy their source
 - [ ] Non-Latin text in formulas (`\text{日本語}`) uses installed fonts, so boxes on the web
 - [ ] `\ce` (mhchem) isn't in katex-rs; `\ce{H2O}` shows as an error
 - [ ] A diagram can't be stopped once started: a big one keeps a core busy (flowcharts: 200 nodes, 15 s), and on the web stops the page, hence fewer lines allowed there (`diagram.rs`). A worker would fix both. Mindmaps overlap their nodes, and pie titles sit close to the pie: the crate's layout
-- [x] Editing while reading: double-click a block in Preview to edit its markdown in place, with the formatting commands; a double-click below the last one adds a paragraph (`block_edit.rs`). One splice of the source per block, and one undo step
 - [ ] Editing a list or quote is of the whole of it: smaller blocks, down to the item, would jump less
-- [x] WYSIWYG: a mode editing the rendered text itself, with a cursor in the page (`wysiwyg.rs`, `editor/page.rs`). Each char knows the bytes it came from, every key is a splice of the source, and untouched bytes never change. What's typed is markdown as written, so `**` and `# ` work. Ctrl+click follows links; a double-click on what isn't text, like a formula, opens its markdown in place. Live view isn't needed
 - [ ] WYSIWYG, what isn't editable on the page: callout titles and frontmatter (double-click them), and empty table cells, which have no place in the source to go by
 - [ ] WYSIWYG: text being composed with an input method only shows once it's committed; check an IME, and the on-screen keyboard on Android and phones (only tried with a keyboard, on X11 and in Firefox)
-- [x] WYSIWYG on touchscreens: a long press selects a word and dragging goes on from it, handles move each end, and a bar has Cut, Copy, Paste and All. A tap gives the cursor a handle, to drag it, or tap it for Paste at the cursor. On Android these use the system's clipboard, as does all copying in the app
 - [ ] WYSIWYG: the setting for what "Edit" opens has no place in the settings to choose this mode (`Prefs::edit_mode`); find looks through the source there, as in Split
-- [x] Phase 6: links in documents follow files moved or renamed in the app (`relink.rs`): the git repository or vault around the move is looked through, or without one the folders moved from and to, and what would change is shown first. Only link destinations' bytes change, and links already broken are left. Editor tabs go with their files
-- [x] What's looked at when links update: raw HTML's `src` and `href` too, hidden folders but not tools' own (`.git`, `node_modules`), and documents up to 64 MiB; what can't be read is named in the list, as is what has unsaved changes
-- [x] Repair links, in a document's toolbar: for what moved outside the app, which can't be told from a `git checkout`. Finds broken links around the document, and fixes those with one file of their name
-- [x] `[[Note]]` goes by how the app follows it: a rename leaves links that meant another note of that name, and a name that would now find another note gets a path
 - [ ] Raw HTML: a subset (img, br, details/summary, kbd, sub/sup, center); shown as written, dimmed, until then
 - [ ] Export (HTML, rich text, PDF)
-- [x] Scripts the bundled fonts lack, everywhere in the app: installed fonts on the desktop and Android, chosen by what they cover (`src/theme/fallback.rs`), and on the web Noto fonts beside the page, fetched when text needs them (`src/theme/web_fonts.rs`, `web/fonts.sh`)
 - [ ] Right-to-left text (Hebrew, Arabic) isn't ordered: letters are shaped, but lines read left to right. egui has no bidi. See "Characters" in `samples/markdown/showcase.md`
 - [ ] Emoji are monochrome, and flags don't work: egui has no color fonts
 - [ ] Chinese characters come in regional forms, and the first font found wins (Chinese ones first), so Japanese text can get Chinese forms on the desktop. Prefer by the system's language
@@ -140,25 +97,11 @@ Trims and converts with the user's own ffmpeg, so the app ships no codecs (`src/
 - [ ] Check fallback fonts on Windows and Android: only run on Linux and in Firefox so far (Android loads `/system/fonts` itself, as fontdb doesn't)
 - [ ] Bare email addresses aren't linked (`<a@b.c>` is)
 - [ ] Text selection in rendered documents on touchscreens (dragging scrolls there)
-- [x] Web links, and tapping links and pictures, checked on a real Android device
-- [x] Links in the preview pane: a heading scrolls the pane to it, and a program is shown in its folder
-- [x] Links on a touchscreen while editing the page: a tap puts the cursor there, and a button by it opens the link, as there's no Ctrl
 
 ## Web demo
 
 `web/build.sh` builds the site into `target/site`: the landing page (`web/index.html`), and the demo in `demo/` (`web/demo/`, built by trunk for wasm32-unknown-unknown, with the `web` profile, for size). The demo's files are in `web/demo-files/`: `web/demo-files.sh` puts them beside the page with a manifest, `src/demo.rs` lists them at startup, and a folder's files are fetched in the background when it's shown, into memory (`disk/`). clippy.toml warns, in the wasm build only, of what fails or panics in a browser.
 
-- [x] Builds and starts in the browser; the terminal, video, libmpv, RAR and zstd say they need the desktop app
-- [x] Files in memory, with a demo home: browsing, thumbnails, previews with highlighting, archives, copy/move/trash/restore, extracting
-- [x] "Open" shows pictures, text, PDFs, audio and video in a browser tab, and saves anything else
-- [x] A landing page with the demo embedded: it loads with the page behind a light or dark screenshot, with its progress, then fades in and grows to most of the window
-- [x] Starts fresh in the home folder on every load, settings included; the mobile layout on a phone-sized page
-- [x] Jobs share the page's thread: progress, cancelling, and conflict and password prompts work, and the page keeps drawing
-- [x] Bring in files and folders, dropped on the page or through File → Add files/folder (1 GiB per job)
-- [x] Fetch files from the server when they're first opened (`web/demo-files/`, listed in a manifest by `web/demo-files.sh`)
-- [x] Fetch the shown folder's files in the background, smallest first, with pictures waiting for theirs: on a 300 KB/s connection, Pictures stopped the page for up to 10.5 s at a time, and now for 0.2 s
-- [x] Size: 17.8 MB of wasm, 5.7 MB with brotli (11.5 and 4.3 before math and diagrams): built for size, WebGL through glow instead of wgpu, no persistence
-- [x] Tried in Firefox: disk usage, compressing (zip, tar.xz, 7z with a password), and saving in the editor
 - [ ] Publishing (GitHub Pages or Cloudflare Pages), from CI; the site is static, with relative URLs. Check the host compresses the wasm, and serves the dotfiles in `demo/files/` (`.profile`, `.gitignore`)
 - [ ] Better content for `web/demo-files/`: real photos and such, instead of pictures drawn by code. `Projects/egui-files` is a copy of some of the source, and `Downloads/` packs some of these files, so they don't follow changes
 - [ ] Opening a file before its background fetch is done stops the page until it's here, and downloads it twice (a synchronous request, as its readers can't wait): 10 s for a 2.9 MB photo at 300 KB/s. So does a job or an editor reaching a file from a folder that wasn't shown. Have "Open" wait for the fetch, as pictures do. Showing a folder also fetches everything in it, so a big video in `web/demo-files/` would cost every visitor who opens that folder: skip big files then, or use Range requests
