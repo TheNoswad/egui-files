@@ -10,6 +10,12 @@ themes. It also runs in the browser, as a demo.
   <img src="docs/screenshots/markdown-light.png" alt="The home folder, with its README previewed beside it: a diagram, a formula and a checklist">
 </picture>
 
+> **AI disclosure:** all of this project's code, tests and documentation
+> were written by an AI model, Anthropic's Claude (through Claude Code),
+> at my direction, as were the fixes in our [forks](#forks). The libraries
+> it uses are their authors' own. I decide what gets built and how it
+> should behave, and try it on my own machines and phone.
+
 **[Try it in your browser](https://thenoswad.github.io/egui-files/)**, or
 [download it](#downloads).
 
