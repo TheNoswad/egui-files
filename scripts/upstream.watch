@@ -2,6 +2,9 @@
 #
 #   issue|pr <owner/repo>#<n>      | why it matters
 #   crate <name>                   | why it matters (compares Cargo.lock to crates.io)
+#   fork <owner/repo> <branch> <crate> | a fork in [patch.crates-io]; the branch
+#                                    ends in the release it's on, and <crate>'s
+#                                    releases say when to rebase it
 #   search <owner/repo> <terms...> | a problem we have that isn't reported there;
 #                                    new matches are shown, in case someone has
 #
@@ -31,6 +34,13 @@ search 1jehuang/mermaid-rs-renderer cache   | the font copy it writes to ~/.cach
 issue  anhosh/egui_dock#352                 | egui 0.37: the app stays on egui 0.36 until egui_dock moves
 pr     anhosh/egui_dock#354                 | the same
 issue  emilk/egui#8805                      | Wayland drag and drop in winit: could replace src/wayland_dnd.rs
+
+# Our forks: their branches against new releases
+fork   TheNoswad/egui                egui-files/0.36.2   egui-winit          | the shared Wayland clipboard and Ctrl+V
+fork   TheNoswad/unrar.rs            egui-files/0.5.8    unrar_sys           | building for the target, and cpu_supports.hpp
+fork   TheNoswad/mermaid-rs-renderer egui-files/0.3.1    mermaid-rs-renderer | the browser, the font cache, register_font
+
+# Versions
 
 crate  egui                                 | held at 0.36 by egui_dock
 crate  egui_dock                            | holds egui back

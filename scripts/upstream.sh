@@ -1,13 +1,14 @@
 #!/bin/sh
 # Shows how what we wait on upstream is doing (scripts/upstream.watch): the
-# issues and pull requests, newer versions of the crates, new reports of
+# issues and pull requests, newer versions of the crates, whether our forks'
+# branches need rebasing onto a newer release, new reports of
 # problems we have that nobody had reported, and security advisories for
 # what's in Cargo.lock. Marks with * what changed
 # since the last run (remembered in target/upstream-seen).
 #
 #   scripts/upstream.sh
 #
-# Needs gh, signed in (for GitHub's API limits), and curl. Only reads.
+# Needs gh, signed in (for GitHub's API limits), git and curl. Only reads.
 set -eu
 cd "$(dirname "$0")/.."
 
@@ -85,6 +86,57 @@ watched crate | while IFS= read -r line; do
     esac
     m=$(mark "crate:$name" "$latest")
     printf '%s %-20s %-10s %s\n' "$m" "$name" "${ours:-not in Cargo.lock}" "$news"
+    printf '         %s\n' "$(why_of "$line")"
+done
+
+echo
+echo "Our forks (Cargo.toml → the branch, and releases to rebase onto)"
+# The file of a crate's versions in crates.io's index.
+index_path() {
+    n=$(printf '%s' "$1" | tr 'A-Z' 'a-z')
+    case ${#n} in
+        1) echo "1/$n" ;;
+        2) echo "2/$n" ;;
+        3) echo "3/$(printf '%s' "$n" | cut -c1)/$n" ;;
+        *) echo "$(printf '%s' "$n" | cut -c1-2)/$(printf '%s' "$n" | cut -c3-4)/$n" ;;
+    esac
+}
+watched fork | while IFS= read -r line; do
+    repo=$(printf '%s\n' "$line" | awk '{ print $2 }')
+    branch=$(printf '%s\n' "$line" | awk '{ print $3 }')
+    crate=$(printf '%s\n' "$line" | awk '{ print $4 }')
+    base=${branch##*/}
+    url="https://github.com/$repo"
+    revs=$(sed -n 's|.*git = "'"$url"'", rev = "\([0-9a-f]*\)".*|\1|p' Cargo.toml | sort -u)
+    head=$(git ls-remote "$url" "refs/heads/$branch" 2>/dev/null | awk '{ print $1 }') || head=
+    versions=$(curl -fsSL -A "$agent" "https://index.crates.io/$(index_path "$crate")" |
+        sed -n '/"yanked":false/s/.*"vers":"\([^"]*\)".*/\1/p' | grep -v -- - | sort -V) || versions=
+    newest=$(printf '%s\n' "$versions" | tail -n 1)
+    # Releases that are drop-in for ours: same minor for 0.x, else same major.
+    case $base in
+        0.*) series=${base%.*} ;;
+        *) series=${base%%.*} ;;
+    esac
+    in_series=$(printf '%s\n' "$versions" | grep "^$(printf '%s' "$series" | sed 's/\./\\./g')\." | tail -n 1)
+    if [ -z "$revs" ]; then
+        news="not in Cargo.toml's [patch.crates-io]"
+    elif [ "$(printf '%s\n' "$revs" | wc -l)" -ne 1 ]; then
+        news="Cargo.toml uses more than one commit of it"
+    elif [ -z "$head" ]; then
+        news="branch not found (couldn't reach GitHub?)"
+    elif [ "$head" != "$revs" ]; then
+        news="branch is at $(printf '%.10s' "$head"), Cargo.toml at $(printf '%.10s' "$revs"): update the rev"
+    elif [ -z "$newest" ]; then
+        news="couldn't ask crates.io for $crate's releases"
+    elif [ -n "$in_series" ] && [ "$in_series" != "$base" ]; then
+        news="$crate $in_series is out: rebase the branch onto it"
+    elif [ "$newest" != "$base" ]; then
+        news="$crate $newest is out: rebase onto it when the app moves to it"
+    else
+        news="on $crate's newest release"
+    fi
+    m=$(mark "fork:$repo" "$head $newest")
+    printf '%s %-30s %-20s %s\n' "$m" "$repo" "$branch" "$news"
     printf '         %s\n' "$(why_of "$line")"
 done
 
