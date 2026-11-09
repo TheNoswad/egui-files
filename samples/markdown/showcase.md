@@ -593,9 +593,9 @@ this is not a diagram
 
 ## Not rendered yet
 
-Raw HTML comes later.
+Inline HTML: <kbd>Ctrl</kbd>+<kbd>C</kbd>, H<sub>2</sub>O, x<sup>2</sup>, and a<br>break. <b>Bold</b>, <i>italic</i>, <u>underlined</u>, <del>gone</del>, <mark>marked</mark>, <code>code</code>, <font color="red">an unknown tag</font>, a comment<!-- hidden --> and <a href="other.md">a link</a>. An image: <img src="pics/small.png" alt="Small" width="32">, and <a id="html-anchor"></a>[a link to an anchor](#html-anchor).
 
-Inline HTML: <kbd>Ctrl</kbd>+<kbd>C</kbd>, H<sub>2</sub>O, x<sup>2</sup>, and a<br>break.
+<img src="pics/wide.png" alt="Half the page, on its own" width="50%">
 
 Block HTML:
 

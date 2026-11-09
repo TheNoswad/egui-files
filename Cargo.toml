@@ -52,6 +52,8 @@ fontdb = "0.24"
 # SVG pictures: "Open with" icons, and images in markdown documents.
 resvg = "0.49"
 pulldown-cmark = { version = "0.13", default-features = false }
+# Raw HTML in markdown documents (see src/markdown/html.rs).
+html5gum = "0.9"
 # Formulas and diagrams in markdown documents (see src/markdown/math.rs, diagram.rs).
 katex-native = "0.1.1"
 mermaid-rs-renderer = { version = "0.3.1", default-features = false }

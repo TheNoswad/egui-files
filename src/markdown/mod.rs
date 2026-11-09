@@ -8,6 +8,7 @@ pub mod block_edit;
 pub mod diagram;
 pub mod drawing;
 pub mod format;
+pub mod html;
 pub mod images;
 pub mod layout;
 pub mod links;

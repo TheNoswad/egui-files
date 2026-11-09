@@ -998,6 +998,7 @@ dependencies = [
  "fontdb 0.24.0",
  "freedesktop-icons",
  "glow",
+ "html5gum",
  "image",
  "jni",
  "js-sys",
@@ -1836,6 +1837,12 @@ checksum = "cc627f471c528ff0c4a49e1d5e60450c8f6461dd6d10ba9dcd3a61d3dff7728d"
 dependencies = [
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "html5gum"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "469fd7ad11d167b79385adccbba0fae87a50a9adb0c081e8ce7b130faa51f3bb"
 
 [[package]]
 name = "http"

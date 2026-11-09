@@ -392,6 +392,14 @@ fn tidy(change: &mut Change, place: usize) {
         .or_else(|| {
             let close = after.strip_prefix("](")?.find(')')? + 2;
             before.ends_with('[').then(|| place - 1..place + close + 1)
+        })
+        .or_else(|| {
+            let len = after.strip_prefix("</")?.find('>')? + 2;
+            let open = before.rfind('<')?;
+            let tag = before[open + 1..].strip_suffix('>')?;
+            let name = tag.split_whitespace().next()?;
+            name.eq_ignore_ascii_case(&after[2..len])
+                .then(|| open..place + len + 1)
         });
     let Some(empty) = empty else {
         return;
@@ -413,12 +421,27 @@ fn block_end(text: &str, field: &Editable) -> usize {
     high + line.trim_end().len()
 }
 
+/// Where HTML tags start, among those right before `end`.
+fn before_tags(text: &str, end: usize) -> usize {
+    let mut end = end;
+    while let Some(head) = text[..end].strip_suffix('>')
+        && let Some(open) = head.rfind(['<', '\n'])
+        && text[open + 1..].starts_with(|c: char| c.is_ascii_alphabetic() || c == '/')
+        && text.as_bytes()[open] == b'<'
+    {
+        end = open;
+    }
+    end
+}
+
 /// The markup at the start of a field's line, that Backspace takes first: the
 /// last of it, so that a list in a quote stays in the quote.
 fn marker(text: &str, field: &Editable) -> Option<Range<usize>> {
     let low = field.low().min(text.len());
     let line = text[..low].rfind('\n').map_or(0, |at| at + 1);
-    let prefix = &text[line..low];
+    // HTML tags are a part of the text's styling, and stay.
+    let end = before_tags(text, low).max(line);
+    let prefix = &text[line..end];
     let trimmed = prefix.trim_end();
     if trimmed.is_empty() {
         return None;
@@ -433,7 +456,7 @@ fn marker(text: &str, field: &Editable) -> Option<Range<usize>> {
             .rfind(|c: char| c.is_whitespace() || c == '>')
             .map_or(0, |at| at + 1)
     };
-    Some(line + token..low)
+    Some(line + token..end)
 }
 
 /// Whether two fields are neighbors with nothing but blank lines and the
@@ -496,7 +519,11 @@ pub fn backspace(text: &str, fields: &[&Editable], cursor: usize) -> Option<Chan
     {
         let from = block_end(text, previous);
         return Some(Change {
-            text: format!("{}{}", &text[..from], &text[field.low()..]),
+            text: format!(
+                "{}{}",
+                &text[..from],
+                &text[before_tags(text, field.low())..]
+            ),
             cursor: from,
         });
     }
@@ -867,6 +894,30 @@ mod tests {
         let change = backspace(text, &fields, 4).unwrap();
         assert_eq!(change.text, "# A\n\n> next\n");
         assert_eq!(change.cursor, 3);
+    }
+
+    #[test]
+    fn html_tags_left_empty_go() {
+        let text = "a <kbd>x</kbd> c";
+        let field = field(text, "x", FieldKind::Inline);
+        let change = backspace(text, &[&field], 8).expect("a change");
+        assert_eq!((change.text.as_str(), change.cursor), ("a  c", 2));
+    }
+
+    #[test]
+    fn backspace_at_the_start_keeps_html_tags() {
+        let text = "z\n\n<kbd>y</kbd>";
+        let (first, second) = (
+            field(text, "z", FieldKind::Inline),
+            field(text, "y", FieldKind::Inline),
+        );
+        let change = backspace(text, &[&first, &second], 8).expect("a change");
+        assert_eq!(change.text, "z<kbd>y</kbd>");
+
+        let text = "> <kbd>y</kbd>";
+        let only = field(text, "y", FieldKind::Inline);
+        let change = backspace(text, &[&only], 7).expect("a change");
+        assert_eq!(change.text, "<kbd>y</kbd>");
     }
 
     #[test]

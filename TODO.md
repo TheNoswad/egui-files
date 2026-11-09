@@ -81,7 +81,7 @@ Trims and converts with the user's own ffmpeg, so the app ships no codecs (`src/
 
 - [ ] Pasting files and pictures (`system_clipboard.rs`), in the file browser and documents: the whole path only tried on X11, and reading the clipboard on KWin Wayland; check Ctrl+V on Wayland and Windows. Android and the browser can't read it: there, pictures come by dropping or the toolbar's template
 - [ ] Pinch-to-zoom in a picture's lightbox on a touchscreen is untested
-- [ ] Raw HTML shows as written (`BlockKind::Html`), so READMEs' screenshots and badges come out as source, ours included. Draw what they commonly use: hide comments; `<img>`, and `<picture>` with the `<source>` for the app's theme; `<br>`, `<p align>`, simple `<table>`s. The rest stays as written
+- [ ] Raw HTML shows as written (`BlockKind::Html`), so READMEs' screenshots and badges come out as source, ours included. What's in a line of text is drawn now. Still to come: `<picture>` with the `<source>` for the app's theme, `<p align>`, simple `<table>`s and the other block tags
 - [ ] Formulas that define macros aren't drawn: an argument doubling itself reaches gigabytes in a second, past KaTeX's limit on expansions, and macros can hide nesting that overflows the stack, which can't be caught. To allow them, KaTeX needs limits on what expansions produce and on depth (`math::refusal`)
 - [ ] Automatic equation numbers (`align`, `equation`) start over in each formula; `layout_numbered` can continue them, once a formula's key can depend on those before it
 - [ ] Formulas and diagrams aren't found by find, and copy as spaces when selected: copy their source
@@ -92,7 +92,7 @@ Trims and converts with the user's own ffmpeg, so the app ships no codecs (`src/
 - [ ] WYSIWYG, what isn't editable on the page: callout titles and frontmatter (double-click them), and empty table cells, which have no place in the source to go by
 - [ ] WYSIWYG: text being composed with an input method only shows once it's committed; check an IME, and the on-screen keyboard on Android and phones (only tried with a keyboard, on X11 and in Firefox)
 - [ ] WYSIWYG: the setting for what "Edit" opens has no place in the settings to choose this mode (`Prefs::edit_mode`); find looks through the source there, as in Split
-- [ ] Raw HTML: a subset (img, br, details/summary, kbd, sub/sup, center); shown as written, dimmed, until then
+- [ ] Raw HTML: blocks (div, p, center, headings, lists, details/summary, tables, picture) are shown as written, dimmed, until they're drawn
 - [ ] Export (HTML, rich text, PDF)
 - [ ] Right-to-left text (Hebrew, Arabic) isn't ordered: letters are shaped, but lines read left to right. egui has no bidi. See "Characters" in `samples/markdown/showcase.md`
 - [ ] Emoji are monochrome, and flags don't work: egui has no color fonts

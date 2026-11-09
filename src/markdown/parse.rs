@@ -8,6 +8,8 @@ use pulldown_cmark::{
     Options, Parser, Tag, TagEnd,
 };
 
+use super::html::{self, Length, Piece};
+
 /// Containers nested deeper than this are flattened: `>>>>…` a thousand times
 /// mustn't overflow the stack, here or in the layout.
 const MAX_DEPTH: usize = 32;
@@ -79,6 +81,8 @@ pub enum BlockKind {
     Frontmatter(Vec<(String, String)>),
     /// Shown as it's written, for now.
     Html(String),
+    /// Raw HTML that makes a line of text. Drawn, but edited as its source.
+    HtmlText(Inlines),
     /// `$$…$$` alone in a paragraph.
     Math(String),
 }
@@ -128,9 +132,13 @@ pub struct Inlines {
     pub images: Vec<InlineImage>,
     /// Footnotes referred to here, with where in `text`, to jump back to.
     pub footnote_refs: Vec<String>,
+    /// What raw HTML here names with `id`, for links to go to.
+    pub anchors: Vec<String>,
     /// Where the text's first line ends, as a callout's title does.
     first_break: Option<usize>,
     has_display_math: bool,
+    /// What's pushed next comes after an HTML tag.
+    after_html: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -141,6 +149,10 @@ pub struct Run {
     pub source: Range<usize>,
     pub style: Style,
     pub link: Option<Link>,
+    /// An HTML tag comes before it. Runs aren't joined over one: where a
+    /// run's chars came from is looked for in its stretch of source, and a
+    /// tag's name mustn't be taken for them.
+    after_html: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -148,13 +160,14 @@ pub struct Style {
     pub bold: bool,
     pub italic: bool,
     pub strike: bool,
+    pub underline: bool,
     pub code: bool,
     pub math: bool,
     pub highlight: bool,
     pub tag: bool,
     pub sup: bool,
     pub sub: bool,
-    /// Raw HTML, shown as written.
+    /// Stands for an HTML tag rather than being in the source itself.
     pub html: bool,
     pub footnote_ref: bool,
 }
@@ -176,6 +189,9 @@ pub struct InlineImage {
     pub at: usize,
     /// The whole of it, in the source.
     pub source: Range<usize>,
+    /// The size its HTML tag asks for.
+    pub width: Option<Length>,
+    pub height: Option<Length>,
 }
 
 /// How much there is to read.
@@ -215,9 +231,9 @@ impl Stats {
     fn add_blocks(&mut self, blocks: &[Block]) {
         for block in blocks {
             match &block.kind {
-                BlockKind::Paragraph(text) | BlockKind::Heading { text, .. } => {
-                    self.add(&text.text)
-                }
+                BlockKind::Paragraph(text)
+                | BlockKind::HtmlText(text)
+                | BlockKind::Heading { text, .. } => self.add(&text.text),
                 BlockKind::Code { code, .. } => self.add(code),
                 BlockKind::Quote { callout, children } => {
                     if let Some(callout) = callout {
@@ -273,10 +289,12 @@ impl Inlines {
         let start = self.text.len();
         self.text.push_str(text);
         let end = self.text.len();
+        let after_html = std::mem::take(&mut self.after_html);
         if let Some(last) = self.runs.last_mut()
             && last.range.end == start
             && last.style == style
             && last.link.as_ref() == link
+            && !after_html
         {
             last.range.end = end;
             last.source.end = last.source.end.max(source.end);
@@ -287,7 +305,19 @@ impl Inlines {
             source,
             style,
             link: link.cloned(),
+            after_html,
         });
+    }
+
+    /// A `<br>` ending a paragraph, which makes no line in browsers either.
+    fn drop_last_html_break(&mut self) {
+        let Some(run) = self.runs.last() else {
+            return;
+        };
+        if run.style.html && self.text[run.range.clone()] == *"\n" {
+            self.text.truncate(run.range.start);
+            self.runs.pop();
+        }
     }
 
     /// The plain text, without images, for headings' slugs and the like.
@@ -476,7 +506,13 @@ impl Builder<'_> {
                     code: self.raw_text(TagEnd::CodeBlock),
                 }
             }
-            Tag::HtmlBlock => BlockKind::Html(self.raw_text(TagEnd::HtmlBlock)),
+            Tag::HtmlBlock => {
+                let html = self.raw_text(TagEnd::HtmlBlock);
+                match self.html_block(html, &range) {
+                    Some(kind) => kind,
+                    None => return,
+                }
+            }
             Tag::MetadataBlock(kind) => {
                 let raw = self.raw_text(TagEnd::MetadataBlock(kind));
                 BlockKind::Frontmatter(frontmatter(&raw, kind))
@@ -603,11 +639,128 @@ impl Builder<'_> {
         text
     }
 
+    /// What a block of HTML shows as, if anything: nothing if it's comments.
+    fn html_block(&mut self, html: String, range: &Range<usize>) -> Option<BlockKind> {
+        let pieces = html::pieces(&html);
+        let is_block = |piece: &Piece| match piece {
+            Piece::Open(tag) => html::is_block_tag(&tag.name),
+            Piece::Close(name) => html::is_block_tag(name),
+            Piece::Text(_) => false,
+        };
+        if pieces.iter().any(is_block) {
+            return Some(BlockKind::Html(html));
+        }
+        let mut out = Inlines::default();
+        let mut open = html::Open::default();
+        // White space between words, seen but not yet put down.
+        let mut space = false;
+        for piece in pieces {
+            if let Piece::Text(text) = &piece {
+                if open.hidden() {
+                    continue;
+                }
+                let words = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                let (before, after) = (
+                    text.starts_with(char::is_whitespace),
+                    text.ends_with(char::is_whitespace),
+                );
+                if words.is_empty() {
+                    space |= !text.is_empty();
+                    continue;
+                }
+                space |= before;
+                put_space(&mut space, &mut out, &open, range);
+                out.push(
+                    &words,
+                    range.clone(),
+                    open.apply(Style::default()),
+                    open.link(),
+                );
+                space = after;
+                continue;
+            }
+            if matches!(&piece, Piece::Open(_)) {
+                put_space(&mut space, &mut out, &open, range);
+            }
+            self.html_piece(piece, range, &mut out, &mut open, Style::default(), None);
+        }
+        out.drop_last_html_break();
+        (!out.is_empty()).then_some(BlockKind::HtmlText(out))
+    }
+
+    /// One tag of raw HTML in a line of text. `marks` is the style markdown
+    /// gives the text here, and `link` the link it's in.
+    fn html_piece(
+        &mut self,
+        piece: Piece,
+        range: &Range<usize>,
+        out: &mut Inlines,
+        open: &mut html::Open,
+        marks: Style,
+        link: Option<&Link>,
+    ) {
+        let tag = match piece {
+            Piece::Close(name) => return open.close(&name),
+            _ if open.hidden() => return,
+            Piece::Text(text) => {
+                let link = open.link().or(link);
+                return out.push(&text, range.clone(), open.apply(marks), link);
+            }
+            Piece::Open(tag) => tag,
+        };
+        let style = open.apply(marks);
+        let id = tag
+            .attribute("id")
+            .or_else(|| tag.attribute("name").filter(|_| tag.name == "a"));
+        out.anchors.extend(id.map(str::to_owned));
+        match tag.name.as_str() {
+            "br" => {
+                out.first_break.get_or_insert(out.text.len());
+                let style = Style {
+                    html: true,
+                    ..style
+                };
+                out.push("\n", range.clone(), style, open.link().or(link));
+            }
+            "img" => {
+                let Some(src) = tag.attribute("src") else {
+                    return;
+                };
+                self.document.has_remote_images |= is_remote(src);
+                out.images.push(InlineImage {
+                    url: src.to_owned(),
+                    alt: tag.attribute("alt").unwrap_or_default().to_owned(),
+                    title: tag.attribute("title").unwrap_or_default().to_owned(),
+                    at: out.text.len(),
+                    source: range.clone(),
+                    width: tag.attribute("width").and_then(Length::parse),
+                    height: tag.attribute("height").and_then(Length::parse),
+                });
+                let mut placeholder = [0; 4];
+                // Code is left as it is by `extras`, which an image can't be.
+                let style = Style {
+                    code: false,
+                    ..style
+                };
+                let link = open.link().or(link);
+                out.push(
+                    IMAGE_CHAR.encode_utf8(&mut placeholder),
+                    range.clone(),
+                    style,
+                    link,
+                );
+            }
+            _ => open.open(&tag),
+        }
+    }
+
     /// Inline content up to `end` (which it consumes); without one, up to
     /// the next block, as in a tight list's item.
     fn inlines(&mut self, end: Option<TagEnd>) -> Inlines {
         let mut out = Inlines::default();
-        let mut style = Style::default();
+        // The style markdown gives the text here, and what raw HTML adds.
+        let mut marks = Style::default();
+        let mut open = html::Open::default();
         // How many of each are open, as they nest and may repeat.
         let (mut bold, mut italic, mut strike, mut sup, mut sub) = (0, 0, 0, 0, 0);
         let mut links: Vec<Link> = Vec::new();
@@ -624,7 +777,23 @@ impl Builder<'_> {
                     self.events.next();
                 }
             }
-            let link = links.last();
+            let link = open.link().or(links.last());
+            let style = open.apply(marks);
+            // What's in `<style>` and the like isn't to be seen.
+            if open.hidden()
+                && matches!(
+                    event,
+                    Event::Text(_)
+                        | Event::Code(_)
+                        | Event::InlineMath(_)
+                        | Event::DisplayMath(_)
+                        | Event::SoftBreak
+                        | Event::HardBreak
+                        | Event::FootnoteReference(_)
+                )
+            {
+                continue;
+            }
             let event_kind = if matches!(event, Event::DisplayMath(_)) {
                 MathKind::Display
             } else {
@@ -648,11 +817,11 @@ impl Builder<'_> {
                     out.push(&text, range, style, link);
                 }
                 Event::InlineHtml(text) | Event::Html(text) => {
-                    let style = Style {
-                        html: true,
-                        ..style
-                    };
-                    out.push(&text, range, style, link);
+                    let link = links.last();
+                    for piece in html::pieces(&text) {
+                        self.html_piece(piece, &range, &mut out, &mut open, marks, link);
+                    }
+                    out.after_html = true;
                 }
                 Event::SoftBreak => {
                     out.first_break.get_or_insert(out.text.len());
@@ -718,17 +887,20 @@ impl Builder<'_> {
                         title: title.to_string(),
                         at,
                         source: range.clone(),
+                        width: None,
+                        height: None,
                     });
                     out.push(IMAGE_CHAR.encode_utf8(&mut placeholder), range, style, link);
                 }
                 _ => {}
             }
-            style.bold = bold > 0;
-            style.italic = italic > 0;
-            style.strike = strike > 0;
-            style.sup = sup > 0;
-            style.sub = sub > 0;
+            marks.bold = bold > 0;
+            marks.italic = italic > 0;
+            marks.strike = strike > 0;
+            marks.sup = sup > 0;
+            marks.sub = sub > 0;
         }
+        out.drop_last_html_break();
         extras(&mut out);
         out
     }
@@ -759,6 +931,14 @@ impl Builder<'_> {
             self.slugs.insert(unique.clone(), 1);
             unique
         }
+    }
+}
+
+/// The white space seen between what's in a line of HTML, as one space.
+fn put_space(space: &mut bool, out: &mut Inlines, open: &html::Open, range: &Range<usize>) {
+    if std::mem::take(space) && !out.is_empty() && !out.text.ends_with('\n') {
+        let style = open.apply(Style::default());
+        out.push(" ", range.clone(), style, open.link());
     }
 }
 
@@ -960,6 +1140,7 @@ fn extras(inlines: &mut Inlines) {
     let highlights = highlight_marks(inlines, &is_plain);
     let mut out = Inlines {
         footnote_refs: std::mem::take(&mut inlines.footnote_refs),
+        anchors: std::mem::take(&mut inlines.anchors),
         has_display_math: inlines.has_display_math,
         ..Inlines::default()
     };
@@ -968,13 +1149,14 @@ fn extras(inlines: &mut Inlines) {
     let mut first_break = inlines.first_break;
     for run in &inlines.runs {
         let text = &inlines.text[run.range.clone()];
+        out.after_html = run.after_html;
         if first_break.is_some_and(|at| at == run.range.start) {
             out.first_break = Some(out.text.len());
             first_break = None;
         }
         if !is_plain(run) {
             let style = Style {
-                highlight,
+                highlight: highlight || run.style.highlight,
                 ..run.style
             };
             out.push(text, run.source.clone(), style, run.link.as_ref());
@@ -995,7 +1177,7 @@ fn extras(inlines: &mut Inlines) {
             }
             let before = inlines.text[..absolute].chars().next_back();
             let style = Style {
-                highlight,
+                highlight: highlight || run.style.highlight,
                 ..run.style
             };
             let link = run.link.as_ref();
@@ -1555,13 +1737,151 @@ mod tests {
     }
 
     #[test]
-    fn raw_html_is_kept_as_written() {
-        let doc = parse("<div>\nhi\n</div>\n\nA <kbd>b</kbd>\n");
+    fn html_blocks_with_block_tags_are_kept_as_written() {
+        let doc = parse("<div>\nhi\n</div>\n");
         assert!(matches!(&doc.blocks[0].kind, BlockKind::Html(h) if h.contains("<div>")));
-        let BlockKind::Paragraph(inlines) = &doc.blocks[1].kind else {
+    }
+
+    #[test]
+    fn inline_html_styles_the_text_between_its_tags() {
+        let doc = parse(
+            "<b>a</b> <i>b</i> <kbd>c</kbd> <sub>d</sub> <sup>e</sup> <u>f</u> <s>g</s> <mark>h</mark>",
+        );
+        let inlines = paragraph(&doc);
+        assert_eq!(inlines.text, "a b c d e f g h");
+        assert_eq!(styled(inlines, |s| s.bold), ["a"]);
+        assert_eq!(styled(inlines, |s| s.italic), ["b"]);
+        assert_eq!(styled(inlines, |s| s.code), ["c"]);
+        assert_eq!(styled(inlines, |s| s.sub), ["d"]);
+        assert_eq!(styled(inlines, |s| s.sup), ["e"]);
+        assert_eq!(styled(inlines, |s| s.underline), ["f"]);
+        assert_eq!(styled(inlines, |s| s.strike), ["g"]);
+        assert_eq!(styled(inlines, |s| s.highlight), ["h"]);
+    }
+
+    #[test]
+    fn inline_html_mixes_with_markdown() {
+        let doc = parse("**a <i>b</i>** <b>*c*</b>");
+        let inlines = paragraph(&doc);
+        assert_eq!(styled(inlines, |s| s.bold && s.italic), ["b", "c"]);
+    }
+
+    #[test]
+    fn unknown_tags_go_and_their_content_stays() {
+        let doc = parse("a <font color=red>b</font> <span>c</span>");
+        assert_eq!(paragraph(&doc).text, "a b c");
+    }
+
+    #[test]
+    fn hidden_tags_take_their_content_with_them() {
+        let doc = parse("a<style>b *c*</style>d");
+        assert_eq!(paragraph(&doc).text, "ad");
+    }
+
+    #[test]
+    fn comments_in_a_line_do_not_show() {
+        for source in ["a<!-- b -->c", "a<!-- b\nb -->c", "> a<!-- b\n> b -->c"] {
+            let doc = parse(source);
+            let inlines = match &doc.blocks[0].kind {
+                BlockKind::Quote { children, .. } => match &children[0].kind {
+                    BlockKind::Paragraph(inlines) => inlines,
+                    _ => panic!("expected a paragraph"),
+                },
+                BlockKind::Paragraph(inlines) => inlines,
+                _ => panic!("expected a paragraph"),
+            };
+            assert_eq!(inlines.text, "ac", "{source}");
+        }
+    }
+
+    #[test]
+    fn comment_blocks_are_not_blocks() {
+        let doc = parse("a\n\n<!-- b\n\nc -->\n\nd\n");
+        assert_eq!(doc.blocks.len(), 2);
+        assert_eq!(doc.stats().words, 2);
+    }
+
+    #[test]
+    fn unclosed_tags_end_with_their_paragraph() {
+        let doc = parse("<b>a\n\nb</i>\n");
+        let BlockKind::Paragraph(first) = &doc.blocks[0].kind else {
             panic!("expected a paragraph");
         };
-        assert_eq!(styled(inlines, |s| s.html), ["<kbd>", "</kbd>"]);
+        let BlockKind::Paragraph(second) = &doc.blocks[1].kind else {
+            panic!("expected a paragraph");
+        };
+        assert_eq!(styled(first, |s| s.bold), ["a"]);
+        assert!(styled(second, |s| s.bold || s.italic).is_empty());
+    }
+
+    #[test]
+    fn line_breaks_from_html() {
+        let doc = parse("a<br>b<br/>c<br>");
+        let inlines = paragraph(&doc);
+        assert_eq!(inlines.text, "a\nb\nc");
+    }
+
+    #[test]
+    fn html_links_and_anchors() {
+        let doc = parse("<a id=top></a><a href=\"x.md\" title=T>y</a> z");
+        let inlines = paragraph(&doc);
+        assert_eq!(inlines.anchors, ["top"]);
+        let link = inlines.runs[0].link.as_ref().expect("a link");
+        assert_eq!((link.url.as_str(), link.title.as_str()), ("x.md", "T"));
+        assert_eq!(inlines.runs[1].link, None);
+    }
+
+    #[test]
+    fn html_images_are_images() {
+        let doc = parse("a <a href=l><img src=\"p.png\" alt=\"P\" width=\"50%\" height=20></a>");
+        let inlines = paragraph(&doc);
+        let image = &inlines.images[0];
+        assert_eq!((image.url.as_str(), image.alt.as_str()), ("p.png", "P"));
+        assert_eq!(image.width, Some(Length::Percent(50.0)));
+        assert_eq!(image.height, Some(Length::Points(20.0)));
+        assert!(inlines.text[image.at..].starts_with(IMAGE_CHAR));
+        let run = inlines.runs.last().expect("a run");
+        assert_eq!(run.link.as_ref().map(|l| l.url.as_str()), Some("l"));
+        assert!(!doc.has_remote_images);
+        assert!(parse("a <img src=https://x/y.png>").has_remote_images);
+    }
+
+    #[test]
+    fn an_image_in_code_is_still_an_image() {
+        let doc = parse("<code><img src=a.png></code>");
+        assert_eq!(paragraph(&doc).images.len(), 1);
+    }
+
+    #[test]
+    fn runs_do_not_span_what_is_hidden() {
+        let doc = parse("x<span>a</span>y");
+        let inlines = paragraph(&doc);
+        assert_eq!(inlines.text, "xay");
+        let sources: Vec<_> = inlines.runs.iter().map(|r| r.source.clone()).collect();
+        assert_eq!(sources, [0..1, 7..8, 15..16]);
+    }
+
+    #[test]
+    fn a_block_of_html_tags_is_a_line_of_text() {
+        let doc = parse("<img src=\"a.png\">\n\n<span>\n  one\n  <b>two</b> &amp; x\n</span>\n");
+        let BlockKind::HtmlText(image) = &doc.blocks[0].kind else {
+            panic!("expected a line of HTML");
+        };
+        assert_eq!(image.images.len(), 1);
+        let BlockKind::HtmlText(text) = &doc.blocks[1].kind else {
+            panic!("expected a line of HTML");
+        };
+        assert_eq!(text.text, "one two & x");
+        assert_eq!(styled(text, |s| s.bold), ["two"]);
+    }
+
+    #[test]
+    fn markdown_in_a_line_of_html_is_literal() {
+        let doc = parse("<span>\n**a**\n</span>\n");
+        let BlockKind::HtmlText(text) = &doc.blocks[0].kind else {
+            panic!("expected a line of HTML");
+        };
+        assert_eq!(text.text, "**a**");
     }
 
     #[test]
@@ -1602,6 +1922,19 @@ mod tests {
             "é==é==é #é :é:",
             "\u{FFFC}",
             "==\u{FFFC}== ![a](b)",
+            "<",
+            "<>",
+            "</",
+            "<!--",
+            "<br",
+            "<img",
+            "<img src>",
+            "<a href>x",
+            "</a></a>",
+            "<b><i></b></i>",
+            "<script>",
+            "<img src=\u{FFFC}>\u{FFFC}",
+            "<img width=9999999999999 src=a>",
         ] {
             let _ = parse(source);
         }

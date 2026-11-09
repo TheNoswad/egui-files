@@ -21,9 +21,10 @@ use pulldown_cmark::Alignment;
 use super::{
     diagram::Colors,
     drawing::{self, svg_color},
+    html::Length,
     parse::{
-        Block, BlockKind, Callout, CalloutFold, Document, IMAGE_CHAR, Inlines, Link, Run, Style,
-        Task,
+        Block, BlockKind, Callout, CalloutFold, Document, IMAGE_CHAR, InlineImage, Inlines, Link,
+        Run, Style, Task,
     },
     wysiwyg::{self, Editable, FieldKind},
 };
@@ -1070,6 +1071,13 @@ impl Builder<'_> {
                 let style = self.body();
                 self.text(inlines, x, width, style);
             }
+            BlockKind::HtmlText(inlines) => {
+                // One unit on the page, without a cursor in it.
+                let source = self.source.take();
+                let style = self.body();
+                self.text(inlines, x, width, style);
+                self.source = source;
+            }
             BlockKind::Heading { level, slug, text } => self.heading(*level, slug, text, x, width),
             BlockKind::Code { lang, code } if lang.as_deref() == Some("mermaid") => {
                 self.diagram(code, x, width);
@@ -1847,6 +1855,9 @@ impl Builder<'_> {
         let height = images.iter().fold(galley.size().y, |height, image| {
             height.max(image.rect.max.y)
         });
+        for name in &inlines.anchors {
+            self.out.anchors.entry(name.clone()).or_insert(self.y);
+        }
         for label in &inlines.footnote_refs {
             self.out
                 .anchors
@@ -1912,10 +1923,6 @@ impl Builder<'_> {
             background = self.theme.inline_code_bg;
             expand_bg = 1.0;
         }
-        if run_style.html {
-            font = FontId::monospace((size * 0.9).round());
-            color = self.theme.weak;
-        }
         if run_style.highlight {
             background = self.theme.highlight_bg;
         }
@@ -1939,6 +1946,11 @@ impl Builder<'_> {
             background,
             expand_bg,
             strikethrough: if run_style.strike {
+                Stroke::new(1.0, color)
+            } else {
+                Stroke::NONE
+            },
+            underline: if run_style.underline {
                 Stroke::new(1.0, color)
             } else {
                 Stroke::NONE
@@ -2055,7 +2067,7 @@ impl Builder<'_> {
                 };
                 match self.images.size(&image.url) {
                     Some(size) => {
-                        let size = fit(size, width);
+                        let size = fit(asked_size(size, image, width), width);
                         // Takes up the image's room: tiny spaces, the second
                         // with room before it. egui drops the room before the
                         // first glyph of a row, hence the first.
@@ -2250,6 +2262,27 @@ fn push(job: &mut LayoutJob, text: &str, format: TextFormat) {
 }
 
 /// Scales an image down to fit a width; never up.
+/// The size an image's HTML asks for, keeping its shape if only one side is
+/// given. A percentage is of the width of the page; of the height, as in a
+/// browser with a page of no set height, it means nothing.
+fn asked_size(natural: Vec2, image: &InlineImage, width: f32) -> Vec2 {
+    let asked_width = image.width.and_then(|length| match length {
+        Length::Points(points) => Some(points),
+        Length::Percent(percent) => width.is_finite().then_some(width * percent / 100.0),
+    });
+    let asked_height = image.height.and_then(|length| match length {
+        Length::Points(points) => Some(points),
+        Length::Percent(_) => None,
+    });
+    let (wide, tall) = (natural.x.max(1.0), natural.y.max(1.0));
+    match (asked_width, asked_height) {
+        (Some(x), Some(y)) => egui::vec2(x, y),
+        (Some(x), None) => egui::vec2(x, x * tall / wide),
+        (None, Some(y)) => egui::vec2(y * wide / tall, y),
+        (None, None) => natural,
+    }
+}
+
 fn fit(size: Vec2, width: f32) -> Vec2 {
     if width.is_finite() && size.x > width && size.x > 0.0 {
         size * (width / size.x)
@@ -3003,6 +3036,63 @@ mod tests {
             .map(|span| &source[span.clone()])
             .collect();
         assert_eq!(shown, "A bold link code it no \\* &amp; end");
+    }
+
+    #[test]
+    fn html_tags_are_not_part_of_any_char() {
+        let source = "A <span>a</span> <kbd>s</kbd>x<br>y\nz\n";
+        let laid_out = fields_of(source);
+        let fields = laid_out.placed_fields();
+        assert_eq!(fields.len(), 1);
+        let shown: Vec<&str> = fields[0]
+            .field
+            .spans
+            .iter()
+            .map(|span| &source[span.clone()])
+            .collect();
+        assert_eq!(
+            shown,
+            ["A", " ", "a", " ", "s", "x", "<br>", "y", "\n", "z"]
+        );
+    }
+
+    #[test]
+    fn a_line_of_html_is_one_unit() {
+        let laid_out = fields_of("<span>\none\n</span>\n");
+        assert!(laid_out.placed_fields().is_empty());
+    }
+
+    #[test]
+    fn images_take_the_size_their_html_asks_for() {
+        let image = |width, height| InlineImage {
+            url: String::new(),
+            alt: String::new(),
+            title: String::new(),
+            at: 0,
+            source: 0..0,
+            width,
+            height,
+        };
+        let natural = egui::vec2(100.0, 50.0);
+        let asked = |width, height, page| asked_size(natural, &image(width, height), page);
+        let (points, percent) = (Length::Points(200.0), Length::Percent(50.0));
+        assert_eq!(asked(None, None, 400.0), natural);
+        assert_eq!(asked(Some(points), None, 400.0), egui::vec2(200.0, 100.0));
+        assert_eq!(asked(None, Some(points), 400.0), egui::vec2(400.0, 200.0));
+        assert_eq!(asked(Some(percent), None, 400.0), egui::vec2(200.0, 100.0));
+        assert_eq!(
+            asked(Some(points), Some(Length::Points(10.0)), 400.0),
+            egui::vec2(200.0, 10.0)
+        );
+        // A percentage of nothing, as when measuring a table's columns.
+        assert_eq!(asked(Some(percent), None, f32::INFINITY), natural);
+        assert_eq!(asked(None, Some(percent), 400.0), natural);
+    }
+
+    #[test]
+    fn an_anchor_in_html_can_be_gone_to() {
+        let laid_out = fields_of("first\n\n<a id=\"here\"></a>second\n");
+        assert!(laid_out.anchors["here"] > 0.0);
     }
 
     #[test]
