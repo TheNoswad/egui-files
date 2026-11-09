@@ -8,7 +8,7 @@ use pulldown_cmark::{
     Options, Parser, Tag, TagEnd,
 };
 
-use super::html::{self, Length, Piece};
+use super::html::{self, Align, Length, Piece};
 
 /// Containers nested deeper than this are flattened: `>>>>…` a thousand times
 /// mustn't overflow the stack, here or in the layout.
@@ -79,10 +79,15 @@ pub enum BlockKind {
     Rule,
     /// A YAML or TOML block at the top of the file.
     Frontmatter(Vec<(String, String)>),
-    /// Shown as it's written, for now.
+    /// HTML with tags that aren't drawn yet, shown as it's written.
     Html(String),
-    /// Raw HTML that makes a line of text. Drawn, but edited as its source.
-    HtmlText(Inlines),
+    /// Made from raw HTML: drawn, but edited as its source.
+    HtmlUnit(Box<Block>),
+    /// What HTML sets to one side or the center.
+    Aligned {
+        align: Align,
+        children: Vec<Block>,
+    },
     /// `$$…$$` alone in a paragraph.
     Math(String),
 }
@@ -192,6 +197,31 @@ pub struct InlineImage {
     /// The size its HTML tag asks for.
     pub width: Option<Length>,
     pub height: Option<Length>,
+    /// To one side on its own line, from `align` in its HTML tag.
+    pub align: Option<Align>,
+    /// The `<source>` of its `<picture>` for each theme.
+    pub dark_url: Option<String>,
+    pub light_url: Option<String>,
+}
+
+impl InlineImage {
+    /// What to show in this theme, if anything: a page may have one image for
+    /// each, marked as GitHub has them.
+    pub fn url_for(&self, dark: bool) -> Option<&str> {
+        let themed = if dark {
+            &self.dark_url
+        } else {
+            &self.light_url
+        };
+        let url = themed.as_deref().unwrap_or(&self.url);
+        if let Some(url) = url.strip_suffix("#gh-dark-mode-only") {
+            return dark.then_some(url);
+        }
+        if let Some(url) = url.strip_suffix("#gh-light-mode-only") {
+            return (!dark).then_some(url);
+        }
+        Some(url)
+    }
 }
 
 /// How much there is to read.
@@ -231,9 +261,11 @@ impl Stats {
     fn add_blocks(&mut self, blocks: &[Block]) {
         for block in blocks {
             match &block.kind {
-                BlockKind::Paragraph(text)
-                | BlockKind::HtmlText(text)
-                | BlockKind::Heading { text, .. } => self.add(&text.text),
+                BlockKind::Paragraph(text) | BlockKind::Heading { text, .. } => {
+                    self.add(&text.text)
+                }
+                BlockKind::HtmlUnit(block) => self.add_blocks(std::slice::from_ref(block)),
+                BlockKind::Aligned { children, .. } => self.add_blocks(children),
                 BlockKind::Code { code, .. } => self.add(code),
                 BlockKind::Quote { callout, children } => {
                     if let Some(callout) = callout {
@@ -320,6 +352,28 @@ impl Inlines {
         }
     }
 
+    /// Takes off what's from `at` on, which must be where a run starts.
+    fn split_off(&mut self, at: usize) -> Self {
+        let mut tail = Self {
+            text: self.text.split_off(at),
+            ..Self::default()
+        };
+        let first = self.runs.partition_point(|run| run.range.start < at);
+        tail.runs = self.runs.split_off(first);
+        for run in &mut tail.runs {
+            run.range = run.range.start - at..run.range.end - at;
+        }
+        let first = self.images.partition_point(|image| image.at < at);
+        tail.images = self.images.split_off(first);
+        for image in &mut tail.images {
+            image.at -= at;
+        }
+        if self.first_break.is_some_and(|line| line >= at) {
+            tail.first_break = self.first_break.take().map(|line| line - at);
+        }
+        tail
+    }
+
     /// The plain text, without images, for headings' slugs and the like.
     pub fn plain(&self) -> String {
         self.text.replace(IMAGE_CHAR, "")
@@ -366,6 +420,10 @@ pub fn parse(source: &str) -> Document {
             blocks,
         })
         .collect();
+    // HTML's are found after the markdown's around them.
+    document
+        .headings
+        .sort_by_key(|heading| heading.source.start);
     // Footnotes nothing refers to go last, numbered after the others.
     footnotes.sort_by_key(|f| f.number);
     let referred = footnotes.iter().filter(|f| f.number != usize::MAX).count();
@@ -407,8 +465,9 @@ struct Builder<'a> {
 }
 
 impl Builder<'_> {
-    /// Blocks until the `end` tag, which it consumes (or the end of the text).
-    fn blocks(&mut self, end: Option<TagEnd>, depth: usize) -> Vec<Block> {
+    /// Blocks until the `end` tag, which it consumes (or the end of the text),
+    /// with blocks of HTML as they're written.
+    fn flat_blocks(&mut self, end: Option<TagEnd>, depth: usize) -> Vec<Block> {
         let mut blocks = Vec::new();
         // Ends of containers flattened for being too deep.
         let mut flattened = Vec::new();
@@ -506,13 +565,7 @@ impl Builder<'_> {
                     code: self.raw_text(TagEnd::CodeBlock),
                 }
             }
-            Tag::HtmlBlock => {
-                let html = self.raw_text(TagEnd::HtmlBlock);
-                match self.html_block(html, &range) {
-                    Some(kind) => kind,
-                    None => return,
-                }
-            }
+            Tag::HtmlBlock => BlockKind::Html(self.raw_text(TagEnd::HtmlBlock)),
             Tag::MetadataBlock(kind) => {
                 let raw = self.raw_text(TagEnd::MetadataBlock(kind));
                 BlockKind::Frontmatter(frontmatter(&raw, kind))
@@ -639,53 +692,279 @@ impl Builder<'_> {
         text
     }
 
-    /// What a block of HTML shows as, if anything: nothing if it's comments.
-    fn html_block(&mut self, html: String, range: &Range<usize>) -> Option<BlockKind> {
+    /// Blocks until the `end` tag, with the HTML among them made into what
+    /// it says: a tag may be opened in one block and closed some blocks on,
+    /// with markdown between them, so this can only be done with all of them.
+    fn blocks(&mut self, end: Option<TagEnd>, depth: usize) -> Vec<Block> {
+        let mut nest = HtmlNest::default();
+        for block in self.flat_blocks(end, depth) {
+            nest.end = nest.end.max(block.source.end);
+            match block.kind {
+                BlockKind::Html(html) => self.html_block(html, block.source, &mut nest, depth),
+                BlockKind::Paragraph(inlines) if has_aligned_image(&inlines) => {
+                    for piece in split_aligned_images(inlines, &block.source) {
+                        nest.push(piece);
+                    }
+                }
+                kind => nest.push(Block {
+                    source: block.source,
+                    kind,
+                }),
+            }
+        }
+        while !nest.frames.is_empty() {
+            self.close_frame(&mut nest);
+        }
+        nest.blocks
+    }
+
+    /// One block of HTML, whose tags may leave things open for those after it.
+    fn html_block(&mut self, html: String, range: Range<usize>, nest: &mut HtmlNest, depth: usize) {
         let pieces = html::pieces(&html);
-        let is_block = |piece: &Piece| match piece {
-            Piece::Open(tag) => html::is_block_tag(&tag.name),
-            Piece::Close(name) => html::is_block_tag(name),
+        let is_later = |piece: &Piece| match piece {
+            Piece::Open(tag) => html::is_undrawn_tag(&tag.name),
+            Piece::Close(name) => html::is_undrawn_tag(name),
             Piece::Text(_) => false,
         };
-        if pieces.iter().any(is_block) {
-            return Some(BlockKind::Html(html));
+        if pieces.iter().any(is_later) {
+            return nest.push(Block {
+                source: range,
+                kind: BlockKind::Html(html),
+            });
         }
-        let mut out = Inlines::default();
-        let mut open = html::Open::default();
-        // White space between words, seen but not yet put down.
-        let mut space = false;
         for piece in pieces {
-            if let Piece::Text(text) = &piece {
-                if open.hidden() {
-                    continue;
+            let in_pre = matches!(
+                nest.frames.last(),
+                Some(HtmlFrame {
+                    kind: FrameKind::Pre { .. },
+                    ..
+                })
+            );
+            match piece {
+                Piece::Open(tag) if html::is_block_tag(&tag.name) => {
+                    self.flush_html_text(nest, &range);
+                    self.open_frame(tag, &range, nest, depth);
                 }
-                let words = text.split_whitespace().collect::<Vec<_>>().join(" ");
-                let (before, after) = (
-                    text.starts_with(char::is_whitespace),
-                    text.ends_with(char::is_whitespace),
-                );
-                if words.is_empty() {
-                    space |= !text.is_empty();
-                    continue;
+                Piece::Close(name) if html::is_block_tag(&name) => {
+                    self.flush_html_text(nest, &range);
+                    if let Some(index) = nest.frames.iter().rposition(|frame| frame.name == name) {
+                        nest.end = nest.end.max(range.end);
+                        while nest.frames.len() > index {
+                            self.close_frame(nest);
+                        }
+                    }
                 }
-                space |= before;
-                put_space(&mut space, &mut out, &open, range);
-                out.push(
-                    &words,
-                    range.clone(),
-                    open.apply(Style::default()),
-                    open.link(),
-                );
-                space = after;
-                continue;
+                Piece::Text(text) if in_pre => {
+                    if let Some(HtmlFrame {
+                        kind: FrameKind::Pre { code, .. },
+                        ..
+                    }) = nest.frames.last_mut()
+                    {
+                        code.push_str(&text);
+                    }
+                }
+                _ if in_pre => {}
+                Piece::Text(text) => nest.text(&text, &range),
+                piece => {
+                    if matches!(&piece, Piece::Open(_)) {
+                        nest.put_space(&range);
+                    }
+                    let open = &mut nest.open;
+                    self.html_piece(piece, &range, &mut nest.line, open, Style::default(), None);
+                }
             }
-            if matches!(&piece, Piece::Open(_)) {
-                put_space(&mut space, &mut out, &open, range);
-            }
-            self.html_piece(piece, range, &mut out, &mut open, Style::default(), None);
         }
-        out.drop_last_html_break();
-        (!out.is_empty()).then_some(BlockKind::HtmlText(out))
+        self.flush_html_text(nest, &range);
+    }
+
+    /// Text gathered so far becomes a block, unless a heading is collecting it.
+    fn flush_html_text(&mut self, nest: &mut HtmlNest, range: &Range<usize>) {
+        if matches!(
+            nest.frames.last(),
+            Some(HtmlFrame {
+                kind: FrameKind::Heading { .. },
+                ..
+            })
+        ) {
+            return;
+        }
+        nest.space = false;
+        let mut line = std::mem::take(&mut nest.line);
+        line.drop_last_html_break();
+        if line.is_empty() {
+            return;
+        }
+        for piece in split_aligned_images(line, range) {
+            nest.push(Block {
+                source: range.clone(),
+                kind: BlockKind::HtmlUnit(Box::new(piece)),
+            });
+        }
+    }
+
+    fn open_frame(
+        &mut self,
+        tag: html::Tag,
+        range: &Range<usize>,
+        nest: &mut HtmlNest,
+        depth: usize,
+    ) {
+        // A block ends the paragraph it's in, and an item the item before.
+        if nest.frames.last().is_some_and(|frame| frame.name == "p") {
+            self.close_frame(nest);
+        }
+        if tag.name == "li" {
+            let list = nest
+                .frames
+                .iter()
+                .rposition(|frame| matches!(frame.kind, FrameKind::List { .. }))
+                .map_or(0, |at| at + 1);
+            if let Some(at) = nest.frames[list..].iter().position(|f| f.name == "li") {
+                while nest.frames.len() > list + at {
+                    self.close_frame(nest);
+                }
+            }
+        }
+        if tag.name == "hr" {
+            return nest.push(Block {
+                source: range.clone(),
+                kind: BlockKind::Rule,
+            });
+        }
+        // As with markdown's containers, there's a limit to how deep it goes.
+        if depth + nest.frames.len() >= MAX_DEPTH {
+            return;
+        }
+        let kind = match tag.name.as_str() {
+            "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => FrameKind::Heading {
+                level: tag.name.as_bytes()[1] - b'0',
+                id: tag.attribute("id").map(str::to_owned),
+            },
+            "ul" | "dir" | "menu" => FrameKind::List { start: None },
+            "ol" => FrameKind::List {
+                start: Some(
+                    tag.attribute("start")
+                        .and_then(|start| start.trim().parse().ok())
+                        .unwrap_or(1),
+                ),
+            },
+            "li" => FrameKind::Item,
+            "blockquote" => FrameKind::Quote,
+            "pre" => FrameKind::Pre {
+                lang: tag.attribute("lang").map(str::to_owned),
+                code: String::new(),
+            },
+            _ => FrameKind::Container,
+        };
+        let align = match tag.name.as_str() {
+            "center" => Some(Align::Center),
+            _ => tag.attribute("align").and_then(Align::parse),
+        };
+        nest.frames.push(HtmlFrame {
+            name: tag.name,
+            kind,
+            align,
+            start: range.start,
+            children: Vec::new(),
+            items: Vec::new(),
+        });
+    }
+
+    fn close_frame(&mut self, nest: &mut HtmlNest) {
+        let Some(frame) = nest.frames.pop() else {
+            return;
+        };
+        let source = frame.start..nest.end.max(frame.start);
+        let mut children = frame.children;
+        let kind = match frame.kind {
+            FrameKind::Container => None,
+            FrameKind::Heading { level, id } => {
+                let text = std::mem::take(&mut nest.line);
+                nest.space = false;
+                (!text.is_empty()).then(|| self.html_heading(level, id, text, &source))
+            }
+            FrameKind::List { start } => {
+                let mut items = frame.items;
+                // Whatever's in a list outside its items.
+                if !children.is_empty() {
+                    items.push(ListItem {
+                        source: source.clone(),
+                        task: None,
+                        children: std::mem::take(&mut children),
+                    });
+                }
+                (!items.is_empty()).then_some(BlockKind::List { start, items })
+            }
+            FrameKind::Item => {
+                if let Some(HtmlFrame {
+                    kind: FrameKind::List { .. },
+                    items,
+                    ..
+                }) = nest.frames.last_mut()
+                {
+                    items.push(ListItem {
+                        source,
+                        task: None,
+                        children,
+                    });
+                    return;
+                }
+                None
+            }
+            FrameKind::Quote => Some(BlockKind::Quote {
+                callout: None,
+                children: std::mem::take(&mut children),
+            }),
+            FrameKind::Pre { lang, code } => {
+                let code = code.strip_prefix('\n').unwrap_or(&code).to_owned();
+                Some(BlockKind::HtmlUnit(Box::new(Block {
+                    source: source.clone(),
+                    kind: BlockKind::Code { lang, code },
+                })))
+            }
+        };
+        let mut blocks: Vec<Block> = kind
+            .map(|kind| Block {
+                source: source.clone(),
+                kind: match kind {
+                    heading @ BlockKind::Heading { .. } => BlockKind::HtmlUnit(Box::new(Block {
+                        source: source.clone(),
+                        kind: heading,
+                    })),
+                    kind => kind,
+                },
+            })
+            .into_iter()
+            .collect();
+        blocks.append(&mut children);
+        match frame.align {
+            Some(align) if !blocks.is_empty() => nest.push(Block {
+                source,
+                kind: BlockKind::Aligned {
+                    align,
+                    children: blocks,
+                },
+            }),
+            _ => blocks.into_iter().for_each(|block| nest.push(block)),
+        }
+    }
+
+    fn html_heading(
+        &mut self,
+        level: u8,
+        id: Option<String>,
+        text: Inlines,
+        source: &Range<usize>,
+    ) -> BlockKind {
+        let plain = text.plain();
+        let slug = self.unique_slug(id.unwrap_or_else(|| slug(&plain)));
+        self.document.headings.push(Heading {
+            level,
+            text: plain,
+            slug: slug.clone(),
+            source: source.clone(),
+        });
+        BlockKind::Heading { level, slug, text }
     }
 
     /// One tag of raw HTML in a line of text. `marks` is the style markdown
@@ -722,11 +1001,24 @@ impl Builder<'_> {
                 };
                 out.push("\n", range.clone(), style, open.link().or(link));
             }
+            "picture" => open.start_picture(),
+            "source" => open.picture_source(&tag),
             "img" => {
                 let Some(src) = tag.attribute("src") else {
                     return;
                 };
-                self.document.has_remote_images |= is_remote(src);
+                let (dark_url, light_url) = open.picture_urls();
+                self.document.has_remote_images |= is_remote(src)
+                    || [&dark_url, &light_url]
+                        .into_iter()
+                        .flatten()
+                        .any(|url| is_remote(url));
+                let align = tag
+                    .attribute("align")
+                    .and_then(Align::parse)
+                    .filter(|align| *align != Align::Center);
+                // On its own, it can be taken out of the line.
+                out.after_html |= align.is_some();
                 out.images.push(InlineImage {
                     url: src.to_owned(),
                     alt: tag.attribute("alt").unwrap_or_default().to_owned(),
@@ -735,6 +1027,9 @@ impl Builder<'_> {
                     source: range.clone(),
                     width: tag.attribute("width").and_then(Length::parse),
                     height: tag.attribute("height").and_then(Length::parse),
+                    align,
+                    dark_url,
+                    light_url,
                 });
                 let mut placeholder = [0; 4];
                 // Code is left as it is by `extras`, which an image can't be.
@@ -749,6 +1044,7 @@ impl Builder<'_> {
                     style,
                     link,
                 );
+                out.after_html |= align.is_some();
             }
             _ => open.open(&tag),
         }
@@ -889,6 +1185,9 @@ impl Builder<'_> {
                         source: range.clone(),
                         width: None,
                         height: None,
+                        align: None,
+                        dark_url: None,
+                        light_url: None,
                     });
                     out.push(IMAGE_CHAR.encode_utf8(&mut placeholder), range, style, link);
                 }
@@ -934,12 +1233,130 @@ impl Builder<'_> {
     }
 }
 
-/// The white space seen between what's in a line of HTML, as one space.
-fn put_space(space: &mut bool, out: &mut Inlines, open: &html::Open, range: &Range<usize>) {
-    if std::mem::take(space) && !out.is_empty() && !out.text.ends_with('\n') {
-        let style = open.apply(Style::default());
-        out.push(" ", range.clone(), style, open.link());
+#[derive(Debug)]
+enum FrameKind {
+    /// Holds blocks, and maybe sets them to one side.
+    Container,
+    Heading {
+        level: u8,
+        id: Option<String>,
+    },
+    List {
+        start: Option<u64>,
+    },
+    Item,
+    Quote,
+    Pre {
+        lang: Option<String>,
+        code: String,
+    },
+}
+
+/// A block tag that's open.
+#[derive(Debug)]
+struct HtmlFrame {
+    name: String,
+    kind: FrameKind,
+    align: Option<Align>,
+    start: usize,
+    children: Vec<Block>,
+    items: Vec<ListItem>,
+}
+
+/// HTML's blocks being put together, over the blocks of a markdown container.
+#[derive(Default)]
+struct HtmlNest {
+    blocks: Vec<Block>,
+    frames: Vec<HtmlFrame>,
+    /// The line of text being gathered.
+    line: Inlines,
+    open: html::Open,
+    /// White space between words, seen but not yet put down.
+    space: bool,
+    /// How far the source has been read.
+    end: usize,
+}
+
+impl HtmlNest {
+    fn push(&mut self, block: Block) {
+        match self.frames.last_mut() {
+            Some(frame) => frame.children.push(block),
+            None => self.blocks.push(block),
+        }
     }
+
+    fn line_ends_with_aligned_image(&self) -> bool {
+        self.line.images.last().is_some_and(|image| {
+            image.align.is_some() && image.at + IMAGE_CHAR.len_utf8() == self.line.text.len()
+        })
+    }
+
+    /// The white space seen between what's in a line of HTML, as one space.
+    fn put_space(&mut self, range: &Range<usize>) {
+        if std::mem::take(&mut self.space)
+            && !self.line.is_empty()
+            && !self.line.text.ends_with('\n')
+            && !self.line_ends_with_aligned_image()
+        {
+            let style = self.open.apply(Style::default());
+            self.line.push(" ", range.clone(), style, self.open.link());
+        }
+    }
+
+    /// Text in HTML, where white space is all the same and doesn't add up.
+    fn text(&mut self, text: &str, range: &Range<usize>) {
+        if self.open.hidden() {
+            return;
+        }
+        let words = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if words.is_empty() {
+            self.space |= !text.is_empty();
+            return;
+        }
+        self.space |= text.starts_with(char::is_whitespace);
+        self.put_space(range);
+        let style = self.open.apply(Style::default());
+        self.line
+            .push(&words, range.clone(), style, self.open.link());
+        self.space = text.ends_with(char::is_whitespace);
+    }
+}
+
+fn has_aligned_image(inlines: &Inlines) -> bool {
+    inlines.images.iter().any(|image| image.align.is_some())
+}
+
+/// A paragraph, with images set to one side taken out to lines of their own.
+fn split_aligned_images(mut inlines: Inlines, source: &Range<usize>) -> Vec<Block> {
+    let paragraph = |inlines| Block {
+        source: source.clone(),
+        kind: BlockKind::Paragraph(inlines),
+    };
+    let aligned: Vec<(usize, Align)> = inlines
+        .images
+        .iter()
+        .filter_map(|image| Some((image.at, image.align?)))
+        .collect();
+    let mut pieces = Vec::new();
+    for (at, align) in aligned.into_iter().rev() {
+        let after = inlines.split_off(at + IMAGE_CHAR.len_utf8());
+        if !after.is_empty() {
+            pieces.push(paragraph(after));
+        }
+        let image = inlines.split_off(at);
+        pieces.push(Block {
+            source: source.clone(),
+            kind: BlockKind::Aligned {
+                align,
+                children: vec![paragraph(image)],
+            },
+        });
+    }
+    if !inlines.is_empty() {
+        pieces.push(paragraph(inlines));
+    }
+    pieces.reverse();
+    pieces
 }
 
 /// Whether a link or image is fetched over the network.
@@ -1737,9 +2154,200 @@ mod tests {
     }
 
     #[test]
-    fn html_blocks_with_block_tags_are_kept_as_written() {
-        let doc = parse("<div>\nhi\n</div>\n");
-        assert!(matches!(&doc.blocks[0].kind, BlockKind::Html(h) if h.contains("<div>")));
+    fn html_blocks_not_drawn_yet_are_kept_as_written() {
+        let doc = parse("<table><tr><td>hi</td></tr></table>\n");
+        assert!(matches!(&doc.blocks[0].kind, BlockKind::Html(h) if h.contains("<table>")));
+    }
+
+    fn unit(block: &Block) -> &Block {
+        match &block.kind {
+            BlockKind::HtmlUnit(inner) => inner,
+            other => panic!("expected a unit: {other:?}"),
+        }
+    }
+
+    fn html_text(block: &Block) -> &str {
+        match &unit(block).kind {
+            BlockKind::Paragraph(inlines) => &inlines.text,
+            other => panic!("expected a paragraph: {other:?}"),
+        }
+    }
+
+    fn aligned(block: &Block) -> (Align, &[Block]) {
+        match &block.kind {
+            BlockKind::Aligned { align, children } => (*align, children),
+            other => panic!("expected aligned blocks: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_div_is_transparent_and_paragraphs_are_blocks() {
+        let doc = parse("<div>\n<p>a <b>b</b></p>\n<p>c\n<p>d\n</div>\n");
+        let texts: Vec<_> = doc.blocks.iter().map(html_text).collect();
+        assert_eq!(texts, ["a b", "c", "d"]);
+    }
+
+    #[test]
+    fn alignment_covers_what_is_inside() {
+        let doc = parse(
+            "<div align=\"center\">\n  <img src=\"a.png\">\n  <p>c</p>\n</div>\n\n<center>x</center>\n\n<p align=right>y</p>\n",
+        );
+        assert_eq!(doc.blocks.len(), 3);
+        let (align, children) = aligned(&doc.blocks[0]);
+        assert_eq!(align, Align::Center);
+        assert_eq!(children.len(), 2);
+        assert_eq!(html_text(&children[1]), "c");
+        assert_eq!(aligned(&doc.blocks[1]).0, Align::Center);
+        let (align, children) = aligned(&doc.blocks[2]);
+        assert_eq!(align, Align::Right);
+        assert_eq!(html_text(&children[0]), "y");
+    }
+
+    #[test]
+    fn markdown_between_html_tags_stays_markdown() {
+        let doc = parse("<div align=\"center\">\n\n**a**\n\n</div>\n\nb\n");
+        assert_eq!(doc.blocks.len(), 2);
+        let (_, children) = aligned(&doc.blocks[0]);
+        let BlockKind::Paragraph(inlines) = &children[0].kind else {
+            panic!("expected a markdown paragraph");
+        };
+        assert_eq!(styled(inlines, |s| s.bold), ["a"]);
+    }
+
+    #[test]
+    fn markdown_with_no_blank_lines_in_html_is_literal() {
+        let doc = parse("<div>\n**a**\n</div>\n");
+        assert_eq!(html_text(&doc.blocks[0]), "**a**");
+    }
+
+    #[test]
+    fn a_block_left_open_ends_with_its_markdown_container() {
+        let doc = parse("> <div align=right>\n>\n> a\n\nb\n");
+        assert_eq!(doc.blocks.len(), 2);
+        let BlockKind::Quote { children, .. } = &doc.blocks[0].kind else {
+            panic!("expected a quote");
+        };
+        assert_eq!(aligned(&children[0]).0, Align::Right);
+        assert!(matches!(doc.blocks[1].kind, BlockKind::Paragraph(_)));
+    }
+
+    #[test]
+    fn html_headings_join_the_outline_in_order() {
+        let doc =
+            parse("# one\n\n<h2 align=center>two <i>x</i></h2>\n\n<h3 id=z>three</h3>\n\n# four\n");
+        let names: Vec<_> = doc.headings.iter().map(|h| h.text.as_str()).collect();
+        assert_eq!(names, ["one", "two x", "three", "four"]);
+        assert_eq!(doc.headings[1].slug, "two-x");
+        assert_eq!(doc.headings[2].slug, "z");
+        let (_, children) = aligned(&doc.blocks[1]);
+        assert!(matches!(
+            unit(&children[0]).kind,
+            BlockKind::Heading { level: 2, .. }
+        ));
+    }
+
+    #[test]
+    fn html_lists() {
+        let doc = parse("<ol start=3>\n<li>a\n<li>b<ul><li>c</li></ul></li>\n</ol>\n");
+        let BlockKind::List { start, items } = &doc.blocks[0].kind else {
+            panic!("expected a list");
+        };
+        assert_eq!(*start, Some(3));
+        assert_eq!(items.len(), 2);
+        assert_eq!(html_text(&items[0].children[0]), "a");
+        assert!(matches!(items[1].children[1].kind, BlockKind::List { .. }));
+    }
+
+    #[test]
+    fn html_quotes_rules_and_pre() {
+        let doc = parse(
+            "<blockquote>a</blockquote>\n\n<hr>\n\n<pre lang=\"rs\">\n  x <y>&amp;\n\n  z</pre>\n",
+        );
+        assert!(matches!(doc.blocks[0].kind, BlockKind::Quote { .. }));
+        assert!(matches!(doc.blocks[1].kind, BlockKind::Rule));
+        let BlockKind::Code { lang, code } = &unit(&doc.blocks[2]).kind else {
+            panic!("expected code");
+        };
+        assert_eq!(lang.as_deref(), Some("rs"));
+        assert_eq!(code, "  x &\n\n  z");
+    }
+
+    #[test]
+    fn comments_among_block_tags_do_not_show() {
+        let doc = parse("<div>\n<!-- a -->\n<p>b</p>\n</div>\n");
+        assert_eq!(doc.blocks.len(), 1);
+        assert_eq!(html_text(&doc.blocks[0]), "b");
+    }
+
+    #[test]
+    fn stray_block_tags_do_nothing() {
+        let doc = parse("</div>\n\nb\n");
+        assert_eq!(doc.blocks.len(), 1);
+        assert!(matches!(doc.blocks[0].kind, BlockKind::Paragraph(_)));
+    }
+
+    #[test]
+    fn images_to_the_side_get_lines_of_their_own() {
+        let doc = parse("before <img src=a align=right> after\n");
+        let [first, image, last] = doc.blocks.as_slice() else {
+            panic!("expected three blocks: {:?}", doc.blocks);
+        };
+        assert!(matches!(&first.kind, BlockKind::Paragraph(i) if i.text == "before "));
+        let (align, children) = aligned(image);
+        assert_eq!(align, Align::Right);
+        assert!(
+            matches!(&children[0].kind, BlockKind::Paragraph(i) if i.images.len() == 1 && i.images[0].at == 0)
+        );
+        assert!(matches!(&last.kind, BlockKind::Paragraph(i) if i.text == " after"));
+    }
+
+    #[test]
+    fn images_to_the_side_in_a_block_of_html() {
+        let doc = parse("<img src=a align=\"left\">\ntext\n");
+        assert_eq!(doc.blocks.len(), 2);
+        assert_eq!(aligned(unit(&doc.blocks[0])).0, Align::Left);
+        assert_eq!(html_text(&doc.blocks[1]), "text");
+    }
+
+    #[test]
+    fn a_picture_has_an_image_for_each_theme() {
+        let doc = parse(concat!(
+            "<picture>\n",
+            "<source media=\"(prefers-color-scheme: dark)\" srcset=\"d.png 2x, e.png\">\n",
+            "<source media=\"(prefers-color-scheme: light)\" srcset=\"l.png\">\n",
+            "<img src=\"f.png\" alt=\"A\">\n",
+            "</picture>\n",
+        ));
+        let BlockKind::Paragraph(inlines) = &unit(&doc.blocks[0]).kind else {
+            panic!("expected a paragraph");
+        };
+        let image = &inlines.images[0];
+        assert_eq!(image.url_for(true), Some("d.png"));
+        assert_eq!(image.url_for(false), Some("l.png"));
+        assert_eq!(image.url, "f.png");
+        assert!(!doc.has_remote_images);
+    }
+
+    #[test]
+    fn a_picture_in_a_line_and_remote_sources() {
+        let doc = parse(
+            "a <picture><source media=\"(prefers-color-scheme: dark)\" srcset=\"https://x/d.png\"><img src=\"f.png\"></picture> <img src=g.png>",
+        );
+        let inlines = paragraph(&doc);
+        assert_eq!(inlines.images[0].url_for(true), Some("https://x/d.png"));
+        assert_eq!(inlines.images[0].url_for(false), Some("f.png"));
+        assert_eq!(inlines.images[1].url_for(true), Some("g.png"));
+        assert!(doc.has_remote_images);
+    }
+
+    #[test]
+    fn images_marked_for_a_theme() {
+        let doc = parse("![a](d.png#gh-dark-mode-only) <img src=\"l.png#gh-light-mode-only\">");
+        let images = &paragraph(&doc).images;
+        assert_eq!(images[0].url_for(true), Some("d.png"));
+        assert_eq!(images[0].url_for(false), None);
+        assert_eq!(images[1].url_for(true), None);
+        assert_eq!(images[1].url_for(false), Some("l.png"));
     }
 
     #[test]
@@ -1862,13 +2470,13 @@ mod tests {
     }
 
     #[test]
-    fn a_block_of_html_tags_is_a_line_of_text() {
+    fn a_block_of_inline_html_is_a_line_of_text() {
         let doc = parse("<img src=\"a.png\">\n\n<span>\n  one\n  <b>two</b> &amp; x\n</span>\n");
-        let BlockKind::HtmlText(image) = &doc.blocks[0].kind else {
+        let BlockKind::Paragraph(image) = &unit(&doc.blocks[0]).kind else {
             panic!("expected a line of HTML");
         };
         assert_eq!(image.images.len(), 1);
-        let BlockKind::HtmlText(text) = &doc.blocks[1].kind else {
+        let BlockKind::Paragraph(text) = &unit(&doc.blocks[1]).kind else {
             panic!("expected a line of HTML");
         };
         assert_eq!(text.text, "one two & x");
@@ -1878,10 +2486,7 @@ mod tests {
     #[test]
     fn markdown_in_a_line_of_html_is_literal() {
         let doc = parse("<span>\n**a**\n</span>\n");
-        let BlockKind::HtmlText(text) = &doc.blocks[0].kind else {
-            panic!("expected a line of HTML");
-        };
-        assert_eq!(text.text, "**a**");
+        assert_eq!(html_text(&doc.blocks[0]), "**a**");
     }
 
     #[test]
@@ -1889,6 +2494,11 @@ mod tests {
         let source = format!("{}deep\n", ">".repeat(50_000));
         let doc = parse(&source);
         assert!(!doc.blocks.is_empty());
+        let source = format!(
+            "<div>\n{}x\n",
+            "<blockquote><div align=center><ul><li>".repeat(20_000)
+        );
+        assert!(!parse(&source).blocks.is_empty());
         let source = "- a\n".repeat(10) + &"  ".repeat(5_000) + "- b\n";
         let _ = parse(&source);
     }
@@ -1935,6 +2545,17 @@ mod tests {
             "<script>",
             "<img src=\u{FFFC}>\u{FFFC}",
             "<img width=9999999999999 src=a>",
+            "<div",
+            "</div></div>",
+            "<ul><li>",
+            "<li>a</ol>",
+            "<pre>",
+            "<h1>",
+            "<h1>\n\na\n\n</h1>",
+            "<picture><source>",
+            "<source srcset=>",
+            "a<img src=a align=right>",
+            "<img src=a align=right><img src=b align=left>",
         ] {
             let _ = parse(source);
         }

@@ -65,6 +65,45 @@ pub fn pieces(html: &str) -> Vec<Piece> {
     pieces
 }
 
+/// A block tag that isn't drawn yet.
+pub fn is_undrawn_tag(name: &str) -> bool {
+    matches!(
+        name,
+        "caption"
+            | "col"
+            | "colgroup"
+            | "details"
+            | "summary"
+            | "table"
+            | "tbody"
+            | "td"
+            | "tfoot"
+            | "th"
+            | "thead"
+            | "tr"
+    )
+}
+
+/// Which way blocks are set in HTML.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Align {
+    Left,
+    Center,
+    Right,
+}
+
+impl Align {
+    /// What's written in an `align`.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "left" => Some(Self::Left),
+            "center" | "middle" => Some(Self::Center),
+            "right" => Some(Self::Right),
+            _ => None,
+        }
+    }
+}
+
 /// Whether a tag makes a block of its own, rather than being in a line of text.
 pub fn is_block_tag(name: &str) -> bool {
     matches!(
@@ -107,7 +146,6 @@ pub fn is_block_tag(name: &str) -> bool {
             | "nav"
             | "ol"
             | "p"
-            | "picture"
             | "pre"
             | "section"
             | "summary"
@@ -188,9 +226,50 @@ pub struct Open {
     stack: Vec<Effect>,
     counts: [usize; EFFECTS],
     links: Vec<Link>,
+    picture: Option<Picture>,
+}
+
+/// The `<source>`s seen in the `<picture>` that's open.
+#[derive(Default)]
+struct Picture {
+    dark: Option<String>,
+    light: Option<String>,
 }
 
 impl Open {
+    pub fn start_picture(&mut self) {
+        self.picture = Some(Picture::default());
+    }
+
+    /// Takes note of a `<source>` meant for a theme: the first picture it
+    /// offers, as the screen's density doesn't matter here.
+    pub fn picture_source(&mut self, tag: &Tag) {
+        let Some(picture) = &mut self.picture else {
+            return;
+        };
+        let (Some(media), Some(url)) = (
+            tag.attribute("media"),
+            tag.attribute("srcset")
+                .and_then(|set| set.split(',').next())
+                .and_then(|first| first.split_whitespace().next()),
+        ) else {
+            return;
+        };
+        let media = media.to_ascii_lowercase().replace(' ', "");
+        if media.contains("prefers-color-scheme:dark") {
+            picture.dark.get_or_insert_with(|| url.to_owned());
+        } else if media.contains("prefers-color-scheme:light") {
+            picture.light.get_or_insert_with(|| url.to_owned());
+        }
+    }
+
+    /// The dark and light pictures of an `<img>` here.
+    pub fn picture_urls(&self) -> (Option<String>, Option<String>) {
+        self.picture.as_ref().map_or((None, None), |picture| {
+            (picture.dark.clone(), picture.light.clone())
+        })
+    }
+
     fn on(&self, effect: Effect) -> bool {
         self.counts[effect as usize] > 0
     }
@@ -241,6 +320,9 @@ impl Open {
     /// Closes the nearest tag of this kind and any left open inside it. One
     /// that nothing opened is ignored, as it is by browsers.
     pub fn close(&mut self, name: &str) {
+        if name == "picture" {
+            self.picture = None;
+        }
         let Some(effect) = effect(name) else {
             return;
         };

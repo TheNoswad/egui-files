@@ -21,7 +21,7 @@ use pulldown_cmark::Alignment;
 use super::{
     diagram::Colors,
     drawing::{self, svg_color},
-    html::Length,
+    html::{self, Length},
     parse::{
         Block, BlockKind, Callout, CalloutFold, Document, IMAGE_CHAR, InlineImage, Inlines, Link,
         Run, Style, Task,
@@ -887,6 +887,7 @@ pub fn layout(document: &Document, params: Params<'_>) -> Layout {
         out: Layout::default(),
         y: 0.0,
         list_depth: 0,
+        align: Align::LEFT,
         editing: inputs.editing.clone(),
     };
     let width = inputs.width;
@@ -929,6 +930,8 @@ struct Builder<'a> {
     y: f32,
     /// How many lists this is inside of, which varies their bullets.
     list_depth: usize,
+    /// How HTML around here has set the text.
+    align: Align,
     editing: Option<(Range<usize>, f32)>,
 }
 
@@ -999,7 +1002,7 @@ impl Builder<'_> {
                 placed = true;
                 self.editor(range, *height, width);
             }
-            if replaced {
+            if replaced || self.shows_nothing(block) {
                 continue;
             }
             if !first {
@@ -1055,10 +1058,15 @@ impl Builder<'_> {
     }
 
     fn blocks(&mut self, blocks: &[Block], x: f32, width: f32) {
-        for (index, block) in blocks.iter().enumerate() {
-            if index > 0 {
+        let mut first = true;
+        for block in blocks {
+            if self.shows_nothing(block) {
+                continue;
+            }
+            if !first {
                 self.y += self.theme.gap();
             }
+            first = false;
             self.block(block, x, width);
         }
     }
@@ -1071,12 +1079,24 @@ impl Builder<'_> {
                 let style = self.body();
                 self.text(inlines, x, width, style);
             }
-            BlockKind::HtmlText(inlines) => {
+            BlockKind::HtmlUnit(inner) => {
                 // One unit on the page, without a cursor in it.
                 let source = self.source.take();
-                let style = self.body();
-                self.text(inlines, x, width, style);
+                self.block(inner, x, width);
                 self.source = source;
+                self.block_source = block.source.clone();
+            }
+            BlockKind::Aligned { align, children } => {
+                let was = std::mem::replace(
+                    &mut self.align,
+                    match align {
+                        html::Align::Left => Align::LEFT,
+                        html::Align::Center => Align::Center,
+                        html::Align::Right => Align::RIGHT,
+                    },
+                );
+                self.blocks(children, x, width);
+                self.align = was;
             }
             BlockKind::Heading { level, slug, text } => self.heading(*level, slug, text, x, width),
             BlockKind::Code { lang, code } if lang.as_deref() == Some("mermaid") => {
@@ -1087,7 +1107,12 @@ impl Builder<'_> {
                 Some(callout) => self.callout(callout, children, block.source.start, x, width),
                 None => self.quote(children, x, width),
             },
-            BlockKind::List { start, items } => self.list(*start, items, x, width),
+            BlockKind::List { start, items } => {
+                // Its text goes with its markers.
+                let was = std::mem::replace(&mut self.align, Align::LEFT);
+                self.list(*start, items, x, width);
+                self.align = was;
+            }
             BlockKind::Definitions(definitions) => {
                 let indent = self.theme.size * 1.6;
                 for (index, definition) in definitions.iter().enumerate() {
@@ -1850,7 +1875,17 @@ impl Builder<'_> {
     }
 
     fn text(&mut self, inlines: &Inlines, x: f32, width: f32, style: TextStyle) {
+        let style = TextStyle {
+            halign: self.align,
+            ..style
+        };
         let (galley, links, images, editable) = self.inline_job(inlines, width, style);
+        // A galley aligned to the center or right is drawn around its position.
+        let text_x = match style.halign {
+            Align::Center => x + width / 2.0,
+            Align::Max => x + width,
+            Align::Min => x,
+        };
         // A formula can reach below its row, as it does below its baseline.
         let height = images.iter().fold(galley.size().y, |height, image| {
             height.max(image.rect.max.y)
@@ -1865,13 +1900,36 @@ impl Builder<'_> {
                 .or_insert(self.y);
         }
         self.out.items.push(Item::Text(TextItem {
-            pos: egui::pos2(x, self.y),
+            pos: egui::pos2(text_x, self.y),
             galley,
             links,
             images,
             editable,
         }));
         self.y += height;
+    }
+
+    /// Whether a block comes to nothing here, for its images being for the
+    /// other theme. While editing, its line is needed for the cursor.
+    fn shows_nothing(&self, block: &Block) -> bool {
+        let empty = |block: &Block| match &block.kind {
+            BlockKind::Paragraph(inlines) => {
+                !inlines.images.is_empty()
+                    && inlines
+                        .images
+                        .iter()
+                        .all(|image| image.url_for(self.theme.dark).is_none())
+                    && inlines.plain().trim().is_empty()
+            }
+            _ => false,
+        };
+        match &block.kind {
+            BlockKind::HtmlUnit(inner) => empty(inner),
+            BlockKind::Aligned { children, .. } => {
+                children.iter().all(|child| self.shows_nothing(child))
+            }
+            _ => self.source.is_none() && empty(block),
+        }
     }
 
     /// A font's distance from top to baseline, and its height.
@@ -2065,7 +2123,12 @@ impl Builder<'_> {
                 let Some((_, image)) = image else {
                     continue;
                 };
-                match self.images.size(&image.url) {
+                let Some(url) = image.url_for(self.theme.dark) else {
+                    // For the other theme. It's still something in the source.
+                    map_at += 1;
+                    continue;
+                };
+                match self.images.size(url) {
                     Some(size) => {
                         let size = fit(asked_size(size, image, width), width);
                         // Takes up the image's room: tiny spaces, the second
@@ -2077,7 +2140,7 @@ impl Builder<'_> {
                         space.line_height = Some(size.y.max(self.theme.line_height(style.size)));
                         placed.push(Placing {
                             char: chars,
-                            url: image.url.clone(),
+                            url: url.to_owned(),
                             tip: if image.title.is_empty() {
                                 image.alt.clone()
                             } else {
@@ -3058,8 +3121,47 @@ mod tests {
 
     #[test]
     fn a_line_of_html_is_one_unit() {
-        let laid_out = fields_of("<span>\none\n</span>\n");
-        assert!(laid_out.placed_fields().is_empty());
+        for source in [
+            "<span>\none\n</span>\n",
+            "<div align=center><p>one</p></div>\n",
+            "<ul><li>one</li></ul>\n",
+            "<h1>one</h1>\n",
+            "<pre>one</pre>\n",
+            "<blockquote>one</blockquote>\n",
+        ] {
+            let laid_out = fields_of(source);
+            assert!(laid_out.placed_fields().is_empty(), "{source}");
+        }
+    }
+
+    #[test]
+    fn markdown_inside_html_tags_can_be_edited() {
+        let laid_out = fields_of("<div align=center>\n\none\n\n</div>\n");
+        assert_eq!(laid_out.placed_fields().len(), 1);
+    }
+
+    #[test]
+    fn aligned_text_is_drawn_around_its_side() {
+        let mut none = Pictures(egui::vec2(10.0, 10.0));
+        let source = "<p align=center>a</p>\n\n<p align=right>b</p>\n\nc\n";
+        let flat = run(source, 600.0, &mut none);
+        let items = texts(&flat);
+        assert_eq!(items[0].pos.x, 300.0);
+        assert_eq!(items[1].pos.x, 600.0);
+        assert_eq!(items[2].pos.x, 0.0);
+    }
+
+    #[test]
+    fn what_is_for_the_other_theme_takes_no_room() {
+        // The tests' theme is dark.
+        let mut pictures = Pictures(egui::vec2(10.0, 10.0));
+        let source =
+            "a\n\n<img src=\"x.png#gh-light-mode-only\">\n\n![](y.png#gh-light-mode-only)\n\nb\n";
+        let layout = run(source, 600.0, &mut pictures);
+        assert_eq!(texts(&layout).len(), 2);
+        let source = "a ![](y.png#gh-dark-mode-only)\n";
+        let layout = run(source, 600.0, &mut pictures);
+        assert_eq!(texts(&layout)[0].images.len(), 1);
     }
 
     #[test]
@@ -3072,6 +3174,9 @@ mod tests {
             source: 0..0,
             width,
             height,
+            align: None,
+            dark_url: None,
+            light_url: None,
         };
         let natural = egui::vec2(100.0, 50.0);
         let asked = |width, height, page| asked_size(natural, &image(width, height), page);

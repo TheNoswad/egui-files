@@ -62,6 +62,7 @@ releases yet, so it's all unreleased.
 - Preview and Split, with scrolling kept together; Open shows WYSIWYG; the preview pane renders
 - Links followed in place with Back and Forward; programs are revealed rather than run
 - Raw HTML in a line of text is drawn, through html5gum (`src/markdown/html.rs`): text styles, `kbd`, `sub`, `sup`, `br`, links and `id` anchors, and `img` with `width` and `height`. Comments and `script`, `style` and the like don't show; other tags go and their content stays. In WYSIWYG the tags are hidden like `**`, and a block of HTML is one unit, double-clicked to edit its source
+- Raw HTML's blocks: `div`, `p`, `center` and `align`, headings, lists, quotes, `pre`, `hr`, with markdown between tags (blank lines around it) as it is on GitHub. `<picture>` and `#gh-dark-mode-only` images follow the app's theme, and `<img align>` sets an image to one side, on its own line
 - Local and remote pictures, SVG included; remote ones behind a setting, by default asked for each document
 - Phase 2, editing aids: formatting commands and shortcuts, lists that continue on Enter and nest on Tab, addresses pasted over text become links, table editing (`table.rs`), outline, word count and reading time, find in the rendered view, pasted and dropped pictures (`assets.rs`), a picture's lightbox
 - Phase 3: math (`math.rs`, katex-native) and Mermaid (`diagram.rs`, mermaid-rs-renderer, patched: see `[patch.crates-io]` in `Cargo.toml`), drawn as SVGs through the images store (`drawing.rs`)

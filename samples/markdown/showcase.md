@@ -604,6 +604,40 @@ Block HTML:
   <p>Centered</p>
 </div>
 
+<p align="right">Set to the <b>right</b>.</p>
+
+<div align="center">
+
+**Markdown** between tags, centered, and still editable.
+
+</div>
+
+<h3 align="center">A centered HTML heading</h3>
+
+<ul>
+  <li>An HTML list</li>
+  <li>With <i>two</i> items</li>
+</ul>
+
+<blockquote>An HTML quote</blockquote>
+
+<pre>
+preformatted   text
+  stays as it is
+</pre>
+
+<hr>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="pics/badge.svg">
+  <source media="(prefers-color-scheme: light)" srcset="pics/wide.png">
+  <img src="pics/small.png" alt="Changes with the theme" width="120">
+</picture>
+
+Only in the dark theme: ![dark](pics/small.png#gh-dark-mode-only)
+
+<img src="pics/small.png" alt="To the right" align="right" width="48">
+
 <details>
 <summary>Click to expand</summary>
 
