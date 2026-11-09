@@ -11,7 +11,7 @@ draft: false
 
 Everything the renderer handles, plus edge cases that tend to break renderers. The block above is YAML frontmatter, which should show as a small table of fields. Each section says what to look for.
 
-**Jump to:** [Text](#inline-text) · [Headings](#headings) · [Lists](#lists) · [Quotes](#quotes) · [Callouts](#alerts-and-callouts) · [Code](#code) · [Tables](#tables) · [Images](#images) · [Links](#links) · [Notes](#obsidian-style-notes) · [Footnotes](#footnotes) · [Not rendered yet](#not-rendered-yet) · [Stress](#stress)
+**Jump to:** [Text](#inline-text) · [Headings](#headings) · [Lists](#lists) · [Quotes](#quotes) · [Callouts](#alerts-and-callouts) · [Code](#code) · [Tables](#tables) · [Images](#images) · [Links](#links) · [Notes](#obsidian-style-notes) · [Footnotes](#footnotes) · [Raw HTML](#raw-html) · [Stress](#stress)
 
 ## Inline text
 
@@ -591,7 +591,7 @@ Not a diagram:
 this is not a diagram
 ```
 
-## Not rendered yet
+## Raw HTML
 
 Inline HTML: <kbd>Ctrl</kbd>+<kbd>C</kbd>, H<sub>2</sub>O, x<sup>2</sup>, and a<br>break. <b>Bold</b>, <i>italic</i>, <u>underlined</u>, <del>gone</del>, <mark>marked</mark>, <code>code</code>, <font color="red">an unknown tag</font>, a comment<!-- hidden --> and <a href="other.md">a link</a>. An image: <img src="pics/small.png" alt="Small" width="32">, and <a id="html-anchor"></a>[a link to an anchor](#html-anchor).
 
