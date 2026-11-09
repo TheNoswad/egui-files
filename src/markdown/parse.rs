@@ -14,6 +14,9 @@ use super::html::{self, Align, Length, Piece};
 /// mustn't overflow the stack, here or in the layout.
 const MAX_DEPTH: usize = 32;
 
+/// The most columns a table's cell can take up: `colspan` can say anything.
+const MAX_COLSPAN: usize = 64;
+
 /// Stands in for an inline image in [`Inlines::text`].
 pub const IMAGE_CHAR: char = '\u{FFFC}';
 
@@ -79,8 +82,16 @@ pub enum BlockKind {
     Rule,
     /// A YAML or TOML block at the top of the file.
     Frontmatter(Vec<(String, String)>),
-    /// HTML with tags that aren't drawn yet, shown as it's written.
+    /// Only between finding a block of HTML and working out what it says.
     Html(String),
+    /// `<details>`: `key` tells it from others when it's opened or closed.
+    Details {
+        summary: Inlines,
+        open: bool,
+        key: usize,
+        children: Vec<Block>,
+    },
+    HtmlTable(Vec<HtmlRow>),
     /// Made from raw HTML: drawn, but edited as its source.
     HtmlUnit(Box<Block>),
     /// What HTML sets to one side or the center.
@@ -90,6 +101,20 @@ pub enum BlockKind {
     },
     /// `$$…$$` alone in a paragraph.
     Math(String),
+}
+
+#[derive(Debug)]
+pub struct HtmlRow {
+    pub cells: Vec<HtmlCell>,
+}
+
+#[derive(Debug)]
+pub struct HtmlCell {
+    pub text: Inlines,
+    pub header: bool,
+    pub align: Option<Align>,
+    /// How many columns it takes up, at least one.
+    pub colspan: usize,
 }
 
 #[derive(Debug)]
@@ -291,8 +316,19 @@ impl Stats {
                         self.add(&cell.text);
                     }
                 }
-                BlockKind::Math(text) | BlockKind::Html(text) => self.add(text),
-                BlockKind::Rule | BlockKind::Frontmatter(_) => {}
+                BlockKind::Details {
+                    summary, children, ..
+                } => {
+                    self.add(&summary.text);
+                    self.add_blocks(children);
+                }
+                BlockKind::HtmlTable(rows) => {
+                    for cell in rows.iter().flat_map(|row| &row.cells) {
+                        self.add(&cell.text.text);
+                    }
+                }
+                BlockKind::Math(text) => self.add(text),
+                BlockKind::Rule | BlockKind::Frontmatter(_) | BlockKind::Html(_) => {}
             }
         }
     }
@@ -350,6 +386,32 @@ impl Inlines {
             self.text.truncate(run.range.start);
             self.runs.pop();
         }
+    }
+
+    /// Adds text that's in no particular place in the source.
+    pub fn push_plain(&mut self, text: &str) {
+        self.push(text, 0..0, Style::default(), None);
+    }
+
+    /// Adds what's in `other` on a new line.
+    fn append_line(&mut self, other: Self) {
+        let shift = if self.text.is_empty() {
+            0
+        } else {
+            self.text.push('\n');
+            self.text.len()
+        };
+        self.text.push_str(&other.text);
+        self.runs.extend(other.runs.into_iter().map(|mut run| {
+            run.range = run.range.start + shift..run.range.end + shift;
+            run
+        }));
+        self.images
+            .extend(other.images.into_iter().map(|mut image| {
+                image.at += shift;
+                image
+            }));
+        self.anchors.extend(other.anchors);
     }
 
     /// Takes off what's from `at` on, which must be where a run starts.
@@ -720,19 +782,7 @@ impl Builder<'_> {
 
     /// One block of HTML, whose tags may leave things open for those after it.
     fn html_block(&mut self, html: String, range: Range<usize>, nest: &mut HtmlNest, depth: usize) {
-        let pieces = html::pieces(&html);
-        let is_later = |piece: &Piece| match piece {
-            Piece::Open(tag) => html::is_undrawn_tag(&tag.name),
-            Piece::Close(name) => html::is_undrawn_tag(name),
-            Piece::Text(_) => false,
-        };
-        if pieces.iter().any(is_later) {
-            return nest.push(Block {
-                source: range,
-                kind: BlockKind::Html(html),
-            });
-        }
-        for piece in pieces {
+        for (index, piece) in html::pieces(&html).into_iter().enumerate() {
             let in_pre = matches!(
                 nest.frames.last(),
                 Some(HtmlFrame {
@@ -741,9 +791,23 @@ impl Builder<'_> {
                 })
             );
             match piece {
+                // A cell is a line of text: what's blocks elsewhere are its lines.
+                Piece::Open(tag)
+                    if nest.in_cell()
+                        && html::is_block_tag(&tag.name)
+                        && !html::is_table_part(&tag.name) =>
+                {
+                    nest.line_break(&range);
+                }
+                Piece::Close(name)
+                    if nest.in_cell()
+                        && html::is_block_tag(&name)
+                        && !html::is_table_part(&name)
+                        && name != "table" => {}
                 Piece::Open(tag) if html::is_block_tag(&tag.name) => {
                     self.flush_html_text(nest, &range);
-                    self.open_frame(tag, &range, nest, depth);
+                    // Each piece has a place of its own in the source.
+                    self.open_frame(tag, &range, range.start + index, nest, depth);
                 }
                 Piece::Close(name) if html::is_block_tag(&name) => {
                     self.flush_html_text(nest, &range);
@@ -777,12 +841,13 @@ impl Builder<'_> {
         self.flush_html_text(nest, &range);
     }
 
-    /// Text gathered so far becomes a block, unless a heading is collecting it.
+    /// Text gathered so far becomes a block, unless a heading, summary or
+    /// cell is collecting it.
     fn flush_html_text(&mut self, nest: &mut HtmlNest, range: &Range<usize>) {
         if matches!(
             nest.frames.last(),
             Some(HtmlFrame {
-                kind: FrameKind::Heading { .. },
+                kind: FrameKind::Heading { .. } | FrameKind::Summary | FrameKind::Cell { .. },
                 ..
             })
         ) {
@@ -806,6 +871,7 @@ impl Builder<'_> {
         &mut self,
         tag: html::Tag,
         range: &Range<usize>,
+        key: usize,
         nest: &mut HtmlNest,
         depth: usize,
     ) {
@@ -825,11 +891,46 @@ impl Builder<'_> {
                 }
             }
         }
+        if tag.name == "col" {
+            return;
+        }
         if tag.name == "hr" {
             return nest.push(Block {
                 source: range.clone(),
                 kind: BlockKind::Rule,
             });
+        }
+        // Rows and cells end what came before them in the table.
+        let table = nest
+            .frames
+            .iter()
+            .rposition(|frame| matches!(frame.kind, FrameKind::Table { .. }));
+        if let Some(table) = table {
+            let is_row = |frame: &HtmlFrame| matches!(frame.kind, FrameKind::Row { .. });
+            match tag.name.as_str() {
+                "tr" | "thead" | "tbody" | "tfoot" => {
+                    while nest.frames.len() > table + 1 {
+                        self.close_frame(nest);
+                    }
+                }
+                "td" | "th" => match nest.frames[table..].iter().rposition(is_row) {
+                    Some(row) => {
+                        while nest.frames.len() > table + row + 1 {
+                            self.close_frame(nest);
+                        }
+                    }
+                    // A cell with no row has one made for it.
+                    None => nest.frames.push(HtmlFrame {
+                        name: "tr".to_owned(),
+                        kind: FrameKind::Row { cells: Vec::new() },
+                        align: None,
+                        start: range.start,
+                        children: Vec::new(),
+                        items: Vec::new(),
+                    }),
+                },
+                _ => {}
+            }
         }
         // As with markdown's containers, there's a limit to how deep it goes.
         if depth + nest.frames.len() >= MAX_DEPTH {
@@ -850,6 +951,32 @@ impl Builder<'_> {
             },
             "li" => FrameKind::Item,
             "blockquote" => FrameKind::Quote,
+            "details" => FrameKind::Details {
+                summary: None,
+                open: tag.attribute("open").is_some(),
+                key,
+            },
+            "summary"
+                if matches!(
+                    nest.frames.last(),
+                    Some(HtmlFrame {
+                        kind: FrameKind::Details { .. },
+                        ..
+                    })
+                ) =>
+            {
+                FrameKind::Summary
+            }
+            "table" => FrameKind::Table { rows: Vec::new() },
+            "tr" if table.is_some() => FrameKind::Row { cells: Vec::new() },
+            "td" | "th" if table.is_some() => FrameKind::Cell {
+                header: tag.name == "th",
+                colspan: tag
+                    .attribute("colspan")
+                    .and_then(|span| span.trim().parse().ok())
+                    .unwrap_or(1)
+                    .clamp(1, MAX_COLSPAN),
+            },
             "pre" => FrameKind::Pre {
                 lang: tag.attribute("lang").map(str::to_owned),
                 code: String::new(),
@@ -876,6 +1003,8 @@ impl Builder<'_> {
         };
         let source = frame.start..nest.end.max(frame.start);
         let mut children = frame.children;
+        // A cell's or row's `align` is for the table to use.
+        let frame_is_cell = matches!(frame.kind, FrameKind::Cell { .. } | FrameKind::Row { .. });
         let kind = match frame.kind {
             FrameKind::Container => None,
             FrameKind::Heading { level, id } => {
@@ -915,6 +1044,78 @@ impl Builder<'_> {
                 callout: None,
                 children: std::mem::take(&mut children),
             }),
+            FrameKind::Details { summary, open, key } => Some(BlockKind::Details {
+                summary: summary.unwrap_or_default(),
+                open,
+                key,
+                children: std::mem::take(&mut children),
+            }),
+            FrameKind::Summary => {
+                let text = std::mem::take(&mut nest.line);
+                nest.space = false;
+                if let Some(HtmlFrame {
+                    kind: FrameKind::Details { summary, .. },
+                    ..
+                }) = nest.frames.last_mut()
+                {
+                    *summary = Some(text);
+                }
+                None
+            }
+            FrameKind::Table { rows } => {
+                // What wasn't in a cell comes before the table, as in browsers.
+                for block in std::mem::take(&mut children) {
+                    nest.push(block);
+                }
+                (!rows.is_empty()).then(|| {
+                    BlockKind::HtmlUnit(Box::new(Block {
+                        source: source.clone(),
+                        kind: BlockKind::HtmlTable(rows),
+                    }))
+                })
+            }
+            FrameKind::Row { cells } => {
+                if let Some(table) = nest
+                    .frames
+                    .iter_mut()
+                    .rev()
+                    .find_map(|frame| match &mut frame.kind {
+                        FrameKind::Table { rows } => Some(rows),
+                        _ => None,
+                    })
+                    && !cells.is_empty()
+                {
+                    table.push(HtmlRow { cells });
+                }
+                None
+            }
+            FrameKind::Cell { header, colspan } => {
+                let mut text = std::mem::take(&mut nest.line);
+                nest.space = false;
+                text.drop_last_html_break();
+                // Markdown between the cell's tags, as far as a cell can hold it.
+                children.retain_mut(|child| match paragraph_mut(child) {
+                    Some(paragraph) => {
+                        text.append_line(std::mem::take(paragraph));
+                        false
+                    }
+                    None => true,
+                });
+                if let Some(HtmlFrame {
+                    kind: FrameKind::Row { cells },
+                    align,
+                    ..
+                }) = nest.frames.last_mut()
+                {
+                    cells.push(HtmlCell {
+                        text,
+                        header,
+                        align: frame.align.or(*align),
+                        colspan,
+                    });
+                }
+                None
+            }
             FrameKind::Pre { lang, code } => {
                 let code = code.strip_prefix('\n').unwrap_or(&code).to_owned();
                 Some(BlockKind::HtmlUnit(Box::new(Block {
@@ -937,7 +1138,7 @@ impl Builder<'_> {
             .into_iter()
             .collect();
         blocks.append(&mut children);
-        match frame.align {
+        match frame.align.filter(|_| !frame_is_cell) {
             Some(align) if !blocks.is_empty() => nest.push(Block {
                 source,
                 kind: BlockKind::Aligned {
@@ -1246,6 +1447,22 @@ enum FrameKind {
     },
     Item,
     Quote,
+    Details {
+        summary: Option<Inlines>,
+        open: bool,
+        key: usize,
+    },
+    Summary,
+    Table {
+        rows: Vec<HtmlRow>,
+    },
+    Row {
+        cells: Vec<HtmlCell>,
+    },
+    Cell {
+        header: bool,
+        colspan: usize,
+    },
     Pre {
         lang: Option<String>,
         code: String,
@@ -1285,6 +1502,28 @@ impl HtmlNest {
         }
     }
 
+    fn in_cell(&self) -> bool {
+        matches!(
+            self.frames.last(),
+            Some(HtmlFrame {
+                kind: FrameKind::Cell { .. },
+                ..
+            })
+        )
+    }
+
+    /// A new line in the text being gathered, if there's anything on this one.
+    fn line_break(&mut self, range: &Range<usize>) {
+        self.space = false;
+        if !self.line.is_empty() && !self.line.text.ends_with('\n') {
+            let style = Style {
+                html: true,
+                ..Style::default()
+            };
+            self.line.push("\n", range.clone(), style, None);
+        }
+    }
+
     fn line_ends_with_aligned_image(&self) -> bool {
         self.line.images.last().is_some_and(|image| {
             image.align.is_some() && image.at + IMAGE_CHAR.len_utf8() == self.line.text.len()
@@ -1319,6 +1558,15 @@ impl HtmlNest {
         self.line
             .push(&words, range.clone(), style, self.open.link());
         self.space = text.ends_with(char::is_whitespace);
+    }
+}
+
+/// The text of a paragraph, whether markdown's or HTML's.
+fn paragraph_mut(block: &mut Block) -> Option<&mut Inlines> {
+    match &mut block.kind {
+        BlockKind::Paragraph(inlines) => Some(inlines),
+        BlockKind::HtmlUnit(inner) => paragraph_mut(inner),
+        _ => None,
     }
 }
 
@@ -2154,9 +2402,150 @@ mod tests {
     }
 
     #[test]
-    fn html_blocks_not_drawn_yet_are_kept_as_written() {
-        let doc = parse("<table><tr><td>hi</td></tr></table>\n");
-        assert!(matches!(&doc.blocks[0].kind, BlockKind::Html(h) if h.contains("<table>")));
+    fn no_block_is_left_as_html() {
+        fn check(blocks: &[Block]) {
+            for block in blocks {
+                assert!(!matches!(block.kind, BlockKind::Html(_)), "{block:?}");
+            }
+        }
+        let source = "<table><tr><td>a</td></tr></table>\n\n<details>b</details>\n\n<!-- c -->\n";
+        check(&parse(source).blocks);
+    }
+
+    fn table_rows(block: &Block) -> &[HtmlRow] {
+        match &unit(block).kind {
+            BlockKind::HtmlTable(rows) => rows,
+            other => panic!("expected a table: {other:?}"),
+        }
+    }
+
+    fn cell_texts(rows: &[HtmlRow]) -> Vec<Vec<&str>> {
+        rows.iter()
+            .map(|row| row.cells.iter().map(|c| c.text.text.as_str()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn html_tables() {
+        let doc = parse(concat!(
+            "<table>\n<thead>\n<tr><th>a</th><th align=right>b</th></tr>\n</thead>\n",
+            "<tbody>\n<tr align=center><td colspan=\"2\"><b>c</b></td></tr>\n",
+            "<tr><td>d<br>e</td><td><a href=x><img src=i></a></td></tr>\n</tbody>\n</table>\n",
+        ));
+        let rows = table_rows(&doc.blocks[0]);
+        assert_eq!(
+            cell_texts(rows),
+            [vec!["a", "b"], vec!["c"], vec!["d\ne", "\u{FFFC}"]]
+        );
+        assert!(rows[0].cells.iter().all(|cell| cell.header));
+        assert_eq!(rows[0].cells[1].align, Some(Align::Right));
+        assert_eq!(rows[1].cells[0].colspan, 2);
+        assert_eq!(rows[1].cells[0].align, Some(Align::Center));
+        assert!(!rows[1].cells[0].header);
+        assert_eq!(rows[2].cells[1].text.images.len(), 1);
+    }
+
+    #[test]
+    fn html_table_tags_may_be_left_out() {
+        let doc = parse("<table><tr><td>a<td>b<tr><th>c</table>\n\n<table><td>d</td></table>\n");
+        assert_eq!(
+            cell_texts(table_rows(&doc.blocks[0])),
+            [vec!["a", "b"], vec!["c"]]
+        );
+        assert_eq!(cell_texts(table_rows(&doc.blocks[1])), [vec!["d"]]);
+    }
+
+    #[test]
+    fn block_tags_in_a_cell_are_its_lines() {
+        let doc =
+            parse("<table><tr><td><p>a</p><div>b</div><ul><li>c</li></ul></td></tr></table>\n");
+        assert_eq!(cell_texts(table_rows(&doc.blocks[0])), [vec!["a\nb\nc"]]);
+    }
+
+    #[test]
+    fn markdown_in_a_cell() {
+        let doc = parse("<table>\n<tr>\n<td>\n\n**a**\n\n</td>\n</tr>\n</table>\n");
+        let rows = table_rows(&doc.blocks[0]);
+        assert_eq!(cell_texts(rows), [vec!["a"]]);
+        assert_eq!(styled(&rows[0].cells[0].text, |s| s.bold), ["a"]);
+    }
+
+    #[test]
+    fn what_a_cell_cannot_hold_comes_before_the_table() {
+        let doc = parse("<table>\n<tr>\n<td>\n\n```\nx\n```\n\n</td>\n</tr>\n</table>\n");
+        assert!(matches!(doc.blocks[0].kind, BlockKind::Code { .. }));
+        assert_eq!(cell_texts(table_rows(&doc.blocks[1])), [vec![""]]);
+    }
+
+    #[test]
+    fn cells_outside_a_table_are_just_text() {
+        let doc = parse("<tr><td>a</td></tr>\n");
+        assert_eq!(html_text(&doc.blocks[0]), "a");
+    }
+
+    #[test]
+    fn colspans_are_kept_in_reason() {
+        for (written, colspan) in [("0", 1), ("x", 1), ("99999999", MAX_COLSPAN), ("3", 3)] {
+            let doc = parse(&format!("<table><td colspan={written}>a</table>"));
+            assert_eq!(table_rows(&doc.blocks[0])[0].cells[0].colspan, colspan);
+        }
+    }
+
+    fn details(block: &Block) -> (&Inlines, bool, usize, &[Block]) {
+        match &block.kind {
+            BlockKind::Details {
+                summary,
+                open,
+                key,
+                children,
+            } => (summary, *open, *key, children),
+            other => panic!("expected details: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn details_hold_markdown_between_their_tags() {
+        let doc = parse(
+            "<details>\n<summary>Some <b>title</b></summary>\n\nHidden **text**.\n\n</details>\n\nAfter\n",
+        );
+        assert_eq!(doc.blocks.len(), 2);
+        let (summary, open, _, children) = details(&doc.blocks[0]);
+        assert_eq!(summary.text, "Some title");
+        assert_eq!(styled(summary, |s| s.bold), ["title"]);
+        assert!(!open);
+        assert!(matches!(&children[0].kind, BlockKind::Paragraph(i) if i.text == "Hidden text."));
+    }
+
+    #[test]
+    fn details_can_start_open_and_each_has_its_own_key() {
+        let doc = parse(
+            "<details open><summary>a</summary>b</details>\n<details><summary>c</summary>d</details>\n",
+        );
+        assert_eq!(doc.blocks.len(), 2);
+        let (first, second) = (details(&doc.blocks[0]), details(&doc.blocks[1]));
+        assert!(first.1);
+        assert!(!second.1);
+        assert_ne!(first.2, second.2);
+        assert_eq!(html_text(&first.3[0]), "b");
+    }
+
+    #[test]
+    fn nested_details_and_ones_without_a_summary() {
+        let doc = parse(
+            "<details><details><summary>in</summary>x</details></details>\n\n<details>y</details>\n",
+        );
+        let (outer, _, _, children) = details(&doc.blocks[0]);
+        assert!(outer.is_empty());
+        assert_eq!(details(&children[0]).0.text, "in");
+        assert!(details(&doc.blocks[1]).0.is_empty());
+    }
+
+    #[test]
+    fn stats_count_what_shows() {
+        let doc = parse(
+            "<table><tr><th title=\"no\">one</th><td>two</td></tr></table>\n\n<details><summary>three</summary>four</details>\n",
+        );
+        assert_eq!(doc.stats().words, 4);
     }
 
     fn unit(block: &Block) -> &Block {
@@ -2553,6 +2942,17 @@ mod tests {
             "<h1>",
             "<h1>\n\na\n\n</h1>",
             "<picture><source>",
+            "<table>",
+            "<table><td>",
+            "<td>",
+            "</td></tr></table>",
+            "<table><td colspan=-1>",
+            "<table><tr></table>",
+            "<table><col><caption>a</caption></table>",
+            "<details>",
+            "<summary>a</summary>",
+            "<details><summary>",
+            "</details>",
             "<source srcset=>",
             "a<img src=a align=right>",
             "<img src=a align=right><img src=b align=left>",

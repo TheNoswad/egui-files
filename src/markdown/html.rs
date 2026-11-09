@@ -6,7 +6,7 @@
 //! It's only ever drawn, never run, and what isn't known here just doesn't
 //! do anything.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, ops::Range};
 
 use html5gum::{DefaultEmitter, HtmlString, Token, Tokenizer};
 
@@ -65,23 +65,63 @@ pub fn pieces(html: &str) -> Vec<Piece> {
     pieces
 }
 
-/// A block tag that isn't drawn yet.
-pub fn is_undrawn_tag(name: &str) -> bool {
-    matches!(
-        name,
-        "caption"
-            | "col"
-            | "colgroup"
-            | "details"
-            | "summary"
-            | "table"
-            | "tbody"
-            | "td"
-            | "tfoot"
-            | "th"
-            | "thead"
-            | "tr"
-    )
+/// A tag of a table's structure, which means something inside a cell.
+pub fn is_table_part(name: &str) -> bool {
+    matches!(name, "tbody" | "td" | "tfoot" | "th" | "thead" | "tr")
+}
+
+/// An attribute's value, in the source of some HTML.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Attribute {
+    /// In lower case.
+    pub name: String,
+    pub value: Range<usize>,
+    pub quoted: bool,
+}
+
+/// The attributes of the tags in some HTML, as they're written.
+pub fn attributes(html: &str) -> Vec<Attribute> {
+    let mut emitter = DefaultEmitter::<usize>::new_with_span();
+    emitter.naively_switch_states(true);
+    let mut found = Vec::new();
+    for Ok(token) in Tokenizer::new_with_emitter(html, emitter) {
+        let Token::StartTag(tag) = token else {
+            continue;
+        };
+        for (name, value) in &tag.attributes {
+            let name = text(name);
+            found.extend(
+                written_value(html, value.span.start).map(|(value, quoted)| Attribute {
+                    name,
+                    value,
+                    quoted,
+                }),
+            );
+        }
+    }
+    found
+}
+
+/// Where the value is of the attribute whose name starts at `start`.
+fn written_value(html: &str, start: usize) -> Option<(Range<usize>, bool)> {
+    let is_space = |c: char| c.is_ascii_whitespace();
+    let rest = html.get(start..)?;
+    let name = rest.find(|c: char| is_space(c) || matches!(c, '=' | '>' | '/'))?;
+    let after_name = rest[name..].trim_start_matches(is_space);
+    let after_equals = after_name.strip_prefix('=')?.trim_start_matches(is_space);
+    let at = html.len() - after_equals.len();
+    match after_equals.chars().next()? {
+        quote @ ('"' | '\'') => {
+            let len = after_equals[1..].find(quote)?;
+            Some((at + 1..at + 1 + len, true))
+        }
+        _ => {
+            let len = after_equals
+                .find(|c: char| is_space(c) || c == '>')
+                .unwrap_or(after_equals.len());
+            (len > 0).then_some((at..at + len, false))
+        }
+    }
 }
 
 /// Which way blocks are set in HTML.
@@ -370,6 +410,35 @@ mod tests {
     #[test]
     fn what_is_in_a_script_is_not_tags() {
         assert_eq!(pieces("<script>a<b</script>").len(), 3);
+    }
+
+    fn values(html: &str) -> Vec<(String, &str, bool)> {
+        let mut found: Vec<_> = attributes(html)
+            .into_iter()
+            .map(|a| (a.name, &html[a.value], a.quoted))
+            .collect();
+        found.sort();
+        found
+    }
+
+    #[test]
+    fn attribute_values_are_found_where_they_are_written() {
+        let found = values("é<img  SRC = \"a b.png\" alt='>' width=5/><p id=x>");
+        let names: Vec<_> = found.iter().map(|(n, v, q)| (n.as_str(), *v, *q)).collect();
+        assert_eq!(
+            names,
+            [
+                ("alt", ">", true),
+                ("id", "x", false),
+                ("src", "a b.png", true),
+                ("width", "5/", false),
+            ]
+        );
+        assert_eq!(values("<a href><b c=>"), []);
+        assert_eq!(
+            values("<!-- <a href=x> --><script>'<a href=y>'</script>"),
+            []
+        );
     }
 
     #[test]

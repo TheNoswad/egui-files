@@ -949,6 +949,46 @@ type LaidOut = (
 );
 
 /// How to set a piece of inline text.
+/// A row of a table as it's drawn, whichever kind of table it's from.
+struct TableRow<'a> {
+    /// Set apart as a heading.
+    head: bool,
+    cells: Vec<TableCell<'a>>,
+}
+
+struct TableCell<'a> {
+    text: &'a Inlines,
+    /// How many columns it's over, at least one.
+    span: usize,
+    halign: Align,
+    header: bool,
+}
+
+fn markdown_cells<'a>(cells: &'a [Inlines], aligns: &[Alignment]) -> Vec<TableCell<'a>> {
+    cells
+        .iter()
+        .enumerate()
+        .map(|(index, text)| TableCell {
+            text,
+            span: 1,
+            halign: match aligns.get(index) {
+                Some(Alignment::Center) => Align::Center,
+                Some(Alignment::Right) => Align::RIGHT,
+                _ => Align::LEFT,
+            },
+            header: false,
+        })
+        .collect()
+}
+
+fn halign_of(align: Option<html::Align>) -> Align {
+    match align {
+        Some(html::Align::Center) => Align::Center,
+        Some(html::Align::Right) => Align::RIGHT,
+        Some(html::Align::Left) | None => Align::LEFT,
+    }
+}
+
 #[derive(Clone, Copy)]
 struct TextStyle {
     size: f32,
@@ -1087,14 +1127,7 @@ impl Builder<'_> {
                 self.block_source = block.source.clone();
             }
             BlockKind::Aligned { align, children } => {
-                let was = std::mem::replace(
-                    &mut self.align,
-                    match align {
-                        html::Align::Left => Align::LEFT,
-                        html::Align::Center => Align::Center,
-                        html::Align::Right => Align::RIGHT,
-                    },
-                );
+                let was = std::mem::replace(&mut self.align, halign_of(Some(*align)));
                 self.blocks(children, x, width);
                 self.align = was;
             }
@@ -1131,7 +1164,19 @@ impl Builder<'_> {
                     }
                 }
             }
-            BlockKind::Table { aligns, head, rows } => self.table(aligns, head, rows, x, width),
+            BlockKind::Table { aligns, head, rows } => {
+                let mut table = Vec::with_capacity(rows.len() + 1);
+                if !head.is_empty() {
+                    let mut cells = markdown_cells(head, aligns);
+                    cells.iter_mut().for_each(|cell| cell.header = true);
+                    table.push(TableRow { head: true, cells });
+                }
+                table.extend(rows.iter().map(|cells| TableRow {
+                    head: false,
+                    cells: markdown_cells(cells, aligns),
+                }));
+                self.table(&table, x, width);
+            }
             BlockKind::Rule => {
                 let y = self.y + self.theme.gap() * 0.5;
                 self.out.items.push(Item::Line {
@@ -1142,7 +1187,33 @@ impl Builder<'_> {
                 self.y = y + self.theme.gap() * 0.5;
             }
             BlockKind::Frontmatter(fields) => self.frontmatter(fields, x, width),
-            BlockKind::Html(html) => self.raw(html.trim_end(), x, width),
+            // Each has been made into what it says by now.
+            BlockKind::Html(_) => {}
+            BlockKind::HtmlTable(rows) => {
+                let rows: Vec<TableRow<'_>> = rows
+                    .iter()
+                    .map(|row| TableRow {
+                        head: !row.cells.is_empty() && row.cells.iter().all(|cell| cell.header),
+                        cells: row
+                            .cells
+                            .iter()
+                            .map(|cell| TableCell {
+                                text: &cell.text,
+                                span: cell.colspan.max(1),
+                                halign: halign_of(cell.align),
+                                header: cell.header,
+                            })
+                            .collect(),
+                    })
+                    .collect();
+                self.table(&rows, x, width);
+            }
+            BlockKind::Details {
+                summary,
+                open,
+                key,
+                children,
+            } => self.details(summary, *open, *key, children, x, width),
             BlockKind::Math(math) => self.display_math(math.trim(), x, width),
         }
     }
@@ -1334,6 +1405,49 @@ impl Builder<'_> {
             editable: None,
         }));
         self.y += height;
+    }
+
+    /// `<details>`: its summary, and what's in it once it's opened.
+    fn details(
+        &mut self,
+        summary: &Inlines,
+        open: bool,
+        key: usize,
+        children: &[Block],
+        x: f32,
+        width: f32,
+    ) {
+        let shown = open != self.toggled.contains(&key);
+        let top = self.y;
+        // The summary isn't text to edit, and opens it wherever it's clicked.
+        let source = self.source.take();
+        let align = std::mem::replace(&mut self.align, Align::LEFT);
+        let mut untitled = Inlines::default();
+        let title = if summary.is_empty() {
+            untitled.push_plain("Details");
+            &untitled
+        } else {
+            summary
+        };
+        let style = self.body();
+        let wide = self.text_width(title, style);
+        // Room for the caret drawn at the end.
+        let caret = self.theme.size * 2.0;
+        self.text(title, x, width - caret, style);
+        self.source = source;
+        self.align = align;
+        self.out.items.push(Item::Widget {
+            rect: Rect::from_min_size(
+                egui::pos2(x, top),
+                egui::vec2((wide + caret).min(width), self.y - top),
+            ),
+            widget: Widget::Fold(key),
+            on: shown,
+        });
+        if shown && !children.is_empty() {
+            self.y += self.theme.gap() * 0.4;
+            self.blocks(children, x, width);
+        }
     }
 
     fn quote(&mut self, children: &[Block], x: f32, width: f32) {
@@ -1590,17 +1704,12 @@ impl Builder<'_> {
         self.y += height;
     }
 
-    fn table(
-        &mut self,
-        aligns: &[Alignment],
-        head: &[Inlines],
-        rows: &[Vec<Inlines>],
-        x: f32,
-        width: f32,
-    ) {
-        let columns = head
-            .len()
-            .max(rows.iter().map(Vec::len).max().unwrap_or(0))
+    fn table(&mut self, rows: &[TableRow<'_>], x: f32, width: f32) {
+        let columns = rows
+            .iter()
+            .map(|row| row.cells.iter().map(|cell| cell.span).sum())
+            .max()
+            .unwrap_or(0)
             .max(1);
         let padding = self.theme.size * 0.6;
         let head_style = TextStyle {
@@ -1613,12 +1722,32 @@ impl Builder<'_> {
         // Natural widths, then shrink what's wide until it fits or nothing
         // more can give. A cell is never narrower than a few characters.
         let mut natural = vec![0.0f32; columns];
-        for (index, cell) in head.iter().enumerate() {
-            natural[index] = natural[index].max(self.text_width(cell, head_style));
-        }
+        let cell_style = |cell: &TableCell<'_>| if cell.header { head_style } else { body_style };
         for row in rows {
-            for (index, cell) in row.iter().enumerate() {
-                natural[index] = natural[index].max(self.text_width(cell, body_style));
+            let mut column = 0;
+            for cell in &row.cells {
+                if cell.span == 1 {
+                    let wide = self.text_width(cell.text, cell_style(cell));
+                    natural[column] = natural[column].max(wide);
+                }
+                column += cell.span;
+            }
+        }
+        // What's over several columns shares out what it needs beyond them.
+        for row in rows {
+            let mut column = 0;
+            for cell in &row.cells {
+                if cell.span > 1 {
+                    let wide = self.text_width(cell.text, cell_style(cell));
+                    let spanned = &mut natural[column..column + cell.span];
+                    let inner = padding * 2.0 * (cell.span - 1) as f32;
+                    let short = wide - inner - spanned.iter().sum::<f32>();
+                    if short > 0.0 {
+                        let each = short / cell.span as f32;
+                        spanned.iter_mut().for_each(|width| *width += each);
+                    }
+                }
+                column += cell.span;
             }
         }
         let widths = column_widths(
@@ -1633,45 +1762,51 @@ impl Builder<'_> {
         let mut items = Vec::new();
         let mut row_y = 0.0;
         let mut row_index = 0usize;
-        let head_row = (!head.is_empty()).then_some(head);
-        let all_rows = head_row
-            .into_iter()
-            .map(|row| (row, true))
-            .chain(rows.iter().map(|row| (row.as_slice(), false)));
-        for (row, is_head) in all_rows {
-            let style = if is_head { head_style } else { body_style };
+        for row in rows {
+            let is_head = row.head;
             let mut cells = Vec::new();
             let mut height = self.theme.line_height(self.theme.size);
             let mut cell_x = padding;
-            for (index, width) in widths.iter().enumerate() {
-                if let Some(cell) = row.get(index) {
-                    let halign = match aligns.get(index) {
-                        Some(Alignment::Center) => Align::Center,
-                        Some(Alignment::Right) => Align::RIGHT,
-                        _ => Align::LEFT,
-                    };
-                    let style = TextStyle { halign, ..style };
-                    self.field_kind = FieldKind::Cell;
-                    let (galley, links, images, editable) = self.inline_job(cell, *width, style);
-                    self.field_kind = FieldKind::Inline;
-                    // An empty cell has no place in the source to go by.
-                    let editable = editable.filter(|field| !field.spans.is_empty());
-                    height = height.max(galley.size().y);
-                    // A galley aligned to the center or right is drawn around
-                    // its position, which is why it's put in the cell's middle.
-                    let cell_pos = match halign {
-                        Align::Center => cell_x + width / 2.0,
-                        Align::Max => cell_x + width,
-                        Align::Min => cell_x,
-                    };
-                    cells.push(TextItem {
-                        pos: egui::pos2(cell_pos, 0.0),
-                        galley,
-                        links,
-                        images,
-                        editable,
-                    });
+            let mut column = 0;
+            // Which rules between columns a cell goes over.
+            let mut spanned = vec![false; columns];
+            for cell in &row.cells {
+                let end = (column + cell.span).min(columns);
+                let width = widths[column..end].iter().sum::<f32>()
+                    + padding * 2.0 * (end - column).saturating_sub(1) as f32;
+                spanned[column..end.saturating_sub(1)].fill(true);
+                column = end;
+                let halign = cell.halign;
+                let style = TextStyle {
+                    halign,
+                    ..cell_style(cell)
+                };
+                for name in &cell.text.anchors {
+                    self.out
+                        .anchors
+                        .entry(name.clone())
+                        .or_insert(origin_y + row_y);
                 }
+                self.field_kind = FieldKind::Cell;
+                let (galley, links, images, editable) = self.inline_job(cell.text, width, style);
+                self.field_kind = FieldKind::Inline;
+                // An empty cell has no place in the source to go by.
+                let editable = editable.filter(|field| !field.spans.is_empty());
+                height = height.max(galley.size().y);
+                // A galley aligned to the center or right is drawn around
+                // its position, which is why it's put in the cell's middle.
+                let cell_pos = match halign {
+                    Align::Center => cell_x + width / 2.0,
+                    Align::Max => cell_x + width,
+                    Align::Min => cell_x,
+                };
+                cells.push(TextItem {
+                    pos: egui::pos2(cell_pos, 0.0),
+                    galley,
+                    links,
+                    images,
+                    editable,
+                });
                 cell_x += width + padding * 2.0;
             }
             let row_height = height + padding;
@@ -1701,6 +1836,17 @@ impl Builder<'_> {
                 cell.pos.y = row_y + padding / 2.0;
                 items.push(Item::Text(cell));
             }
+            let mut rule_x = 0.0;
+            for (index, width) in widths[..columns - 1].iter().enumerate() {
+                rule_x += width + padding * 2.0;
+                if !spanned[index] {
+                    items.push(Item::Line {
+                        from: egui::pos2(rule_x, row_y),
+                        to: egui::pos2(rule_x, row_y + row_height),
+                        stroke: Stroke::new(1.0, self.theme.border),
+                    });
+                }
+            }
             row_y += row_height;
             items.push(Item::Line {
                 from: egui::pos2(0.0, row_y),
@@ -1708,16 +1854,7 @@ impl Builder<'_> {
                 stroke: Stroke::new(1.0, self.theme.border),
             });
         }
-        // Column rules and the outline.
-        let mut rule_x = 0.0;
-        for width in &widths[..columns - 1] {
-            rule_x += width + padding * 2.0;
-            items.push(Item::Line {
-                from: egui::pos2(rule_x, 0.0),
-                to: egui::pos2(rule_x, row_y),
-                stroke: Stroke::new(1.0, self.theme.border),
-            });
-        }
+        // The outline.
         items.push(Item::Stroke {
             rect: Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(content_width, row_y)),
             stroke: Stroke::new(1.0, self.theme.border),
@@ -3132,6 +3269,30 @@ mod tests {
             let laid_out = fields_of(source);
             assert!(laid_out.placed_fields().is_empty(), "{source}");
         }
+    }
+
+    #[test]
+    fn html_tables_are_one_unit_and_cells_span_columns() {
+        let source =
+            "<table><tr><th>a</th><th>b</th></tr><tr><td colspan=2>wide</td></tr></table>\n";
+        assert!(fields_of(source).placed_fields().is_empty());
+        let mut pictures = Pictures(egui::vec2(10.0, 10.0));
+        let layout = run(source, 600.0, &mut pictures);
+        let lines = layout
+            .items
+            .iter()
+            .filter(|item| matches!(item, Item::Line { from, to, .. } if from.x == to.x))
+            .count();
+        assert_eq!(lines, 1, "a rule between the columns in the first row only");
+    }
+
+    #[test]
+    fn details_are_closed_until_toggled_or_open() {
+        let source = "<details><summary>a</summary>b</details>\n";
+        let mut pictures = Pictures(egui::vec2(10.0, 10.0));
+        assert_eq!(texts(&run(source, 600.0, &mut pictures)).len(), 1);
+        let source = "<details open><summary>a</summary>b</details>\n";
+        assert_eq!(texts(&run(source, 600.0, &mut pictures)).len(), 2);
     }
 
     #[test]

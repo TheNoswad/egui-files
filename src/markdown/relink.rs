@@ -24,7 +24,7 @@ use std::{
 
 use pulldown_cmark::{Event, LinkType, Parser, Tag};
 
-use super::{links, parse};
+use super::{html, links, parse};
 
 /// How many files and folders a scan looks at before giving up on the rest.
 const SCAN_LIMIT: usize = 20_000;
@@ -135,6 +135,16 @@ struct Found {
     wiki: bool,
     /// Written in `<angle brackets>`, which can hold spaces as they are.
     angled: bool,
+    /// An HTML attribute that some characters would break.
+    html: Option<HtmlValue>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HtmlValue {
+    /// Without quotes.
+    Bare,
+    /// One of a `srcset`'s pictures, which are separated by commas.
+    Srcset,
 }
 
 /// The destination of `[text](destination "title")`, which is at its end.
@@ -206,12 +216,13 @@ fn destinations(source: &str) -> Vec<Found> {
             url: definition.dest.to_string(),
             wiki: false,
             angled,
+            html: None,
         });
     }
-    let mut in_comment = false;
     for (event, range) in parser.into_offset_iter() {
-        if matches!(event, Event::Html(_) | Event::InlineHtml(_)) {
-            html_destinations(source, range, &mut in_comment, &mut found);
+        // A block of HTML whole, as its tags and comments go over its lines.
+        if matches!(event, Event::Start(Tag::HtmlBlock) | Event::InlineHtml(_)) {
+            html_destinations(source, range, &mut found);
             continue;
         }
         let (Event::Start(Tag::Link {
@@ -237,6 +248,7 @@ fn destinations(source: &str) -> Vec<Found> {
                     url: dest_url.to_string(),
                     wiki: false,
                     angled,
+                    html: None,
                 });
             }
             LinkType::WikiLink { .. } => {
@@ -256,6 +268,7 @@ fn destinations(source: &str) -> Vec<Found> {
                     url: inner[..end].to_owned(),
                     wiki: true,
                     angled: false,
+                    html: None,
                 });
             }
             _ => {}
@@ -265,75 +278,41 @@ fn destinations(source: &str) -> Vec<Found> {
     found
 }
 
-/// The `src` and `href` of the tags in a piece of raw HTML. A comment isn't
-/// code that runs, and can go on over several pieces.
-fn html_destinations(
-    source: &str,
-    range: Range<usize>,
-    in_comment: &mut bool,
-    found: &mut Vec<Found>,
-) {
+/// The `src`, `href` and `srcset` of the tags in a stretch of raw HTML.
+fn html_destinations(source: &str, range: Range<usize>, found: &mut Vec<Found>) {
     let Some(text) = source.get(range.clone()) else {
         return;
     };
-    let mut at = 0;
-    while at < text.len() {
-        if *in_comment {
-            match text[at..].find("-->") {
-                Some(end) => {
-                    at += end + 3;
-                    *in_comment = false;
+    let mut add = |value: Range<usize>, html| {
+        found.push(Found {
+            range: range.start + value.start..range.start + value.end,
+            url: text[value].to_owned(),
+            wiki: false,
+            angled: false,
+            html,
+        });
+    };
+    for attribute in html::attributes(text) {
+        let value = attribute.value;
+        match attribute.name.as_str() {
+            "src" | "href" if !value.is_empty() => {
+                let kind = (!attribute.quoted).then_some(HtmlValue::Bare);
+                add(value, kind);
+            }
+            "srcset" => {
+                // `first.png 1x, second.png 2x`
+                let mut at = value.start;
+                for candidate in text[value.clone()].split(',') {
+                    let skipped = candidate.len() - candidate.trim_start().len();
+                    let url = candidate.trim_start();
+                    let len = url.find(char::is_whitespace).unwrap_or(url.len());
+                    if len > 0 {
+                        add(at + skipped..at + skipped + len, Some(HtmlValue::Srcset));
+                    }
+                    at += candidate.len() + 1;
                 }
-                None => return,
             }
-            continue;
-        }
-        let Some(open) = text[at..].find('<') else {
-            return;
-        };
-        at += open;
-        if text[at..].starts_with("<!--") {
-            *in_comment = true;
-            at += 4;
-            continue;
-        }
-        let end = text[at..].find('>').map_or(text.len(), |end| at + end);
-        attributes(text, at..end, range.start, found);
-        at = end + 1;
-    }
-}
-
-/// Finds the destinations among a tag's attributes.
-fn attributes(text: &str, tag: Range<usize>, offset: usize, found: &mut Vec<Found>) {
-    let lower = text[tag.clone()].to_ascii_lowercase();
-    for name in ["src", "href"] {
-        let mut from = 0;
-        while let Some(hit) = lower[from..].find(name) {
-            let start = from + hit;
-            from = start + name.len();
-            // The whole of the attribute's name.
-            let before = lower[..start].chars().next_back();
-            if !before.is_some_and(char::is_whitespace) {
-                continue;
-            }
-            let rest = &lower[from..];
-            let Some(value) = rest.trim_start().strip_prefix('=') else {
-                continue;
-            };
-            let value = value.trim_start();
-            let Some(quote) = value.chars().next().filter(|c| matches!(c, '"' | '\'')) else {
-                continue;
-            };
-            let begin = tag.start + from + (rest.len() - value.len()) + 1;
-            let Some(len) = text[begin..tag.end].find(quote) else {
-                continue;
-            };
-            found.push(Found {
-                range: offset + begin..offset + begin + len,
-                url: text[begin..begin + len].to_owned(),
-                wiki: false,
-                angled: false,
-            });
+            _ => {}
         }
     }
 }
@@ -396,7 +375,12 @@ fn written_as(
     };
     let scheme = if is_file_url { "file://" } else { "" };
     let path = if found.angled { plain } else { encode(&plain) };
-    Some(format!("{scheme}{path}{suffix}"))
+    let new = format!("{scheme}{path}{suffix}");
+    Some(match found.html {
+        Some(HtmlValue::Srcset) => new.replace(',', "%2C"),
+        Some(HtmlValue::Bare) if new.contains([' ', '\t', '\'', '=', '`']) => format!("\"{new}\""),
+        _ => new,
+    })
 }
 
 /// The file a `[[name]]` goes to, as the app follows it (see `links::wiki`): the
@@ -1495,6 +1479,47 @@ mod tests {
             ),
             "Text <a href='p%20i/a.png'>x</a> more\n"
         );
+        assert_eq!(
+            after("<img src=a.png>\n", "/v/d.md", &moves, files),
+            "<img src=p%20i/a.png>\n",
+            "values without quotes are found"
+        );
+        assert_eq!(
+            after(
+                "<img alt=\"a > b\" src=\"a.png\">\n",
+                "/v/d.md",
+                &moves,
+                files
+            ),
+            "<img alt=\"a > b\" src=\"p%20i/a.png\">\n",
+            "> inside quotes doesn't end the tag"
+        );
+        assert_eq!(
+            after("a <img\n  src=\"a.png\">\n", "/v/d.md", &moves, files),
+            "a <img\n  src=\"p%20i/a.png\">\n",
+            "a tag can go over lines"
+        );
+        assert_eq!(
+            after(
+                "<picture><source srcset=\"a.png 1x, a.png 2x\"><img src=\"a.png\"></picture>\n",
+                "/v/d.md",
+                &moves,
+                files
+            ),
+            "<picture><source srcset=\"p%20i/a.png 1x, p%20i/a.png 2x\"><img src=\"p%20i/a.png\"></picture>\n"
+        );
+        let quirky = [moved("/v/a.png", "/v/x=1,y/a.png")];
+        let files = &["/v/x=1,y/a.png"];
+        assert_eq!(
+            after("<img src=a.png>\n", "/v/d.md", &quirky, files),
+            "<img src=\"x=1,y/a.png\">\n",
+            "quotes are added when the new path needs them"
+        );
+        assert_eq!(
+            after("<img srcset=\"a.png\">\n", "/v/d.md", &quirky, files),
+            "<img srcset=\"x=1%2Cy/a.png\">\n"
+        );
+        let files = &["/v/p i/a.png"];
         for untouched in [
             "<!-- <img src=\"a.png\"> -->\n",
             "<!-- one\n<img src=\"a.png\">\nthree -->\n",

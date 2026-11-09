@@ -645,6 +645,18 @@ Hidden **markdown**.
 
 </details>
 
+<details open><summary>Open to start with</summary>HTML in it.</details>
+
+<table>
+  <thead>
+    <tr><th>Left</th><th align="center">Centered</th><th align="right">Right</th></tr>
+  </thead>
+  <tbody>
+    <tr><td colspan="2">Over two columns</td><td align="right"><b>1</b></td></tr>
+    <tr><td>A line<br>and another</td><td align="center"><a href="other.md">Link</a></td><td><img src="pics/small.png" alt="Small" width="24"></td></tr>
+  </tbody>
+</table>
+
 <!-- A comment, which browsers wouldn't show -->
 
 ## Stress
