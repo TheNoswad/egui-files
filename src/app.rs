@@ -1659,6 +1659,14 @@ impl FilesApp {
                     {
                         crate::remote::open_connect_dialog(None);
                     }
+                    #[cfg(not(any(target_os = "android", target_arch = "wasm32")))]
+                    if crate::remote::proton::username().is_none()
+                        && ui
+                            .button(format!("{} Connect to Proton Drive…", icon::CLOUD))
+                            .clicked()
+                    {
+                        crate::remote::proton::connect();
+                    }
                     if ui
                         .add(
                             Button::new(format!("{} Disk usage", icon::CHART_PIE_SLICE))
@@ -3063,6 +3071,7 @@ impl FilesApp {
     fn save_state(&mut self, storage: &mut dyn eframe::Storage) {
         self.terminal.remember_dirs();
         self.sidebar.layout.servers = crate::remote::recent();
+        self.sidebar.layout.cloud = crate::remote::cloud();
         let keymap = crate::keymap::get(&self.ctx);
         let state = PersistedRef {
             dock: &self.dock,

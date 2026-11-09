@@ -164,6 +164,12 @@ pub fn save(path: &Path, text: &str, line_ending: LineEnding, bom: bool) -> io::
 
 /// Puts these bytes in the file, as [`save`] does.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<Stamp> {
+    // The Drive is atomic already: a save is a new revision, whole or not at all.
+    #[cfg(not(target_arch = "wasm32"))]
+    if disk::proton::is_proton(path) {
+        disk::write(path, bytes)?;
+        return stamp(path).ok_or_else(|| io::ErrorKind::NotFound.into());
+    }
     let target = disk::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let meta = disk::metadata(&target).ok();
     #[cfg(unix)]

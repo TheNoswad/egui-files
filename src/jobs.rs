@@ -1228,6 +1228,10 @@ async fn copy_file(
 ) -> bool {
     p.set_current(src);
     let result = async {
+        #[cfg(not(target_arch = "wasm32"))]
+        if disk::proton::is_proton(dst) {
+            return copy_to_proton(src, dst, meta, p);
+        }
         let mut from = disk::File::open(src)?;
         let mut to = disk::File::create_new(dst)?;
         // Within one server, on the server, a piece at a time for progress.
@@ -1279,6 +1283,46 @@ async fn copy_file(
             false
         }
     }
+}
+
+/// Reads a file for the Drive, for the job's progress and cancelling.
+#[cfg(not(target_arch = "wasm32"))]
+struct Counted<'a> {
+    file: disk::File,
+    p: &'a Progress,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl io::Read for Counted<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if self.p.cancelled() {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+        }
+        let n = self.file.read(buffer)?;
+        self.p.done_bytes.fetch_add(n as u64, Relaxed);
+        Ok(n)
+    }
+}
+
+/// Copies a file into the Drive: straight from where it is, not by way of
+/// a whole copy here, and on the Drive if that's where it is too.
+#[cfg(not(target_arch = "wasm32"))]
+fn copy_to_proton(src: &Path, dst: &Path, meta: &disk::Metadata, p: &Progress) -> io::Result<()> {
+    if disk::proton::is_proton(src) {
+        disk::proton::copy_within(src, dst)?;
+        p.done_bytes.fetch_add(meta.len(), Relaxed);
+        return Ok(());
+    }
+    let modified = meta
+        .modified()
+        .ok()
+        .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|since| since.as_secs() as i64);
+    let mut reader = Counted {
+        file: disk::File::open(src)?,
+        p,
+    };
+    disk::proton::upload_new(dst, &mut reader, meta.len(), modified)
 }
 
 pub(crate) fn remove_all(path: &Path) -> io::Result<()> {
@@ -1351,6 +1395,203 @@ mod tests {
 
     fn read(path: PathBuf) -> String {
         disk::read_to_string(path).unwrap()
+    }
+
+    /// A file or folder of the [`FakeDrive`]: its parent, itself, its contents.
+    type FakeNode = (String, disk::proton::Node, Vec<u8>);
+
+    /// A Proton Drive in memory, by id.
+    #[derive(Default)]
+    struct FakeDrive(std::sync::Mutex<std::collections::HashMap<String, FakeNode>>);
+
+    impl FakeDrive {
+        fn insert(
+            &self,
+            parent: &str,
+            name: &str,
+            is_dir: bool,
+            bytes: Vec<u8>,
+        ) -> disk::proton::Node {
+            let mut nodes = self.0.lock().unwrap();
+            let node = disk::proton::Node {
+                id: format!("n{}", nodes.len()),
+                name: name.to_owned(),
+                is_dir,
+                size: bytes.len() as u64,
+                modified: 1_700_000_000,
+            };
+            nodes.insert(node.id.clone(), (parent.to_owned(), node.clone(), bytes));
+            node
+        }
+
+        fn bytes(reader: &mut (dyn io::Read + Send)) -> io::Result<Vec<u8>> {
+            let mut bytes = Vec::new();
+            reader.read_to_end(&mut bytes)?;
+            Ok(bytes)
+        }
+    }
+
+    struct FakeRead(Vec<u8>);
+
+    impl disk::proton::Reader for FakeRead {
+        fn size(&self) -> u64 {
+            self.0.len() as u64
+        }
+
+        fn read_at(&self, offset: u64, length: u64) -> io::Result<Vec<u8>> {
+            let start = (offset as usize).min(self.0.len());
+            let end = (start + length as usize).min(self.0.len());
+            Ok(self.0[start..end].to_vec())
+        }
+    }
+
+    impl disk::proton::Backend for FakeDrive {
+        fn root(&self) -> io::Result<disk::proton::Node> {
+            Ok(disk::proton::Node {
+                id: "root".to_owned(),
+                name: "root".to_owned(),
+                is_dir: true,
+                size: 0,
+                modified: 0,
+            })
+        }
+
+        fn list(&self, folder: &str) -> io::Result<Vec<disk::proton::Node>> {
+            let nodes = self.0.lock().unwrap();
+            Ok(nodes
+                .values()
+                .filter(|(parent, ..)| parent == folder)
+                .map(|(_, node, _)| node.clone())
+                .collect())
+        }
+
+        fn open(&self, file: &str) -> io::Result<Box<dyn disk::proton::Reader>> {
+            Ok(Box::new(FakeRead(self.0.lock().unwrap()[file].2.clone())))
+        }
+
+        fn thumbnail(&self, _file: &str) -> io::Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+
+        fn create_folder(&self, parent: &str, name: &str) -> io::Result<disk::proton::Node> {
+            Ok(self.insert(parent, name, true, Vec::new()))
+        }
+
+        fn upload(
+            &self,
+            parent: &str,
+            name: &str,
+            reader: &mut (dyn io::Read + Send),
+            _size: u64,
+            _modified: Option<i64>,
+        ) -> io::Result<disk::proton::Node> {
+            Ok(self.insert(parent, name, false, Self::bytes(reader)?))
+        }
+
+        fn upload_revision(
+            &self,
+            file: &str,
+            reader: &mut (dyn io::Read + Send),
+            _size: u64,
+            _modified: Option<i64>,
+        ) -> io::Result<disk::proton::Node> {
+            let bytes = Self::bytes(reader)?;
+            let mut nodes = self.0.lock().unwrap();
+            let entry = nodes.get_mut(file).ok_or(io::ErrorKind::NotFound)?;
+            entry.1.size = bytes.len() as u64;
+            entry.2 = bytes;
+            Ok(entry.1.clone())
+        }
+
+        fn rename(&self, id: &str, name: &str, _is_dir: bool) -> io::Result<()> {
+            self.0.lock().unwrap().get_mut(id).unwrap().1.name = name.to_owned();
+            Ok(())
+        }
+
+        fn move_to(&self, id: &str, parent: &str) -> io::Result<()> {
+            self.0.lock().unwrap().get_mut(id).unwrap().0 = parent.to_owned();
+            Ok(())
+        }
+
+        fn copy(&self, id: &str, parent: &str, name: &str) -> io::Result<disk::proton::Node> {
+            let bytes = self.0.lock().unwrap()[id].2.clone();
+            Ok(self.insert(parent, name, false, bytes))
+        }
+
+        fn trash(&self, id: &str) -> io::Result<()> {
+            self.0.lock().unwrap().remove(id);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn jobs_and_saves_reach_the_proton_drive() {
+        let root = scratch("proton");
+        let (here, back) = (root.join("here"), root.join("back"));
+        disk::create_dir_all(here.join("tree/sub")).unwrap();
+        disk::create_dir_all(&back).unwrap();
+        disk::write(here.join("tree/a.txt"), "a").unwrap();
+        disk::write(here.join("tree/sub/b.bin"), vec![7u8; 3 * BUFFER_SIZE + 5]).unwrap();
+        disk::write(here.join("moves.txt"), "moved").unwrap();
+        disk::proton::set_backend(Some(std::sync::Arc::new(FakeDrive::default())));
+        let drive = disk::proton::top();
+        disk::create_dir(drive.join("in")).unwrap();
+        let mut jobs = Jobs::new(&egui::Context::default());
+        let mut run = |kind| {
+            jobs.start(kind);
+            wait(&mut jobs);
+            assert_eq!(errors(&jobs), Vec::<String>::new());
+        };
+
+        run(JobKind::Copy {
+            sources: vec![here.join("tree")],
+            dest: drive.join("in"),
+        });
+        assert_eq!(read(drive.join("in/tree/a.txt")), "a");
+        assert_eq!(
+            disk::read(drive.join("in/tree/sub/b.bin")).unwrap().len(),
+            3 * BUFFER_SIZE + 5
+        );
+
+        // Moving in is a copy, then the original goes.
+        run(JobKind::Move {
+            sources: vec![here.join("moves.txt")],
+            dest: drive.join("in"),
+        });
+        assert_eq!(read(drive.join("in/moves.txt")), "moved");
+        assert!(!disk::exists(here.join("moves.txt")).unwrap());
+
+        // Out of it again, and within it.
+        run(JobKind::Copy {
+            sources: vec![drive.join("in/tree")],
+            dest: back.clone(),
+        });
+        assert_eq!(read(back.join("tree/a.txt")), "a");
+        disk::create_dir(drive.join("other")).unwrap();
+        run(JobKind::Copy {
+            sources: vec![drive.join("in/tree/a.txt")],
+            dest: drive.join("other"),
+        });
+        assert_eq!(read(drive.join("other/a.txt")), "a");
+        run(JobKind::Move {
+            sources: vec![drive.join("other/a.txt")],
+            dest: drive.join("in"),
+        });
+        assert!(!disk::exists(drive.join("other/a.txt")).unwrap());
+
+        // An editor's save takes the file's place, leaving nothing beside it.
+        let saved = crate::editor::document::write_atomic(&drive.join("in/moves.txt"), b"edited!");
+        saved.unwrap();
+        assert_eq!(read(drive.join("in/moves.txt")), "edited!");
+        let beside: Vec<String> = disk::read_dir(drive.join("in"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect();
+        assert_eq!(beside, Vec::<String>::new());
+
+        disk::proton::set_backend(None);
+        disk::remove_dir_all(root).unwrap();
     }
 
     #[test]

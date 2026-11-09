@@ -1,8 +1,9 @@
 //! The filesystem, as the app sees it.
 //!
 //! Everywhere but the browser it's `std::fs`, wrapped so that paths like
-//! `sftp://host/path` reach servers ([`sftp`]) through the same functions
-//! and types (`native`). The browser has no filesystem the app can reach
+//! `sftp://host/path` reach servers ([`sftp`]), and `proton://drive/path` a
+//! Proton Drive account ([`proton`]), through the same functions and types
+//! (`native`). The browser has no filesystem the app can reach
 //! (std's calls all fail there), so the web demo keeps one in memory with
 //! the same functions and types (`memory`).
 //! The app goes through here for every file; in the web build, clippy.toml
@@ -29,6 +30,8 @@ pub use native::{
     read_to_string, remove_dir, remove_dir_all, remove_file, rename, set_file_mtime,
     set_file_times, set_permissions, symlink, symlink_metadata, take_changes, write,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub mod proton;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod sftp;
 

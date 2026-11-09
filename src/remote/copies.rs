@@ -30,16 +30,39 @@ fn copies() -> std::sync::MutexGuard<'static, Vec<Copy>> {
     COPIES.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// The Drive's copies, within [`cache_base`]: readable by anyone who gets at
+/// this computer's files, unlike the Drive, so gone on signing out.
+const PROTON_FOLDER: &str = "proton-drive";
+
+fn cache_base() -> io::Result<PathBuf> {
+    Ok(directories::BaseDirs::new()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no cache folder"))?
+        .cache_dir()
+        .join("egui-files"))
+}
+
+/// Forgets and removes every copy of the Drive's files.
+#[cfg(not(target_os = "android"))]
+pub fn forget_proton() -> io::Result<()> {
+    copies().retain(|copy| !disk::proton::is_proton(&copy.remote));
+    match disk::remove_dir_all(cache_base()?.join(PROTON_FOLDER)) {
+        Err(err) if err.kind() != io::ErrorKind::NotFound => Err(err),
+        _ => Ok(()),
+    }
+}
+
 /// Where the copy of `remote` goes: under the cache folder, by server and
 /// path, with the file's own name so apps know what it is.
 fn local_path(remote: &Path) -> io::Result<PathBuf> {
+    let base = cache_base()?;
+    if let Some(parts) = disk::proton::parts(remote) {
+        let mut path = base.join(PROTON_FOLDER);
+        path.extend(parts);
+        return Ok(path);
+    }
     let location = disk::sftp::parse(remote)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "not a server's path"))?;
-    let base = directories::BaseDirs::new()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no cache folder"))?
-        .cache_dir()
-        .join("egui-files")
-        .join("servers");
+    let base = base.join("servers");
     // Characters some systems don't allow in names, out of the server's.
     let server: String = location
         .authority
@@ -120,6 +143,10 @@ fn watch() {
 /// Puts the copy at `local` back at `remote`: written beside it, then
 /// renamed over it, so a dropped connection doesn't leave half a file.
 fn put_back(local: &Path, remote: &Path) -> io::Result<()> {
+    // The Drive never shows half a file, as each save is a new revision.
+    if disk::proton::is_proton(remote) {
+        return disk::copy(local, remote).map(drop);
+    }
     let name = crate::fs::display_name(remote);
     let temp = remote.with_file_name(format!(".{name}.egui-files-{}.tmp", disk::process_id()));
     let result = disk::copy(local, &temp).and_then(|_| disk::rename(&temp, remote));
@@ -205,6 +232,8 @@ mod tests {
         let local = local_path(Path::new("sftp://me@host:22/srv/a b/notes.txt")).unwrap();
         assert!(local.ends_with(Path::new("servers/me@host_22/srv/a b/notes.txt")));
         assert!(local_path(Path::new("/tmp/x")).is_err());
+        let local = local_path(Path::new("proton://drive/Docs/a.txt")).unwrap();
+        assert!(local.ends_with(Path::new("proton-drive/Docs/a.txt")));
     }
 
     /// Against a server: see disk/src/sftp/tests.rs for

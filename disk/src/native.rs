@@ -13,10 +13,26 @@ use std::{
     time::SystemTime,
 };
 
-use crate::sftp::{self, Attrs, Location};
+use crate::{
+    proton,
+    sftp::{self, Attrs, Location},
+};
 
-/// Where `path` is: `None` if on this computer.
+/// Whether `path` is anywhere but on this computer.
+fn is_elsewhere(path: &Path) -> bool {
+    sftp::is_remote(path) || proton::is_proton(path)
+}
+
+/// A stand-in device number for the Drive's files, as [`device_of`] gives
+/// servers'.
+const PROTON_DEVICE: u64 = 1 << 63 | 0x7072_6f74;
+
+/// Where `path` is: `None` if on this computer. What the Drive can do checks
+/// for it first, so a Drive path that gets here is for what it can't.
 fn locate(path: &Path) -> io::Result<Option<Location>> {
+    if proton::is_proton(path) {
+        return Err(proton::unsupported());
+    }
     if !sftp::is_remote(path) {
         return Ok(None);
     }
@@ -197,6 +213,13 @@ impl Metadata {
         Self(Meta::Remote {
             attrs,
             device: device_of(location),
+        })
+    }
+
+    fn proton(attrs: Attrs) -> Self {
+        Self(Meta::Remote {
+            attrs,
+            device: PROTON_DEVICE,
         })
     }
 
@@ -400,6 +423,7 @@ pub struct DirEntry(Entry);
 enum Entry {
     Local(std::fs::DirEntry),
     Remote(sftp::Listed),
+    Proton(proton::Listed),
 }
 
 impl DirEntry {
@@ -407,6 +431,7 @@ impl DirEntry {
         match &self.0 {
             Entry::Local(e) => e.path(),
             Entry::Remote(e) => e.location.to_path(),
+            Entry::Proton(e) => e.path.clone(),
         }
     }
 
@@ -414,6 +439,7 @@ impl DirEntry {
         match &self.0 {
             Entry::Local(e) => e.file_name(),
             Entry::Remote(e) => e.name.clone().into(),
+            Entry::Proton(e) => e.name.clone().into(),
         }
     }
 
@@ -422,6 +448,7 @@ impl DirEntry {
         match &self.0 {
             Entry::Local(e) => e.metadata().map(Metadata::from),
             Entry::Remote(e) => Ok(Metadata::remote(e.link.clone(), &e.location)),
+            Entry::Proton(e) => Ok(Metadata::proton(e.attrs.clone())),
         }
     }
 
@@ -429,6 +456,7 @@ impl DirEntry {
         match &self.0 {
             Entry::Local(e) => e.file_type().map(|t| FileType(Kind::Local(t))),
             Entry::Remote(e) => Ok(FileType(Kind::Remote(e.link.kind()))),
+            Entry::Proton(e) => Ok(FileType(Kind::Remote(e.attrs.kind()))),
         }
     }
 }
@@ -439,6 +467,7 @@ pub struct ReadDir(Listing);
 enum Listing {
     Local(std::fs::ReadDir),
     Remote(std::vec::IntoIter<sftp::Listed>),
+    Proton(std::vec::IntoIter<proton::Listed>),
 }
 
 impl Iterator for ReadDir {
@@ -448,6 +477,7 @@ impl Iterator for ReadDir {
         match &mut self.0 {
             Listing::Local(entries) => Some(entries.next()?.map(|e| DirEntry(Entry::Local(e)))),
             Listing::Remote(entries) => Some(Ok(DirEntry(Entry::Remote(entries.next()?)))),
+            Listing::Proton(entries) => Some(Ok(DirEntry(Entry::Proton(entries.next()?)))),
         }
     }
 }
@@ -510,6 +540,23 @@ impl OpenOptions {
 
     pub fn open(&self, path: impl AsRef<Path>) -> io::Result<File> {
         let path = path.as_ref();
+        if proton::is_proton(path) {
+            let how = &self.remote;
+            let file = if how.write || how.append || how.truncate || how.create || how.create_new {
+                proton::open_for_writing(
+                    path,
+                    proton::Writing {
+                        create: how.create,
+                        create_new: how.create_new,
+                        truncate: how.truncate,
+                        append: how.append,
+                    },
+                )?
+            } else {
+                proton::open(path)?
+            };
+            return Ok(File(Handle::Proton(Box::new(Mutex::new(file)))));
+        }
         match locate(path)? {
             None => self.std.open(path).map(File::from),
             Some(location) => Ok(File(Handle::Remote(Box::new(Mutex::new(sftp::open(
@@ -541,6 +588,7 @@ pub struct File(Handle);
 enum Handle {
     Local(std::fs::File),
     Remote(Box<Mutex<sftp::File>>),
+    Proton(Box<Mutex<proton::File>>),
 }
 
 impl std::fmt::Debug for Handle {
@@ -550,6 +598,10 @@ impl std::fmt::Debug for Handle {
             Self::Remote(file) => {
                 let file = file.lock().unwrap_or_else(PoisonError::into_inner);
                 write!(f, "File({})", file.location().to_path().display())
+            }
+            Self::Proton(file) => {
+                let file = file.lock().unwrap_or_else(PoisonError::into_inner);
+                write!(f, "File({})", file.path().display())
             }
         }
     }
@@ -583,7 +635,7 @@ impl File {
     /// The server's file, locked; `None` for a local one.
     fn remote(&self) -> Option<std::sync::MutexGuard<'_, sftp::File>> {
         match &self.0 {
-            Handle::Local(_) => None,
+            Handle::Local(_) | Handle::Proton(_) => None,
             Handle::Remote(file) => Some(file.lock().unwrap_or_else(PoisonError::into_inner)),
         }
     }
@@ -596,6 +648,9 @@ impl File {
                 let attrs = file.metadata()?;
                 Ok(Metadata::remote(attrs, file.location()))
             }
+            Handle::Proton(file) => Ok(Metadata::proton(
+                file.lock().unwrap_or_else(PoisonError::into_inner).attrs(),
+            )),
         }
     }
 
@@ -603,6 +658,10 @@ impl File {
         match &self.0 {
             Handle::Local(file) => file.set_len(len),
             Handle::Remote(_) => self.remote().expect("remote").set_len(len),
+            Handle::Proton(file) => file
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .set_len(len),
         }
     }
 
@@ -610,6 +669,15 @@ impl File {
         match &self.0 {
             Handle::Local(file) => file.set_modified(modified),
             Handle::Remote(_) => self.remote().expect("remote").set_times(None, modified),
+            Handle::Proton(file) => {
+                let seconds = modified
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .map_or(0, |since| since.as_secs() as i64);
+                file.lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .set_modified(seconds);
+                Ok(())
+            }
         }
     }
 
@@ -635,6 +703,8 @@ impl File {
                     permissions.mode(|| file.metadata().ok().and_then(|a| a.mode).unwrap_or(0o644));
                 file.set_mode(mode)
             }
+            // The Drive has no permissions.
+            Handle::Proton(_) => Ok(()),
         }
     }
 
@@ -642,6 +712,7 @@ impl File {
         match &self.0 {
             Handle::Local(file) => file.sync_all(),
             Handle::Remote(_) => self.remote().expect("remote").sync(),
+            Handle::Proton(file) => file.lock().unwrap_or_else(PoisonError::into_inner).commit(),
         }
     }
 
@@ -649,13 +720,14 @@ impl File {
         match &self.0 {
             Handle::Local(file) => file.sync_data(),
             Handle::Remote(_) => self.remote().expect("remote").sync(),
+            Handle::Proton(file) => file.lock().unwrap_or_else(PoisonError::into_inner).commit(),
         }
     }
 
     pub fn try_clone(&self) -> io::Result<Self> {
         match &self.0 {
             Handle::Local(file) => file.try_clone().map(Self::from),
-            Handle::Remote(_) => Err(io::Error::new(
+            Handle::Remote(_) | Handle::Proton(_) => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "a server's files can't be cloned",
             )),
@@ -665,7 +737,7 @@ impl File {
     pub fn as_std(&self) -> Option<&std::fs::File> {
         match &self.0 {
             Handle::Local(file) => Some(file),
-            Handle::Remote(_) => None,
+            Handle::Remote(_) | Handle::Proton(_) => None,
         }
     }
 
@@ -703,6 +775,10 @@ impl Read for File {
                 .get_mut()
                 .unwrap_or_else(PoisonError::into_inner)
                 .read(buf),
+            Handle::Proton(file) => file
+                .get_mut()
+                .unwrap_or_else(PoisonError::into_inner)
+                .read(buf),
         }
     }
 
@@ -710,6 +786,10 @@ impl Read for File {
         match &mut self.0 {
             Handle::Local(file) => file.read_to_end(buf),
             Handle::Remote(file) => file
+                .get_mut()
+                .unwrap_or_else(PoisonError::into_inner)
+                .read_to_end(buf),
+            Handle::Proton(file) => file
                 .get_mut()
                 .unwrap_or_else(PoisonError::into_inner)
                 .read_to_end(buf),
@@ -725,6 +805,10 @@ impl Write for File {
                 .get_mut()
                 .unwrap_or_else(PoisonError::into_inner)
                 .write(buf),
+            Handle::Proton(file) => file
+                .get_mut()
+                .unwrap_or_else(PoisonError::into_inner)
+                .write(buf),
         }
     }
 
@@ -732,6 +816,10 @@ impl Write for File {
         match &mut self.0 {
             Handle::Local(file) => file.flush(),
             Handle::Remote(file) => file
+                .get_mut()
+                .unwrap_or_else(PoisonError::into_inner)
+                .flush(),
+            Handle::Proton(file) => file
                 .get_mut()
                 .unwrap_or_else(PoisonError::into_inner)
                 .flush(),
@@ -747,6 +835,10 @@ impl Seek for File {
                 .get_mut()
                 .unwrap_or_else(PoisonError::into_inner)
                 .seek(pos),
+            Handle::Proton(file) => file
+                .get_mut()
+                .unwrap_or_else(PoisonError::into_inner)
+                .seek(pos),
         }
     }
 }
@@ -756,6 +848,9 @@ impl Seek for File {
 
 pub fn metadata(path: impl AsRef<Path>) -> io::Result<Metadata> {
     let path = path.as_ref();
+    if proton::is_proton(path) {
+        return proton::stat(path).map(Metadata::proton);
+    }
     match locate(path)? {
         None => std::fs::metadata(path).map(Metadata::from),
         Some(location) => Ok(Metadata::remote(sftp::stat(&location, true)?, &location)),
@@ -764,6 +859,9 @@ pub fn metadata(path: impl AsRef<Path>) -> io::Result<Metadata> {
 
 pub fn symlink_metadata(path: impl AsRef<Path>) -> io::Result<Metadata> {
     let path = path.as_ref();
+    if proton::is_proton(path) {
+        return proton::stat(path).map(Metadata::proton);
+    }
     match locate(path)? {
         None => std::fs::symlink_metadata(path).map(Metadata::from),
         Some(location) => Ok(Metadata::remote(sftp::stat(&location, false)?, &location)),
@@ -772,6 +870,13 @@ pub fn symlink_metadata(path: impl AsRef<Path>) -> io::Result<Metadata> {
 
 pub fn exists(path: impl AsRef<Path>) -> io::Result<bool> {
     let path = path.as_ref();
+    if proton::is_proton(path) {
+        return match proton::stat(path) {
+            Ok(_) => Ok(true),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(err) => Err(err),
+        };
+    }
     match locate(path)? {
         None => std::fs::exists(path),
         Some(location) => match sftp::stat(&location, true) {
@@ -784,6 +889,11 @@ pub fn exists(path: impl AsRef<Path>) -> io::Result<bool> {
 
 pub fn read_dir(path: impl AsRef<Path>) -> io::Result<ReadDir> {
     let path = path.as_ref();
+    if proton::is_proton(path) {
+        return Ok(ReadDir(Listing::Proton(
+            proton::read_dir(path)?.into_iter(),
+        )));
+    }
     Ok(ReadDir(match locate(path)? {
         None => Listing::Local(std::fs::read_dir(path)?),
         Some(location) => Listing::Remote(sftp::read_dir(&location)?.into_iter()),
@@ -792,7 +902,7 @@ pub fn read_dir(path: impl AsRef<Path>) -> io::Result<ReadDir> {
 
 pub fn read(path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
     let path = path.as_ref();
-    if !sftp::is_remote(path) {
+    if !is_elsewhere(path) {
         return std::fs::read(path);
     }
     let mut file = File::open(path)?;
@@ -812,7 +922,7 @@ pub fn read_to_string(path: impl AsRef<Path>) -> io::Result<String> {
 
 pub fn write(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> io::Result<()> {
     let path = path.as_ref();
-    if !sftp::is_remote(path) {
+    if !is_elsewhere(path) {
         return std::fs::write(path, contents);
     }
     let mut file = File::create(path)?;
@@ -822,6 +932,9 @@ pub fn write(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> io::Result<(
 
 pub fn create_dir(path: impl AsRef<Path>) -> io::Result<()> {
     let path = path.as_ref();
+    if proton::is_proton(path) {
+        return proton::create_dir(path);
+    }
     match locate(path)? {
         None => std::fs::create_dir(path),
         Some(location) => sftp::create_dir(&location),
@@ -830,6 +943,9 @@ pub fn create_dir(path: impl AsRef<Path>) -> io::Result<()> {
 
 pub fn create_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
     let path = path.as_ref();
+    if proton::is_proton(path) {
+        return proton::create_dir_all(path);
+    }
     match locate(path)? {
         None => std::fs::create_dir_all(path),
         Some(location) => create_remote_dir_all(&location),
@@ -856,6 +972,9 @@ fn create_remote_dir_all(location: &Location) -> io::Result<()> {
 
 pub fn remove_file(path: impl AsRef<Path>) -> io::Result<()> {
     let path = path.as_ref();
+    if proton::is_proton(path) {
+        return proton::remove_file(path);
+    }
     match locate(path)? {
         None => std::fs::remove_file(path),
         Some(location) => sftp::remove_file(&location),
@@ -864,6 +983,9 @@ pub fn remove_file(path: impl AsRef<Path>) -> io::Result<()> {
 
 pub fn remove_dir(path: impl AsRef<Path>) -> io::Result<()> {
     let path = path.as_ref();
+    if proton::is_proton(path) {
+        return proton::remove_dir(path);
+    }
     match locate(path)? {
         None => std::fs::remove_dir(path),
         Some(location) => sftp::remove_dir(&location),
@@ -872,6 +994,9 @@ pub fn remove_dir(path: impl AsRef<Path>) -> io::Result<()> {
 
 pub fn remove_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
     let path = path.as_ref();
+    if proton::is_proton(path) {
+        return proton::remove_dir_all(path);
+    }
     match locate(path)? {
         None => std::fs::remove_dir_all(path),
         Some(location) => sftp::remove_dir_all(&location),
@@ -882,6 +1007,11 @@ pub fn remove_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
 /// as across local devices.
 pub fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<()> {
     let (from, to) = (from.as_ref(), to.as_ref());
+    match (proton::is_proton(from), proton::is_proton(to)) {
+        (true, true) => return proton::rename(from, to),
+        (false, false) => {}
+        _ => return Err(different_computers()),
+    }
     match (locate(from)?, locate(to)?) {
         (None, None) => std::fs::rename(from, to),
         (Some(from), Some(to)) => sftp::rename(&from, &to),
@@ -893,8 +1023,24 @@ pub fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<()> {
 /// places.
 pub fn copy(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<u64> {
     let (from, to) = (from.as_ref(), to.as_ref());
-    if !sftp::is_remote(from) && !sftp::is_remote(to) {
+    if !is_elsewhere(from) && !is_elsewhere(to) {
         return std::fs::copy(from, to);
+    }
+    if proton::is_proton(to) {
+        let size = metadata(from)?.len();
+        if proton::is_proton(from) {
+            proton::copy_within(from, to)?;
+            return Ok(size);
+        }
+        let mut source = File::open(from)?;
+        let modified = source
+            .metadata()?
+            .modified()
+            .ok()
+            .and_then(|at| at.duration_since(SystemTime::UNIX_EPOCH).ok())
+            .map(|since| since.as_secs() as i64);
+        proton::upload(to, &mut source, size, modified)?;
+        return Ok(size);
     }
     let mut source = File::open(from)?;
     let permissions = source.metadata()?.permissions();
@@ -944,6 +1090,9 @@ pub fn read_link(path: impl AsRef<Path>) -> io::Result<PathBuf> {
 
 pub fn canonicalize(path: impl AsRef<Path>) -> io::Result<PathBuf> {
     let path = path.as_ref();
+    if proton::is_proton(path) {
+        return proton::canonicalize(path);
+    }
     match locate(path)? {
         None => std::fs::canonicalize(path),
         Some(location) => Ok(sftp::canonicalize(&location)?.to_path()),
@@ -952,6 +1101,10 @@ pub fn canonicalize(path: impl AsRef<Path>) -> io::Result<PathBuf> {
 
 pub fn set_permissions(path: impl AsRef<Path>, permissions: Permissions) -> io::Result<()> {
     let path = path.as_ref();
+    if proton::is_proton(path) {
+        // The Drive has no permissions, and a file's time is set as it's written.
+        return Ok(());
+    }
     match locate(path)? {
         None => std::fs::set_permissions(path, permissions.into_std(path)?),
         Some(location) => {
@@ -973,6 +1126,9 @@ pub fn set_file_times(
     modified: SystemTime,
 ) -> io::Result<()> {
     let path = path.as_ref();
+    if proton::is_proton(path) {
+        return Ok(());
+    }
     match locate(path)? {
         None => filetime::set_file_times(
             path,
@@ -986,6 +1142,9 @@ pub fn set_file_times(
 /// Sets when `path` was last changed, following links.
 pub fn set_file_mtime(path: impl AsRef<Path>, modified: SystemTime) -> io::Result<()> {
     let path = path.as_ref();
+    if proton::is_proton(path) {
+        return Ok(());
+    }
     match locate(path)? {
         None => filetime::set_file_mtime(path, filetime::FileTime::from_system_time(modified)),
         Some(location) => sftp::set_times(&location, None, modified),
@@ -995,5 +1154,7 @@ pub fn set_file_mtime(path: impl AsRef<Path>, modified: SystemTime) -> io::Resul
 /// Paths changed on servers since the last call, as a folder watcher would
 /// report them: nothing watches servers' folders.
 pub fn take_changes() -> std::collections::BTreeSet<PathBuf> {
-    sftp::take_changes()
+    let mut changes = sftp::take_changes();
+    changes.append(&mut proton::take_changes());
+    changes
 }

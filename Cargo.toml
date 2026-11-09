@@ -81,6 +81,13 @@ embed-resource = "3"
 
 # Android has no trash the crate knows of; see android/trash.
 [target.'cfg(not(any(target_os = "android", target_arch = "wasm32")))'.dependencies]
+# Proton Drive (see src/remote/proton): an unofficial SDK, async on tokio. What
+# keeps the user signed in goes in the OS's keyring.
+proton-sdk = "0.11"
+proton-drive-rs = "0.11"
+tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
+keyring-core = "1"
+zeroize = "1"
 # Pictures pasted into markdown documents.
 arboard = { version = "3.6", default-features = false, features = ["image-data", "wayland-data-control"] }
 trash = "5.2.9"
@@ -152,6 +159,7 @@ log = "0.4"
 
 # Native Wayland drag and drop with other apps (winit doesn't implement it).
 [target.'cfg(target_os = "linux")'.dependencies]
+zbus-secret-service-keyring-store = { version = "1", features = ["crypto-rust"] }
 # The terminal's PTY, wrapped to read what the shell says of itself; the
 # version alacritty_terminal uses.
 polling = "3.8"
@@ -170,6 +178,7 @@ zbus = "6"
 
 # "Open with" (file associations, app icons), drives and ejecting them.
 [target.'cfg(windows)'.dependencies]
+windows-native-keyring-store = "1"
 # OpenGL context for libmpv's renderer.
 glow = "0.17"
 windows = { version = "0.62", features = [

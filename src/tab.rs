@@ -963,6 +963,20 @@ impl BrowserTab {
         {
             actions.push(Action::TogglePreview);
         }
+        // Only inside the Drive, where it means something.
+        #[cfg(not(any(target_os = "android", target_arch = "wasm32")))]
+        if remote::is_proton(&self.path)
+            && remote::proton::username().is_some()
+            && ui
+                .add(Button::selectable(
+                    false,
+                    RichText::new(icon::TRASH).size(16.0),
+                ))
+                .on_hover_text("Proton Drive trash")
+                .clicked()
+        {
+            remote::proton::open_trash();
+        }
         ui.separator();
         if views_inline {
             for (mode, glyph, tip) in ViewMode::ALL.iter().rev() {
@@ -1743,8 +1757,11 @@ impl BrowserTab {
                 if paths.is_empty() {
                     return;
                 }
+                // Removing from the Drive puts it in the Drive's own trash.
+                if paths.iter().all(|p| remote::is_proton(p)) {
+                    shared.jobs.start(JobKind::Delete { paths });
                 // Servers have no trash: ask first.
-                if paths.iter().any(|p| remote::is_remote(p)) {
+                } else if paths.iter().any(|p| remote::is_remote(p)) {
                     self.confirm_delete = Some(paths);
                 } else {
                     shared.jobs.start(JobKind::Trash { paths });

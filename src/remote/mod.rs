@@ -13,6 +13,8 @@ pub mod copies;
 pub mod hosts;
 #[cfg(not(target_arch = "wasm32"))]
 mod prompts;
+#[cfg(not(any(target_os = "android", target_arch = "wasm32")))]
+pub mod proton;
 
 use std::{
     path::{Path, PathBuf},
@@ -36,6 +38,53 @@ pub fn available() -> Result<(), &'static str> {
 }
 
 static RECENT: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// What the places pane offers of cloud storage, remembered between runs.
+/// Nobody gets a Proton Drive row who hasn't asked for one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Cloud {
+    /// Signed in: the account's row stays, to sign in again from if need be.
+    pub connected: bool,
+    /// The row offering to connect was closed.
+    pub dismissed: bool,
+}
+
+/// What the places pane shows of cloud storage.
+#[cfg_attr(any(target_os = "android", target_arch = "wasm32"), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CloudRow {
+    Drive,
+    Offer,
+    Nothing,
+}
+
+impl Cloud {
+    #[cfg_attr(any(target_os = "android", target_arch = "wasm32"), allow(dead_code))]
+    pub fn row(self, signed_in: bool) -> CloudRow {
+        if signed_in || self.connected {
+            CloudRow::Drive
+        } else if self.dismissed {
+            CloudRow::Nothing
+        } else {
+            CloudRow::Offer
+        }
+    }
+}
+
+static CLOUD: Mutex<Cloud> = Mutex::new(Cloud {
+    connected: false,
+    dismissed: false,
+});
+
+#[cfg_attr(any(target_os = "android", target_arch = "wasm32"), allow(dead_code))]
+pub fn cloud() -> Cloud {
+    *CLOUD.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+pub fn set_cloud(cloud: Cloud) {
+    *CLOUD.lock().unwrap_or_else(PoisonError::into_inner) = cloud;
+}
 
 /// Things gone wrong in the background, to tell the user about.
 static NOTICES: Mutex<Vec<String>> = Mutex::new(Vec::new());
@@ -161,6 +210,10 @@ fn remember(authority: &str) {
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub fn authority(path: &Path) -> Option<String> {
     #[cfg(not(target_arch = "wasm32"))]
+    if disk::proton::is_proton(path) {
+        return Some("Proton Drive".to_owned());
+    }
+    #[cfg(not(target_arch = "wasm32"))]
     return disk::sftp::parse(path).map(|location| location.authority);
     #[cfg(target_arch = "wasm32")]
     {
@@ -216,7 +269,7 @@ pub fn disconnect(authority: &str) {
 /// Whether `path` is on a server.
 pub fn is_remote(path: &Path) -> bool {
     #[cfg(not(target_arch = "wasm32"))]
-    return disk::sftp::is_remote(path);
+    return disk::sftp::is_remote(path) || disk::proton::is_proton(path);
     #[cfg(target_arch = "wasm32")]
     {
         let _ = path;
@@ -226,6 +279,10 @@ pub fn is_remote(path: &Path) -> bool {
 
 /// The top of the server `path` is on (`sftp://host`), if it's on one.
 pub fn root(path: &Path) -> Option<PathBuf> {
+    #[cfg(not(target_arch = "wasm32"))]
+    if disk::proton::is_proton(path) {
+        return Some(disk::proton::top());
+    }
     #[cfg(not(target_arch = "wasm32"))]
     return disk::sftp::root(path);
     #[cfg(target_arch = "wasm32")]
@@ -244,7 +301,7 @@ pub fn home_of(authority: &str) -> PathBuf {
 /// What a path names when typed: `sftp://host` alone means its home folder.
 pub fn typed(path: PathBuf) -> PathBuf {
     match path.to_str() {
-        Some(text) if is_remote(&path) => {
+        Some(text) if is_remote(&path) && !is_proton(&path) => {
             let rest = &text["sftp://".len()..];
             if rest.contains(['/', '\\']) {
                 path
@@ -253,6 +310,17 @@ pub fn typed(path: PathBuf) -> PathBuf {
             }
         }
         _ => path,
+    }
+}
+
+/// Whether `path` is in the Proton Drive account.
+pub fn is_proton(path: &Path) -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    return disk::proton::is_proton(path);
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = path;
+        false
     }
 }
 
@@ -300,6 +368,7 @@ pub fn init(ctx: &egui::Context) {
     {
         let _ = CTX.set(ctx.clone());
         disk::sftp::never_connect_on_this_thread();
+        disk::proton::never_wait_on_this_thread();
         prompts::init(ctx);
     }
     #[cfg(target_arch = "wasm32")]
@@ -310,6 +379,10 @@ pub fn init(ctx: &egui::Context) {
 pub fn prompts_ui(ctx: &egui::Context) {
     #[cfg(not(target_arch = "wasm32"))]
     prompts::ui(ctx);
+    #[cfg(not(any(target_os = "android", target_arch = "wasm32")))]
+    proton::dialog_ui(ctx);
+    #[cfg(not(any(target_os = "android", target_arch = "wasm32")))]
+    proton::trash_ui(ctx);
     notices_ui(ctx);
 }
 
@@ -392,7 +465,7 @@ mod fetch {
         if state.running.contains(dir) {
             return Listing::Loading;
         }
-        if disk::sftp::is_listed(dir) {
+        if disk::sftp::is_listed(dir) || disk::proton::is_listed(dir) {
             return Listing::Ready;
         }
         state.running.insert(dir.to_path_buf());
@@ -421,6 +494,12 @@ mod fetch {
 
     /// Connects and lists `dir`; if it's in a home folder, says where that is.
     fn fetch(dir: &Path) -> Result<Option<PathBuf>, String> {
+        if disk::proton::is_proton(dir) {
+            #[cfg(not(target_os = "android"))]
+            super::proton::ensure_signed_in()?;
+            disk::read_dir(dir).map_err(|err| err.to_string())?;
+            return Ok(None);
+        }
         disk::sftp::connect(dir).map_err(|err| err.to_string())?;
         let location = disk::sftp::parse(dir).ok_or("not a server's path")?;
         super::remember(&location.authority);
@@ -451,6 +530,7 @@ mod fetch {
         fetches.failed.retain(|dir, _| !dir.starts_with(root));
         drop(fetches);
         disk::sftp::forget(root);
+        disk::proton::forget(root);
     }
 
     pub fn retry(dir: &Path) {
@@ -459,6 +539,7 @@ mod fetch {
         fetches.moved.remove(dir);
         drop(fetches);
         disk::sftp::forget(dir);
+        disk::proton::forget(dir);
     }
 }
 
@@ -484,9 +565,47 @@ mod tests {
     }
 
     #[test]
+    fn the_cloud_row_is_an_offer_until_closed_or_taken_up() {
+        let new = Cloud::default();
+        assert_eq!(new.row(false), CloudRow::Offer);
+        let closed = Cloud {
+            dismissed: true,
+            ..new
+        };
+        assert_eq!(closed.row(false), CloudRow::Nothing);
+        // From the File menu, after closing the offer.
+        assert_eq!(closed.row(true), CloudRow::Drive);
+        let connected = Cloud {
+            connected: true,
+            ..new
+        };
+        assert_eq!(connected.row(false), CloudRow::Drive);
+    }
+
+    #[test]
+    fn ancestors_stop_at_the_top_of_the_drive() {
+        let path = Path::new("proton://drive/a/b");
+        let all: Vec<_> = ancestors(path).collect();
+        assert_eq!(
+            all,
+            [
+                Path::new("proton://drive/a/b"),
+                Path::new("proton://drive/a"),
+                Path::new("proton://drive"),
+            ]
+        );
+        assert_eq!(parent(Path::new("proton://drive")), None);
+        assert_eq!(authority(path).as_deref(), Some("Proton Drive"));
+    }
+
+    #[test]
     fn typing_a_server_alone_means_its_home() {
         assert_eq!(typed("sftp://host".into()), PathBuf::from("sftp://host/~"));
         assert_eq!(typed("sftp://host/".into()), PathBuf::from("sftp://host/"));
         assert_eq!(typed("/tmp".into()), PathBuf::from("/tmp"));
+        assert_eq!(
+            typed("proton://drive".into()),
+            PathBuf::from("proton://drive")
+        );
     }
 }

@@ -79,6 +79,8 @@ pub struct Layout {
     /// Servers connected to lately, as `user@host:port`, latest first (see
     /// `remote::recent`).
     pub servers: Vec<String>,
+    /// What's offered of cloud storage (see `remote::cloud`).
+    pub cloud: crate::remote::Cloud,
 }
 
 impl Default for Layout {
@@ -88,6 +90,7 @@ impl Default for Layout {
             hidden_places: Vec::new(),
             space_bars: true,
             servers: Vec::new(),
+            cloud: Default::default(),
         }
     }
 }
@@ -147,6 +150,7 @@ impl Sidebar {
     ) -> Self {
         layout.normalize();
         crate::remote::set_recent(layout.servers.clone());
+        crate::remote::set_cloud(layout.cloud);
         Self {
             bookmarks,
             tree,
@@ -444,6 +448,8 @@ fn servers_ui(ui: &mut Ui, place_button: &mut PlaceButton<'_>) {
         ui.label(RichText::new(why).small().weak());
         return;
     }
+    #[cfg(not(any(target_os = "android", target_arch = "wasm32")))]
+    proton_ui(ui, place_button);
     let hosts = remote::hosts::hosts();
     let recent = remote::recent();
     let connections = remote::connections();
@@ -528,6 +534,90 @@ fn servers_ui(ui: &mut Ui, place_button: &mut PlaceButton<'_>) {
     }
 }
 
+/// The Proton Drive account: going there signs in if need be.
+#[cfg(not(any(target_os = "android", target_arch = "wasm32")))]
+fn proton_ui(ui: &mut Ui, place_button: &mut PlaceButton<'_>) {
+    use crate::remote::{self, CloudRow, proton};
+    let username = proton::username();
+    let signed_in = username.is_some();
+    let mut cloud = remote::cloud();
+    if signed_in && !cloud.connected {
+        cloud.connected = true;
+        remote::set_cloud(cloud);
+    }
+    match cloud.row(signed_in) {
+        CloudRow::Drive => {}
+        CloudRow::Nothing => return,
+        CloudRow::Offer => {
+            ui.horizontal(|ui| {
+                let offer =
+                    Button::new(format!("{}  Connect to the cloud…", icon::CLOUD)).frame(false);
+                if ui
+                    .add(offer)
+                    .on_hover_text("Sign in to Proton Drive")
+                    .clicked()
+                {
+                    proton::connect();
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add(Button::new(icon::X).frame(false))
+                        .on_hover_text("Hide this. Proton Drive stays in the File menu.")
+                        .clicked()
+                    {
+                        cloud.dismissed = true;
+                        remote::set_cloud(cloud);
+                    }
+                });
+            });
+            return;
+        }
+    }
+    let mut sign_out = false;
+    let mut menu = |ui: &mut Ui| {
+        if !signed_in {
+            return;
+        }
+        if ui.button(format!("{}  Trash…", icon::TRASH)).clicked() {
+            proton::open_trash();
+            ui.close();
+        }
+        if ui.button(format!("{}  Sign out", icon::SIGN_OUT)).clicked() {
+            sign_out = true;
+            ui.close();
+        }
+    };
+    let top = disk::proton::top();
+    let row = place_button(ui, icon::CLOUD, "Proton Drive", &top, &mut menu);
+    let clicked = row.clicked();
+    match username {
+        Some(name) => {
+            let storage = match (proton::space(), proton::space_error()) {
+                (Some(space), _) => format!(
+                    "{} free of {}",
+                    crate::fs::human_size(space.available),
+                    crate::fs::human_size(space.total)
+                ),
+                (None, Some(why)) => format!("couldn't get it: {why}"),
+                (None, None) => "not heard from Proton yet".to_owned(),
+            };
+            row.on_hover_text(format!("Signed in as {name}\nStorage: {storage}"));
+        }
+        None => {
+            row.on_hover_text("Not signed in");
+        }
+    }
+    if clicked && !signed_in {
+        proton::open_dialog();
+    }
+    if let Some(space) = proton::space() {
+        space_bar(ui, space);
+    }
+    if sign_out {
+        proton::sign_out();
+    }
+}
+
 /// A thin bar under a drive showing how full it is.
 fn space_bar(ui: &mut Ui, space: places::Space) {
     let (rect, response) =
@@ -544,7 +634,14 @@ fn space_bar(ui: &mut Ui, space: places::Space) {
     };
     let p = ui.painter();
     p.rect_filled(bar, 2.0, visuals.extreme_bg_color);
-    let filled = egui::Rect::from_min_size(bar.min, egui::vec2(bar.width() * used, bar.height()));
+    // Enough to see, however little is used: a big Drive is nearly all free.
+    let least = if space.available < space.total {
+        3.0
+    } else {
+        0.0
+    };
+    let width = (bar.width() * used).max(least).min(bar.width());
+    let filled = egui::Rect::from_min_size(bar.min, egui::vec2(width, bar.height()));
     p.rect_filled(filled, 2.0, fill);
     response.on_hover_text(format!(
         "{} free of {}",

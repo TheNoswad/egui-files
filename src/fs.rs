@@ -295,6 +295,10 @@ pub fn display_name(path: &Path) -> String {
 /// phone's storage goes by the phone (its real name is just `0`). Not for
 /// naming files: this may not be the folder's name.
 pub fn location_name(path: &Path) -> String {
+    #[cfg(not(target_arch = "wasm32"))]
+    if path == disk::proton::top() {
+        return "Proton Drive".to_owned();
+    }
     crate::phones::name_of(path).unwrap_or_else(|| display_name(path))
 }
 
@@ -450,7 +454,8 @@ pub fn create_file(parent: &Path, template: Option<&Path>) -> io::Result<PathBuf
     let path = unique_path(parent, name);
     match template {
         Some(template) => disk::copy(template, &path).map(drop)?,
-        None => disk::File::create_new(&path).map(drop)?,
+        // Flushed: the Drive only has a new file once it is.
+        None => io::Write::flush(&mut disk::File::create_new(&path)?)?,
     }
     Ok(path)
 }

@@ -551,7 +551,7 @@ fn decode(key: &Key, may_be_provisional: bool, queue: &Queue) -> Result<Decoded,
         .flatten();
     let thumbnail = match cached {
         Some(thumbnail) => Some(thumbnail),
-        None if crate::video::is_video(path) => {
+        None if crate::video::is_video(path) && !crate::remote::is_proton(path) => {
             Some(thumbnails::generate_video(path, modified, max_side)?)
         }
         None => None,
@@ -570,6 +570,9 @@ fn decode(key: &Key, may_be_provisional: bool, queue: &Queue) -> Result<Decoded,
         });
     }
 
+    if let Some(decoded) = proton_thumbnail(path, modified, max_side) {
+        return Ok(decoded);
+    }
     let mut file = disk::File::open(path).map_err(|e| e.to_string())?;
     if crate::raw::is_raw(path) {
         return decode_raw(&mut file, path, modified, max_side, queue);
@@ -593,6 +596,25 @@ fn decode(key: &Key, may_be_provisional: bool, queue: &Queue) -> Result<Decoded,
     drop(file);
     let _turn = queue.turn_to_decode();
     decode_file(std::io::Cursor::new(bytes), path, modified, max_side)
+}
+
+/// The Drive keeps a small picture of each picture in it, which saves
+/// fetching and decrypting the whole file to show it small.
+fn proton_thumbnail(path: &Path, modified: Option<SystemTime>, max_side: u32) -> Option<Decoded> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        const SIDE: u32 = 512;
+        if max_side > SIDE || !disk::proton::is_proton(path) {
+            return None;
+        }
+        let bytes = disk::proton::thumbnail(path).ok().flatten()?;
+        decode_file(std::io::Cursor::new(bytes), path, modified, max_side).ok()
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (path, modified, max_side);
+        None
+    }
 }
 
 fn is_jpeg(path: &Path) -> bool {

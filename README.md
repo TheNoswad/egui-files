@@ -36,7 +36,7 @@ themes. It also runs in the browser, as a demo.
 - **Terminal:** follows the folder you're in, and onto servers over ssh.
 - **Video:** play videos, and cut clips from them: trim, crop, resize, change
   the speed and volume, or make a GIF, to a size limit if you want.
-- **Places:** drives (and ejecting them), servers over SFTP, and phones
+- **Places:** drives (and ejecting them), servers over SFTP, Proton Drive (unofficial, writing still being tried out), and phones
   through KDE Connect.
 - **The rest:** copy, move, trash and restore with a jobs bar, disk usage,
   properties and permissions, "Open with", themes and a theme editor, and a

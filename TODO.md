@@ -123,23 +123,24 @@ unofficial, async on tokio, MSRV 1.96).
 
 ### Phase 1: account and read-only browsing
 
-- [ ] Local-or-remote "location" layer for browser tabs and jobs: SFTP made one, in `disk` (paths with a scheme, `std::fs`-like types that wrap either), and `remote::listing` for listing off the UI's thread; Proton Drive could stand behind the same
-- [ ] Tokio runtime on a background thread, talking to the UI over channels
-- [ ] Login dialog: SRP password, TOTP; clear error for FIDO2-only accounts (not supported by the SDK)
-- [ ] Store session tokens and key passphrases in the OS keyring (Secret Service / Credential Manager), not app state
-- [ ] Resume the session without the password (`key_passphrases` → `with_key_passphrases`)
-- [ ] Proton Drive entry under Places; folder listing; thumbnails
-- [ ] Open files by downloading to a temp file (open with, archives)
-- [ ] Preview via ranged reads (`open_revision` / `read_at`), video included
+Signing in (with a CAPTCHA and 2FA), coming back after a restart and previews were tried on a real account. Left:
+
+- [ ] Trash: check something trashed shows in the Drive's trash window on a real account (the window now says if items couldn't be read)
+- [ ] Try signing out on a real account, and that it removes the cached copies
+- [ ] Windows: try the Credential Manager, which holds 2560 bytes (an account with many keys may not fit; it says so, and then asks at each start)
+- [ ] Preview of videos on the Drive (`clip::` leaves out servers' files)
+- [ ] Relative links in markdown documents on the Drive (`markdown/links.rs` only knows `sftp://`)
+- [ ] Android: the SDK is pure Rust; the sign-in could go in the Android Keystore (`android-native-keyring-store`)
 
 ### Phase 2: writes
 
-- [ ] Upload / download jobs, including drag in and drag out (via a temp file)
-- [ ] New folder, rename, same-volume move, server-side copy
-- [ ] Trash / restore / delete; remote trash tab
-- [ ] Editor saves as a new revision
-- [ ] Live updates from `EventManager` in place of file watching
-- [ ] Quota display
+Built against a Drive in memory (see CHANGELOG.md); none of it has run on a real account. Left:
+
+- [ ] Try on a real account, in a throwaway folder: upload, cancel an upload, download, new folder, rename, move, copy, delete and restore, editing a file, others' changes showing up
+- [ ] Renames, new items and editor saves wait on the UI's thread, as they do for servers
+- [ ] Thumbnails for what's uploaded (`upload` sends none, so Proton's apps show none for those)
+- [ ] The trash is a window, not a tab like the computer's own
+- [ ] Remember the event cursor, to hear what changed while the app was closed
 
 ### Phase 3: the rest
 
@@ -148,7 +149,7 @@ unofficial, async on tokio, MSRV 1.96).
 - [ ] Revision history: browse, download, restore, delete
 - [ ] Photos (timeline, albums)
 - [ ] Open someone else's public link without an account
-- [ ] Human verification (CAPTCHA) in a webview window (e.g. `wry`); the verify page posts its token to the embedding webview
+- [ ] Human verification (CAPTCHA) when an already signed-in session is asked for it (only signing in handles it, by way of the browser)
 
 ### Constraints
 

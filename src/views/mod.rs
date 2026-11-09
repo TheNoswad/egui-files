@@ -302,7 +302,8 @@ fn entry_menu(
         &keys(C::Rename),
         Action::StartRename,
     );
-    let label = if crate::remote::is_remote(&entry.path) {
+    let no_trash = crate::remote::is_remote(&entry.path) && !crate::remote::is_proton(&entry.path);
+    let label = if no_trash {
         format!("{} Delete permanently…", icon::TRASH)
     } else {
         format!("{} Move to trash", icon::TRASH)
