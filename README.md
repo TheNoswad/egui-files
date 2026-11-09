@@ -72,9 +72,10 @@ themes. It also runs in the browser, as a demo.
 
 ## Downloads
 
-From [Releases](https://github.com/TheNoswad/egui-files/releases): the
-latest version, or **nightly**, built from `main` on every change (newer,
-and less tried).
+From the [nightly release](https://github.com/TheNoswad/egui-files/releases/tag/nightly),
+built from `main` on every change. There are no versioned releases yet, and
+this is early software. Of these builds, only the Linux x86-64 AppImage has
+been tried on a real machine so far; the others are built but untested.
 
 | | |
 |---|---|
@@ -126,9 +127,8 @@ The rest:
 - `scripts/screenshots.sh` takes the screenshots above, and the landing
   page's, from the app itself.
 - CI (`.github/workflows/ci.yml`) runs the same checks on every push, and
-  on `main` and version tags builds every platform, cross-compiled on
-  Linux, with `scripts/package.sh`. `scripts/release.sh 0.2.0` makes a
-  release's commit and tag; pushing the tag publishes it.
+  on `main` builds every platform, cross-compiled on Linux, with
+  `scripts/package.sh`, for the nightly release.
 - `scripts/upstream.sh` reports on what we're waiting for upstream: issues,
   new releases, and our forks.
 - [TODO.md](TODO.md) has what's planned, and [CHANGELOG.md](CHANGELOG.md)
