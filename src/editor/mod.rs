@@ -282,6 +282,17 @@ impl View {
         for line in &mut self.lines[diff.changed()] {
             *line = None;
         }
+        // The last line keeps its line break in its layout and others don't,
+        // so the line before the change may have stopped being the last, and
+        // the one that's last now may have started.
+        if let Some(before) = diff.prefix.checked_sub(1)
+            && let Some(line) = self.lines.get_mut(before)
+        {
+            *line = None;
+        }
+        if let Some(last) = self.lines.last_mut() {
+            *last = None;
+        }
         if self.highlighter.is_some() {
             diff.splice(&mut self.spans, || Arc::from([]));
             self.spans_version += 1;
@@ -836,6 +847,11 @@ impl EditorTab {
             {
                 buffer.reload = None;
                 match result {
+                    // Edited while it was on its way (a server's can take a
+                    // while): the user's text stays, and they're told.
+                    Ok(_) if buffer.dirty || self.md.block.is_some() => {
+                        buffer.disk = Disk::Changed;
+                    }
                     Ok(loaded) => {
                         let chars = loaded.text.chars().count();
                         buffer.reloaded(loaded);
@@ -2871,15 +2887,21 @@ fn sync_panes(
         ctx.request_repaint();
     } else if !preview_leads && (source_moved || edited) {
         let along_bottom = source.offset >= source.content - source.viewport - 1.0;
-        let to = if along_bottom && source.offset > 0.0 {
-            (view.content_height() - view.viewport_height).max(0.0)
+        let bottom = (view.content_height() - view.viewport_height).max(0.0);
+        let to = if source.offset <= 0.0 {
+            0.0
+        } else if along_bottom {
+            bottom
         } else {
             let char = source
                 .galley
                 .cursor_from_pos(egui::vec2(0.0, source.offset))
                 .index
                 .0;
+            // Past the bottom would show for a frame, until the scroll area
+            // brought it back.
             view.offset_of_source(ops::char_to_byte(text, char))
+                .min(bottom)
         };
         md.preview_to = Some(to);
         md.preview_was = to;
@@ -4803,6 +4825,154 @@ mod tests {
         h.key(Modifiers::COMMAND, Key::S);
         assert_eq!(disk::read_to_string(&h.path).unwrap(), "my changed\n");
         assert!(h.buffer().disk == Disk::InSync);
+    }
+
+    /// However a text ends, its layout has exactly as many places for the
+    /// cursor as it has characters: more let the cursor go past the end.
+    #[test]
+    fn the_layout_ends_where_the_text_ends() {
+        let ctx = Context::default();
+        let font = FontId::monospace(13.0);
+        let mut output = ctx.run_ui(Default::default(), |ui| {
+            for text in [
+                "",
+                "a",
+                "a\n",
+                "\n",
+                "\n\n",
+                "a\nb",
+                "a\nb\n",
+                "# Heading\n\n\n",
+                "# Heading\n\n\n\nText",
+                "# Heading\n\n\n\nText\n",
+            ] {
+                let mut view = View::default();
+                let galley = view.layout(ui.ctx(), text, &font, Color32::WHITE, f32::INFINITY);
+                assert_eq!(galley.end().index.0, text.chars().count(), "{text:?}");
+            }
+        });
+        output.textures_delta.clear();
+    }
+
+    /// The last line keeps its line break in its layout and others don't, so
+    /// a line that stops or starts being the last can't reuse its layout.
+    #[test]
+    fn the_layout_follows_edits_at_the_end_of_the_text() {
+        let ctx = Context::default();
+        let font = FontId::monospace(13.0);
+        let mut output = ctx.run_ui(Default::default(), |ui| {
+            for steps in [
+                &["# Heading\n", "# Heading\n\n", "# Heading\n\nT"][..],
+                &["a\n\n", "a\n"],
+                &["a\n\n\n", "a\n\n", "a\n", "a"],
+                &["a", "a\n", "a\n\n", "a\nb\n\n"],
+                &["a\nb\n", "b\n"],
+            ] {
+                let mut view = View::default();
+                for text in steps {
+                    let galley = view.layout(ui.ctx(), text, &font, Color32::WHITE, f32::INFINITY);
+                    assert_eq!(galley.end().index.0, text.chars().count(), "{text:?}");
+                    let shown: String = galley
+                        .rows
+                        .iter()
+                        .map(|row| {
+                            let glyphs: String = row.row.glyphs.iter().map(|g| g.chr).collect();
+                            if row.ends_with_newline {
+                                glyphs + "\n"
+                            } else {
+                                glyphs
+                            }
+                        })
+                        .collect();
+                    assert_eq!(shown, **text);
+                }
+            }
+        });
+        output.textures_delta.clear();
+    }
+
+    /// Typing in the source doesn't move the preview beside it, not even for
+    /// a frame, which shows as the whole pane blinking.
+    #[test]
+    fn typing_leaves_the_preview_where_it_is() {
+        let contents = "# Heading\n\nSome text\n";
+        let mut h = Harness::with_file("preview_still", "a.md", contents);
+        h.tab.mode = Mode::Split;
+        h.frame(vec![]);
+        h.frame(vec![]);
+        let end = contents.trim_end().chars().count();
+        select(&mut h, end..end);
+        let mut heights = Vec::new();
+        for c in "abc".chars() {
+            let mut events = vec![Event::Text(c.to_string())];
+            for _ in 0..3 {
+                let input = RawInput {
+                    screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(900.0, 600.0))),
+                    events: std::mem::take(&mut events),
+                    ..Default::default()
+                };
+                let mut output = h.ctx.run_ui(input, |ui| h.tab.ui(ui, &mut h.shared));
+                output.textures_delta.clear();
+                heights.extend(
+                    output
+                        .shapes
+                        .iter()
+                        .find_map(|clipped| match &clipped.shape {
+                            Shape::Text(text) if text.galley.text() == "Heading" => {
+                                Some(text.pos.y)
+                            }
+                            _ => None,
+                        }),
+                );
+            }
+        }
+        assert_eq!(heights.len(), 9);
+        assert!(heights.iter().all(|y| *y == heights[0]), "{heights:?}");
+    }
+
+    /// As in the report: a line break at the end, then arrows past it. The
+    /// cursor stays in the text, so what's typed and deleted next is where
+    /// it shows.
+    #[test]
+    fn arrows_stop_at_the_end_of_a_document() {
+        let contents = "# Heading\n";
+        let mut h = Harness::with_file("arrows_end", "a.md", contents);
+        h.tab.mode = Mode::Source;
+        h.frame(vec![]);
+        let end = contents.chars().count();
+        select(&mut h, end..end);
+        keys(
+            &mut h,
+            &[Key::Enter, Key::ArrowDown, Key::ArrowRight, Key::ArrowRight],
+        );
+        h.type_text("xy");
+        assert_eq!(h.text(), "# Heading\n\nxy");
+        keys(&mut h, &[Key::Backspace, Key::Backspace]);
+        assert_eq!(h.text(), "# Heading\n\n");
+    }
+
+    #[test]
+    fn a_reload_arriving_after_an_edit_leaves_the_edit_alone() {
+        let mut h = Harness::new("late_reload", CODE);
+        let (send, receive) = mpsc::channel();
+        if let Doc::Ready(buffer) = &mut h.tab.doc {
+            buffer.reload = Some(receive);
+        }
+        h.select(0..0);
+        h.type_text("my ");
+        let edited = h.text().to_owned();
+        send.send(Ok(Loaded {
+            text: "from before\n".to_owned(),
+            line_ending: LineEnding::Lf,
+            bom: false,
+            read_only: None,
+            stamp: None,
+        }))
+        .unwrap();
+        h.frame(Vec::new());
+        assert_eq!(h.text(), edited);
+        assert!(h.tab.is_dirty());
+        assert!(h.buffer().disk == Disk::Changed);
     }
 
     #[test]
