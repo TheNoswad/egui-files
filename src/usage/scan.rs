@@ -89,8 +89,8 @@ impl Category {
             "mp4" | "mkv" | "webm" | "avi" | "mov" | "wmv" | "m4v" | "mpg" | "mpeg" | "ts"
             | "m2ts" | "flv" | "3gp" | "ogv" => Self::Video,
             "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" | "ico" | "tif" | "tiff"
-            | "heic" | "heif" | "avif" | "raw" | "cr2" | "nef" | "arw" | "dng" | "psd" | "xcf"
-            | "kra" | "exr" => Self::Image,
+            | "heic" | "heif" | "avif" | "raw" | "cr2" | "cr3" | "nef" | "nrw" | "arw" | "dng"
+            | "raf" | "orf" | "rw2" | "pef" | "srw" | "psd" | "xcf" | "kra" | "exr" => Self::Image,
             "mp3" | "flac" | "ogg" | "wav" | "opus" | "m4a" | "aac" | "wma" | "aiff" | "mid" => {
                 Self::Audio
             }

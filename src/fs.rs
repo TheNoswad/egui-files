@@ -99,6 +99,7 @@ pub fn icon_kind(path: &Path, is_dir: bool, is_symlink: bool) -> IconKind {
         | "json" | "yaml" | "yml" | "html" | "css" | "lua" | "ron" => IconKind::Code,
         "txt" | "md" | "log" | "ini" | "cfg" | "conf" => IconKind::Text,
         "doc" | "docx" | "odt" | "rtf" => IconKind::Document,
+        _ if crate::raw::is_raw(path) => IconKind::Image,
         _ if is_symlink => IconKind::Link,
         _ => IconKind::File,
     }

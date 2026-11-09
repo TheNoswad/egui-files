@@ -11,7 +11,7 @@ use std::{
 use chrono::{Local, NaiveDateTime, TimeZone};
 use exif::{Exif, In, Tag, Value};
 
-use crate::{images, video};
+use crate::{images, raw, video};
 
 #[derive(Clone, Debug, Default)]
 pub struct Media {
@@ -88,7 +88,9 @@ const SKIPPED_TAGS: &[Tag] = &[
 
 fn read(path: &Path) -> Media {
     let mut media = Media::default();
-    if images::is_image(path) {
+    if raw::is_raw(path) {
+        read_raw(path, &mut media);
+    } else if images::is_image(path) {
         match image::image_dimensions(path) {
             Ok((w, h)) => media.dimensions = Some([w, h]),
             Err(e) => media.error = Some(e.to_string()),
@@ -103,16 +105,35 @@ fn read(path: &Path) -> Media {
     media
 }
 
+/// A raw photo's size and details, reading only those parts of the file.
+fn read_raw(path: &Path, media: &mut Media) {
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(e) => {
+            media.error = Some(e.to_string());
+            return;
+        }
+    };
+    media.dimensions = raw::size(&mut file);
+    if let Some(exif) = raw::exif(&mut file).and_then(|t| exif::Reader::new().read_raw(t).ok()) {
+        fill_exif(&exif, media);
+    }
+}
+
 fn read_exif(path: &Path, media: &mut Media) {
     let Ok(file) = File::open(path) else { return };
     let Ok(exif) = exif::Reader::new().read_from_container(&mut BufReader::new(file)) else {
         return;
     };
-    media.camera = camera(&exif);
-    media.location = gps(&exif);
+    fill_exif(&exif, media);
+}
+
+fn fill_exif(exif: &Exif, media: &mut Media) {
+    media.camera = camera(exif);
+    media.location = gps(exif);
     for field in exif.fields() {
         if field.ifd_num == In::PRIMARY && !SKIPPED_TAGS.contains(&field.tag) {
-            let value = field.display_value().with_unit(&exif).to_string();
+            let value = field.display_value().with_unit(exif).to_string();
             media.exif_rest.push((
                 words(&field.tag.to_string()),
                 value.trim_matches('"').to_owned(),

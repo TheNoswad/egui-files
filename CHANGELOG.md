@@ -7,6 +7,7 @@ releases yet, so it's all unreleased.
 
 ### General
 
+- Camera raw photos (CR2, CR3, NEF, NRW, ARW, DNG, RAF, ORF, RW2, PEF, SRW; `raw.rs`): thumbnails and the preview show the JPEG the camera stored in the file, turned as it should be and labelled with its size, and thumbnails are kept in the shared cache. Properties has the camera details and the photo's real size. Only the parts of the file that are needed are read. Files with no JPEG in them, like some phones' DNGs, say so
 - KDE Connect phones (Linux): paired, reachable phones are listed with the drives and mounted on a click through KDE Connect's D-Bus API. The app reaches the mount as a server's folder (`sftp://kdeconnect-<id>/…`) through a local `sftp-server`, and the UI's thread never waits on it (`disk::sftp::set_local_servers`, `src/phones.rs`). A phone that stops answering is cut off and mounted again once back; tabs on it stay and pick up again. Ejected with fusermount: KDE Connect's `unmount` leaves a dead mount that blocks the next one
 - SFTP: `sftp://user@host:port/path` in tabs, jobs, preview, editor and properties, through `disk` (`disk/src/sftp/`), with ssh doing the connecting; servers from `~/.ssh/config` and `known_hosts` in Places, the path bar and "Connect to server". Tried against OpenSSH 9.7 in a container, in the app under Xvfb, also with 150 ms each way
     - Others' changes on a server: the folders on screen are listed again every 10 s while connected

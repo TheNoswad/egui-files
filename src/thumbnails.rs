@@ -155,7 +155,7 @@ pub fn generate_video(
         .to_rgba8();
     if let Some(mtime) = modified.and_then(mtime_secs) {
         // Best effort: it's only a cache.
-        let _ = save_to_cache(path, mtime, &image);
+        let _ = save_to_cache(path, mtime, &image, None);
     }
     Ok(Thumbnail {
         image,
@@ -229,10 +229,28 @@ pub fn keep_remote(path: &Path, modified: Option<SystemTime>, image: &image::Dyn
         return;
     };
     let small = image.thumbnail(side, side).to_rgba8();
-    let _ = save_to_cache(path, mtime, &small);
+    let _ = save_to_cache(path, mtime, &small, None);
 }
 
-fn save_to_cache(path: &Path, mtime: u64, image: &RgbaImage) -> Option<()> {
+/// Keeps a raw photo's thumbnail, already at its size: there's a JPEG to find
+/// and decode otherwise, for each of what can be a big folder of them.
+pub fn keep_raw(
+    path: &Path,
+    modified: Option<SystemTime>,
+    image: &image::DynamicImage,
+    original_size: [u32; 2],
+) {
+    if let Some(mtime) = modified.and_then(mtime_secs) {
+        let _ = save_to_cache(path, mtime, &image.to_rgba8(), Some(original_size));
+    }
+}
+
+fn save_to_cache(
+    path: &Path,
+    mtime: u64,
+    image: &RgbaImage,
+    original_size: Option<[u32; 2]>,
+) -> Option<()> {
     let longest = image.width().max(image.height());
     let (name, _) = SIZES.iter().find(|(_, side)| *side >= longest)?;
     let dir = cache_dir()?.join(name);
@@ -249,6 +267,14 @@ fn save_to_cache(path: &Path, mtime: u64, image: &RgbaImage) -> Option<()> {
     encoder
         .add_text_chunk("Thumb::MTime".into(), mtime.to_string())
         .ok()?;
+    if let Some([width, height]) = original_size {
+        encoder
+            .add_text_chunk("Thumb::Image::Width".into(), width.to_string())
+            .ok()?;
+        encoder
+            .add_text_chunk("Thumb::Image::Height".into(), height.to_string())
+            .ok()?;
+    }
     encoder
         .add_text_chunk("Software".into(), "egui-files".into())
         .ok()?;

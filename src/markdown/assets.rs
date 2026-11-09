@@ -30,7 +30,7 @@ fn encode(text: &str) -> String {
 
 /// Whether the file is a picture a document can show.
 pub fn is_picture(path: &Path) -> bool {
-    crate::images::is_image(path)
+    (crate::images::is_image(path) && !crate::raw::is_raw(path))
         || path
             .extension()
             .and_then(|e| e.to_str())

@@ -500,6 +500,9 @@ fn image(ui: &mut Ui, entry: &Entry, images: &mut ImageCache, max_side: u32) -> 
                 .show(ui, |ui| {
                     ui.image((image.texture.id(), texture_size * scale))
                 });
+            if let Some([w, h]) = image.embedded_size {
+                ui.weak(format!("Camera's embedded JPEG, {w} × {h} px"));
+            }
             Some(image.original_size)
         }
         Lookup::Pending => {

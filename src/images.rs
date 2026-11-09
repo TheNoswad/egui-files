@@ -59,9 +59,11 @@ pub fn is_supported(path: &Path) -> bool {
 }
 
 pub fn is_image(path: &Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
+    crate::raw::is_raw(path)
+        || path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -75,6 +77,8 @@ pub struct Image {
     pub texture: TextureHandle,
     /// Size of the original image, before downscaling.
     pub original_size: [u32; 2],
+    /// For a raw photo, the size of the JPEG in it that's shown.
+    pub embedded_size: Option<[u32; 2]>,
 }
 
 impl Image {
@@ -107,6 +111,7 @@ pub enum Lookup<'a> {
 struct Decoded {
     image: ColorImage,
     original_size: [u32; 2],
+    embedded_size: Option<[u32; 2]>,
     provisional: bool,
 }
 
@@ -257,6 +262,7 @@ impl ImageCache {
                         image: Image {
                             texture,
                             original_size: decoded.original_size,
+                            embedded_size: decoded.embedded_size,
                         },
                         last_used: self.frame,
                         provisional: decoded.provisional,
@@ -559,11 +565,15 @@ fn decode(key: &Key, may_be_provisional: bool, queue: &Queue) -> Result<Decoded,
         return Ok(Decoded {
             image: ColorImage::from_rgba_unmultiplied(size, &image),
             original_size,
+            embedded_size: None,
             provisional: false,
         });
     }
 
     let mut file = disk::File::open(path).map_err(|e| e.to_string())?;
+    if crate::raw::is_raw(path) {
+        return decode_raw(&mut file, path, modified, max_side, queue);
+    }
     if !crate::remote::is_remote(path) {
         let _turn = queue.turn_to_decode();
         return decode_file(std::io::BufReader::new(file), path, modified, max_side);
@@ -636,7 +646,48 @@ fn from_embedded_thumbnail(head: &[u8], max_side: u32) -> Option<Decoded> {
     Some(Decoded {
         image: ColorImage::from_rgba_unmultiplied(size, &rgba),
         original_size,
+        embedded_size: None,
         provisional,
+    })
+}
+
+/// Shows the JPEG the camera stored in a raw photo, of the size that's wanted.
+fn decode_raw(
+    file: &mut disk::File,
+    path: &Path,
+    modified: Option<SystemTime>,
+    max_side: u32,
+    queue: &Queue,
+) -> Result<Decoded, String> {
+    let preview = crate::raw::preview(file, max_side)
+        .ok_or_else(|| "This raw file has no picture stored in it".to_owned())?;
+    let _turn = queue.turn_to_decode();
+    let mut image = image::load_from_memory_with_format(&preview.jpeg, image::ImageFormat::Jpeg)
+        .map_err(|e| e.to_string())?;
+    if let Some(orientation) = image::metadata::Orientation::from_exif(preview.orientation) {
+        image.apply_orientation(orientation);
+    }
+    let turned = |[w, h]: [u32; 2]| {
+        if crate::raw::is_turned(preview.orientation) {
+            [h, w]
+        } else {
+            [w, h]
+        }
+    };
+    let original_size = turned(preview.sensor);
+    if image.width() > max_side || image.height() > max_side {
+        image = image.thumbnail(max_side, max_side);
+    }
+    if max_side <= MAX_CACHED_SIDE {
+        thumbnails::keep_raw(path, modified, &image, original_size);
+    }
+    let rgba = image.to_rgba8();
+    let size = [rgba.width() as usize, rgba.height() as usize];
+    Ok(Decoded {
+        image: ColorImage::from_rgba_unmultiplied(size, &rgba),
+        original_size,
+        embedded_size: Some(turned(preview.size)),
+        provisional: false,
     })
 }
 
@@ -666,6 +717,7 @@ fn decode_file(
     Ok(Decoded {
         image: ColorImage::from_rgba_unmultiplied(size, &rgba),
         original_size,
+        embedded_size: None,
         provisional: false,
     })
 }
@@ -837,6 +889,7 @@ mod tests {
             let image = Image {
                 texture,
                 original_size: [side as u32; 2],
+                embedded_size: None,
             };
             let last_used = cache.frame;
             cache.slots.insert(

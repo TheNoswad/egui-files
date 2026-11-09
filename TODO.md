@@ -5,6 +5,7 @@ upstream is watched by `scripts/upstream.sh` (see `scripts/upstream.watch`).
 
 ## General
 
+- [ ] Raw photos with no JPEG in them (a Pixel 2's DNG, for one) show only a message: drawing them means developing the sensor's data, and the Rust decoders for that are LGPL (`raw.rs`)
 - [ ] Renaming the app: before it's announced, as installs on Android can't follow a new id (`org.noswad.egui_files`, android/Cargo.toml) and become a separate app. Also the window's app id and .desktop file (`packaging/linux/`), the icon's file names, download names (`scripts/package.sh`), the repository and its Pages address. Then the first official release, with the announcement: `scripts/release.sh 0.1.0` and push the tag (nightlies only until then), and the README's Downloads section points at releases again
 - [ ] Open a folder given on the command line, so the .desktop file can say it opens folders (`MimeType=inode/directory`, `Exec=egui-files %U`) and the app can be the default file manager
 - [ ] Try CI's downloads on real machines: so far only the Linux x86-64 AppImage has been. Not yet Windows (x86-64, arm64), Linux arm64 or the Android APKs; the README's Downloads section says so, and should change with this
