@@ -276,6 +276,9 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The nightly's notes list the commits since the last one.
+          fetch-depth: 0
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: dist
@@ -293,12 +296,10 @@ jobs:
             gh release create "$GITHUB_REF_NAME" "$@" --verify-tag \
               --title "egui-files $version" --notes-file notes.md
           else
-            {
-              echo "Built from main at $GITHUB_SHA, replaced on every push. For"
-              echo "trying what's new; it may break. Releases are steadier."
-              echo
-              scripts/release-notes.sh Unreleased
-            } > notes.md
+            # Asked before it's deleted; there's none the first time.
+            previous=$(gh release view nightly --json targetCommitish \
+              --jq .targetCommitish || true)
+            scripts/nightly-notes.sh "$previous" > notes.md
             gh release delete nightly --cleanup-tag --yes || true
             gh release create nightly "$@" --prerelease --target "$GITHUB_SHA" \
               --title "Nightly" --notes-file notes.md
